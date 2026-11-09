@@ -1,20 +1,26 @@
-import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { lazy, Suspense, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import {
-  Archive, BookOpen, Check, Clock3, Code2, Eye, FilePlus2, Folder, Heart, Import, Lightbulb,
-  Menu, MoreHorizontal, PanelLeft, Plus, Search, Settings2, Sparkles, Star, Tag, Trash2, X, FileText,
+  Archive, BookOpen, Check, Clock3, Eye, FilePlus2, FileText, Folder, Heart, Import, Lightbulb,
+  Menu, MoreHorizontal, MoreVertical, PanelLeft, Pencil, Plus, Search, Settings2, Sparkles, Star, Tag, Trash2, X,
 } from 'lucide-react'
-import { downloadArchive, parseArchive } from './archive'
+import { exportArchiveToFolder, parseArchive } from './archive'
 import { starterAssets, starterNotes } from './content'
-import { getAssets, getFolders, getNotes, hasInitialized, markInitialized, removeAssetsForNote, removeNote, saveAsset, saveFolders, saveNote, storageLocationLabel, usesNativeFiles } from './storage'
+import { getAssets, getFolders, getNotes, hasInitialized, markInitialized, removeAssetsForNote, removeFolderFromDisk, removeNote, saveAsset, saveFolders, saveNote, storageLocationLabel, usesNativeFiles } from './storage'
 import type { Note, NoteAsset } from './types'
 import './App.css'
 
 type Filter = 'all' | 'favorites' | string
 type NoteDisplayMode = 'full' | 'names-tags' | 'names'
+type EntryTarget = { kind: 'folder'; path: string } | { kind: 'note'; id: string }
+type DeleteTarget = EntryTarget & { label: string; noteCount: number }
 
 function folderParents(path: string): string[] {
   const parts = path.split('/').map(part => part.trim()).filter(Boolean)
   return parts.map((_, index) => parts.slice(0, index + 1).join('/'))
+}
+
+function copyNote(note: Note): Note {
+  return { ...note, tags: [...note.tags] }
 }
 
 
@@ -29,6 +35,7 @@ const templates: Template[] = [
 ]
 
 const dateLabel = (value: number) => new Intl.DateTimeFormat('pl-PL', { day: 'numeric', month: 'short' }).format(value)
+const currentTimestamp = () => Date.now()
 const excerpt = (content: string) => content.replace(/^#+\s*/gm, '').replace(/[>*_`!-]/g, '').replace(/\(\.\/assets\/[^)]+\)/g, '').replace(/\s+/g, ' ').trim().slice(0, 110)
 const makeNote = (folder: string, template?: Template): Note => {
   const now = Date.now()
@@ -46,6 +53,11 @@ const makeNote = (folder: string, template?: Template): Note => {
 
 function App() {
   const [notes, setNotes] = useState<Note[]>([])
+  const noteHistory = useRef<Note[]>([])
+  const noteRedoHistory = useRef<Note[]>([])
+  const historyNoteId = useRef('')
+  const undoNoteAction = useRef<() => void>(() => {})
+  const redoNoteAction = useRef<() => void>(() => {})
   const [assets, setAssets] = useState<NoteAsset[]>([])
   const [selectedId, setSelectedId] = useState('')
   const [activeFilter, setActiveFilter] = useState<Filter>('all')
@@ -63,6 +75,10 @@ function App() {
   const [showFolderDialog, setShowFolderDialog] = useState(false)
   const [folderDraft, setFolderDraft] = useState('')
   const [toast, setToast] = useState('')
+  const [openActionMenu, setOpenActionMenu] = useState('')
+  const [renameTarget, setRenameTarget] = useState<EntryTarget | null>(null)
+  const [renameDraft, setRenameDraft] = useState('')
+  const [deleteTarget, setDeleteTarget] = useState<DeleteTarget | null>(null)
   const [noteDisplayMode, setNoteDisplayMode] = useState<NoteDisplayMode>(() => {
     const stored = localStorage.getItem('no-tie-note-display-mode')
     return stored === 'names' || stored === 'names-tags' ? stored : 'full'
@@ -89,7 +105,10 @@ function App() {
         if (!cancelled) {
           storedFolders = [...new Set([...storedFolders, ...storedNotes.flatMap(note => folderParents(note.folder))])]
           setFolderRegistry(storedFolders)
-          setNotes(storedNotes.sort((a, b) => b.updatedAt - a.updatedAt))
+          storedNotes.sort((a, b) => b.updatedAt - a.updatedAt)
+          historyNoteId.current = storedNotes[0]?.id ?? ''
+          noteHistory.current = storedNotes[0] ? [copyNote(storedNotes[0])] : []
+          setNotes(storedNotes)
           setAssets(storedAssets)
           setSelectedId(storedNotes[0]?.id ?? '')
           setReady(true)
@@ -118,6 +137,15 @@ function App() {
     if (ready) void saveFolders(folderKey ? folderKey.split('\u0000') : []).catch(() => setSaved(false))
   }, [folderKey, ready])
   const selectedNote = notes.find(note => note.id === selectedId)
+  const notesRef = useRef<Note[]>([])
+  useLayoutEffect(() => { notesRef.current = notes }, [notes])
+  useLayoutEffect(() => {
+    const note = notesRef.current.find(item => item.id === selectedId)
+    if (!note) return
+    historyNoteId.current = note.id
+    noteHistory.current = [copyNote(note)]
+    noteRedoHistory.current = []
+  }, [selectedId])
   const visibleNotes = useMemo(() => {
     const needle = query.trim().toLocaleLowerCase('pl')
     return notes.filter(note => {
@@ -130,8 +158,50 @@ function App() {
   const currentAssets = assets.filter(asset => asset.noteId === selectedId)
 
   function patchNote(id: string, patch: Partial<Note>) {
+    const existing = notes.find(note => note.id === id)
+    if (existing && Object.entries(patch).every(([key, value]) => JSON.stringify(existing[key as keyof Note]) === JSON.stringify(value))) return
     setSaved(false)
-    setNotes(current => current.map(note => note.id === id ? { ...note, ...patch, updatedAt: Date.now() } : note))
+    const updatedAt = currentTimestamp()
+    setNotes(current => current.map(note => {
+      if (note.id !== id) return note
+      const updated = { ...note, ...patch, updatedAt }
+      if (id === selectedId) recordNoteHistory(updated)
+      return updated
+    }))
+  }
+
+  function recordNoteHistory(note: Note) {
+    const snapshot = copyNote(note)
+    if (historyNoteId.current !== note.id) {
+      historyNoteId.current = note.id
+      noteHistory.current = [snapshot]
+      noteRedoHistory.current = []
+      return
+    }
+    const latest = noteHistory.current.at(-1)
+    if (latest && JSON.stringify(latest) === JSON.stringify(snapshot)) return
+    noteHistory.current.push(snapshot)
+    if (noteHistory.current.length > 21) noteHistory.current.shift()
+    noteRedoHistory.current = []
+  }
+
+  function undoNoteChange() {
+    if (noteHistory.current.length < 2 || historyNoteId.current !== selectedId) return
+    noteRedoHistory.current.push(noteHistory.current.pop()!)
+    const previous = noteHistory.current.at(-1)
+    if (!previous) return
+    setNotes(current => current.map(note => note.id === previous.id ? copyNote(previous) : note))
+    setSaved(false)
+    setEditorRevision(value => value + 1)
+  }
+
+  function redoNoteChange() {
+    if (!noteRedoHistory.current.length || historyNoteId.current !== selectedId) return
+    const next = noteRedoHistory.current.pop()!
+    noteHistory.current.push(next)
+    setNotes(current => current.map(note => note.id === next.id ? copyNote(next) : note))
+    setSaved(false)
+    setEditorRevision(value => value + 1)
   }
 
   const createNote = useCallback((template?: Template, folderOverride?: string) => {
@@ -186,15 +256,164 @@ function App() {
     const nextFolders = [...new Set(folders.map(relocate).flatMap(folderParents))]
     setFolderRegistry(nextFolders)
     setActiveFilter(current => current === source || current.startsWith(`${source}/`) ? relocate(current) : current)
-    setNotes(current => current.map(note => note.folder === source || note.folder.startsWith(`${source}/`) ? { ...note, folder: relocate(note.folder), updatedAt: Date.now() } : note))
+    const updatedAt = currentTimestamp()
+    setNotes(current => current.map(note => {
+      if (note.folder !== source && !note.folder.startsWith(`${source}/`)) return note
+      const updated = { ...note, folder: relocate(note.folder), updatedAt }
+      if (note.id === selectedId) {
+        historyNoteId.current = note.id
+        noteHistory.current = [copyNote(updated)]
+        noteRedoHistory.current = []
+      }
+      return updated
+    }))
+  }
+
+  function startEntryDrag(event: React.DragEvent, target: EntryTarget) {
+    const payload = target.kind === 'folder' ? `folder:${target.path}` : `note:${target.id}`
+    event.dataTransfer.effectAllowed = 'move'
+    event.dataTransfer.setData('application/x-no-tie-item', payload)
+    event.dataTransfer.setData('text/plain', payload)
+  }
+
+  function allowFolderDrop(event: React.DragEvent) {
+    event.preventDefault()
+    event.dataTransfer.dropEffect = 'move'
+    event.currentTarget.classList.add('drop-target-active')
+  }
+
+  function leaveFolderDrop(event: React.DragEvent) {
+    if (event.currentTarget.contains(event.relatedTarget as Node | null)) return
+    event.currentTarget.classList.remove('drop-target-active')
   }
 
   function handleFolderDrop(event: React.DragEvent, targetFolder: string) {
     event.preventDefault()
-    const noteId = event.dataTransfer.getData('application/x-no-tie-note')
-    const sourceFolder = event.dataTransfer.getData('application/x-no-tie-folder')
-    if (noteId) moveNoteToFolder(noteId, targetFolder)
-    else if (sourceFolder) moveFolder(sourceFolder, targetFolder)
+    event.currentTarget.classList.remove('drop-target-active')
+    const payload = event.dataTransfer.getData('application/x-no-tie-item') || event.dataTransfer.getData('text/plain')
+    if (payload.startsWith('note:')) moveNoteToFolder(payload.slice('note:'.length), targetFolder)
+    else if (payload.startsWith('folder:')) moveFolder(payload.slice('folder:'.length), targetFolder)
+    setOpenActionMenu('')
+  }
+
+  function menuKey(target: EntryTarget) {
+    return target.kind === 'folder' ? `folder:${target.path}` : `note:${target.id}`
+  }
+
+  function beginRename(target: EntryTarget) {
+    const value = target.kind === 'folder'
+      ? target.path.split('/').at(-1) ?? target.path
+      : notes.find(note => note.id === target.id)?.title ?? ''
+    setRenameTarget(target)
+    setRenameDraft(value)
+    setOpenActionMenu('')
+  }
+
+  function askDelete(target: EntryTarget) {
+    const note = target.kind === 'note' ? notes.find(item => item.id === target.id) : undefined
+    const label = target.kind === 'folder' ? target.path.split('/').at(-1) ?? target.path : note?.title ?? 'notatkę'
+    const noteCount = target.kind === 'folder'
+      ? notes.filter(item => item.folder === target.path || item.folder.startsWith(`${target.path}/`)).length
+      : 1
+    setDeleteTarget({ ...target, label, noteCount } as DeleteTarget)
+    setOpenActionMenu('')
+  }
+
+  function commitRename() {
+    const value = renameDraft.trim()
+    if (!renameTarget || !value) return
+    if (renameTarget.kind === 'note') {
+      patchNote(renameTarget.id, { title: value })
+    } else {
+      if (value.includes('/') || value.includes('\\')) {
+        setToast('Nazwa folderu nie może zawierać ukośnika')
+        window.setTimeout(() => setToast(''), 2800)
+        return
+      }
+      const parts = renameTarget.path.split('/')
+      parts[parts.length - 1] = value
+      const destination = parts.join('/')
+      if (destination !== renameTarget.path && folders.includes(destination)) {
+        setToast('Folder o tej nazwie już istnieje')
+        window.setTimeout(() => setToast(''), 2800)
+        return
+      }
+      const source = renameTarget.path
+      const relocate = (folder: string) => folder === source ? destination : folder.startsWith(`${source}/`) ? `${destination}${folder.slice(source.length)}` : folder
+      setFolderRegistry([...new Set(folders.map(relocate).flatMap(folderParents))])
+      setActiveFilter(current => current === source || current.startsWith(`${source}/`) ? relocate(current) : current)
+      const updatedAt = currentTimestamp()
+      setNotes(current => current.map(note => {
+        if (note.folder !== source && !note.folder.startsWith(`${source}/`)) return note
+        const updated = { ...note, folder: relocate(note.folder), updatedAt }
+        if (note.id === selectedId) {
+          historyNoteId.current = note.id
+          noteHistory.current = [copyNote(updated)]
+          noteRedoHistory.current = []
+        }
+        return updated
+      }))
+    }
+    setRenameTarget(null)
+    setRenameDraft('')
+  }
+
+  async function removeNoteFromLibrary(id: string) {
+    await removeAssetsForNote(id)
+    await removeNote(id)
+    setAssets(current => current.filter(asset => asset.noteId !== id))
+    setNotes(current => current.filter(note => note.id !== id))
+    if (selectedId === id) setSelectedId(notes.find(note => note.id !== id)?.id ?? '')
+    setSaved(true)
+  }
+
+  async function confirmDelete() {
+    const target = deleteTarget
+    if (!target) return
+    try {
+      if (target.kind === 'note') {
+        await removeNoteFromLibrary(target.id)
+      } else {
+        const removedNotes = notes.filter(note => note.folder === target.path || note.folder.startsWith(`${target.path}/`))
+        await Promise.all(removedNotes.map(async note => {
+          await removeAssetsForNote(note.id)
+          await removeNote(note.id)
+        }))
+        const removedIds = new Set(removedNotes.map(note => note.id))
+        setAssets(current => current.filter(asset => !removedIds.has(asset.noteId)))
+        setNotes(current => current.filter(note => !removedIds.has(note.id)))
+        if (selectedId && removedIds.has(selectedId)) setSelectedId(notes.find(note => !removedIds.has(note.id))?.id ?? '')
+        const nextFolders = folders.filter(folder => folder !== target.path && !folder.startsWith(`${target.path}/`))
+        setFolderRegistry(nextFolders)
+        await saveFolders(nextFolders)
+        await removeFolderFromDisk(target.path)
+        if (activeFilter === target.path || activeFilter.startsWith(`${target.path}/`)) setActiveFilter('all')
+      }
+      setDeleteTarget(null)
+      setToast(`Usunięto „${target.label}”`)
+    } catch (error) {
+      setToast(error instanceof Error ? error.message : 'Nie udało się usunąć elementu')
+    }
+    window.setTimeout(() => setToast(''), 2800)
+  }
+
+  function renderEntryMenu(target: EntryTarget): React.ReactNode {
+    const key = menuKey(target)
+    return <div className="entry-actions" onClick={event => event.stopPropagation()}>
+      <button className="entry-more-button" title="Więcej opcji" aria-label="Więcej opcji" aria-expanded={openActionMenu === key} onClick={() => setOpenActionMenu(current => current === key ? '' : key)}><MoreVertical size={16} /></button>
+      {openActionMenu === key && <div className="sidebar-context-menu" role="menu">
+        <button role="menuitem" onClick={() => beginRename(target)}><Pencil size={14} />Zmień nazwę</button>
+        <button className="danger-menu-item" role="menuitem" onClick={() => askDelete(target)}><Trash2 size={14} />Usuń</button>
+      </div>}
+    </div>
+  }
+
+  function renderNoteFile(note: Note, depth = 0): React.ReactNode {
+    const target: EntryTarget = { kind: 'note', id: note.id }
+    return <div key={note.id} className={`folder-file-row ${selectedId === note.id ? 'active' : ''}`} style={{ paddingLeft: `${27 + depth * 14}px` }}>
+      <button className="folder-file-item" draggable onDragStart={event => startEntryDrag(event, target)} onClick={() => { setActiveFilter(note.folder ? note.folder : 'root'); setSelectedId(note.id); setMobileDrawer('none') }} title="Przeciągnij notatkę do innego folderu"><FileText size={13} /><span>{note.title || 'Bez tytułu'}</span></button>
+      {renderEntryMenu(target)}
+    </div>
   }
 
   function renderFolderTree(parent: string, depth = 0): React.ReactNode {
@@ -203,11 +422,13 @@ function App() {
       const label = folder.split('/').at(-1) ?? folder
       const directNotes = notes.filter(note => note.folder === folder).sort((a, b) => a.title.localeCompare(b.title, 'pl'))
       const count = notes.filter(note => note.folder === folder || note.folder.startsWith(`${folder}/`)).length
+      const target: EntryTarget = { kind: 'folder', path: folder }
       return <div key={folder} className="folder-tree-node">
-        <div className={`folder-drop-row ${activeFilter === folder ? 'active' : ''}`} style={{ paddingLeft: `${10 + depth * 14}px` }} onDragOver={event => event.preventDefault()} onDrop={event => handleFolderDrop(event, folder)}>
-          <button className={`nav-item folder-item ${activeFilter === folder ? 'active' : ''}`} draggable onDragStart={event => event.dataTransfer.setData('application/x-no-tie-folder', folder)} onClick={() => { setActiveFilter(folder); setMobileDrawer('none') }} title={`Przeciągnij folder „${label}”, aby go przenieść`}><Folder size={16} /><span>{label}</span><span className="nav-count">{count}</span></button>
+        <div className={`folder-drop-row ${activeFilter === folder ? 'active' : ''}`} style={{ paddingLeft: `${10 + depth * 14}px` }} data-drop-folder={folder} onDragOver={allowFolderDrop} onDragLeave={leaveFolderDrop} onDrop={event => handleFolderDrop(event, folder)}>
+          <button className={`nav-item folder-item ${activeFilter === folder ? 'active' : ''}`} draggable onDragStart={event => startEntryDrag(event, target)} onClick={() => { setActiveFilter(folder); setMobileDrawer('none') }} title={`Przeciągnij folder „${label}”, aby go przenieść`}><Folder size={16} /><span>{label}</span><span className="nav-count">{count}</span></button>
+          {renderEntryMenu(target)}
         </div>
-        {directNotes.map(note => <button key={note.id} className={`folder-file-item ${selectedId === note.id ? 'active' : ''}`} style={{ paddingLeft: `${27 + depth * 14}px` }} draggable onDragStart={event => event.dataTransfer.setData('application/x-no-tie-note', note.id)} onClick={() => { setActiveFilter(folder); setSelectedId(note.id); setMobileDrawer('none') }} title="Przeciągnij notatkę do innego folderu"><FileText size={13} /><span>{note.title || 'Bez tytułu'}</span></button>)}
+        {directNotes.map(note => renderNoteFile(note, depth))}
         {renderFolderTree(folder, depth + 1)}
       </div>
     })
@@ -218,10 +439,11 @@ function App() {
     localStorage.setItem('no-tie-note-display-mode', mode)
   }
 
-  function exportNotesArchive() {
+  async function exportNotesArchive() {
     try {
-      downloadArchive(notes, assets)
-      setToast('Eksport paczki notatek został rozpoczęty')
+      const savedPath = await exportArchiveToFolder(notes, assets)
+      if (!savedPath) return
+      setToast(`Paczka została zapisana: ${savedPath}`)
     } catch (error) {
       setToast(error instanceof Error ? error.message : 'Nie udało się przygotować paczki')
     }
@@ -244,6 +466,40 @@ function App() {
     window.addEventListener('keydown', onKeyDown)
     return () => window.removeEventListener('keydown', onKeyDown)
   }, [createNote])
+
+  useEffect(() => {
+    undoNoteAction.current = undoNoteChange
+    redoNoteAction.current = redoNoteChange
+  })
+
+  useEffect(() => {
+    const onHistoryKeyDown = (event: KeyboardEvent) => {
+      const target = event.target
+      if (!(target instanceof Element) || target.closest('[role="dialog"]') || !target.closest('.note-editor')) return
+      if (!(event.metaKey || event.ctrlKey)) return
+      const key = event.key.toLowerCase()
+      if (key === 'z' && !event.shiftKey && noteHistory.current.length > 1) {
+        event.preventDefault()
+        event.stopPropagation()
+        undoNoteAction.current()
+      } else if ((key === 'y' || (key === 'z' && event.shiftKey)) && noteRedoHistory.current.length > 0) {
+        event.preventDefault()
+        event.stopPropagation()
+        redoNoteAction.current()
+      }
+    }
+    window.addEventListener('keydown', onHistoryKeyDown, true)
+    return () => window.removeEventListener('keydown', onHistoryKeyDown, true)
+  }, [])
+
+  useEffect(() => {
+    if (!openActionMenu) return
+    const onPointerDown = (event: PointerEvent) => {
+      if (!(event.target instanceof Element) || !event.target.closest('.entry-actions')) setOpenActionMenu('')
+    }
+    window.addEventListener('pointerdown', onPointerDown)
+    return () => window.removeEventListener('pointerdown', onPointerDown)
+  }, [openActionMenu])
 
   async function handleImport(event: React.ChangeEvent<HTMLInputElement>) {
     const file = event.target.files?.[0]
@@ -274,14 +530,7 @@ function App() {
   }
 
   async function deleteSelected() {
-    if (!selectedNote || !window.confirm(`Usunąć notatkę „${selectedNote.title}” z tego urządzenia?`)) return
-    await removeNote(selectedNote.id)
-    await removeAssetsForNote(selectedNote.id)
-    setSaved(true)
-    setAssets(current => current.filter(asset => asset.noteId !== selectedNote.id))
-    setNotes(current => current.filter(note => note.id !== selectedNote.id))
-    const next = notes.find(note => note.id !== selectedNote.id)
-    setSelectedId(next?.id ?? '')
+    if (selectedNote) askDelete({ kind: 'note', id: selectedNote.id })
   }
 
   async function saveDrawing(svg: string) {
@@ -329,10 +578,10 @@ function App() {
         </div>
         <div className="sidebar-section folders-section">
           <div className="section-heading"><span className="section-label">FOLDERY</span><button className="tiny-icon" title="Dodaj folder" aria-label="Dodaj folder" onClick={() => { setFolderDraft(''); setShowFolderDialog(true) }}><Plus size={15} /></button></div>
-          <div className={`folder-drop-row root-folder-drop ${activeFilter === 'root' ? 'active' : ''}`} onDragOver={event => event.preventDefault()} onDrop={event => handleFolderDrop(event, '')}>
+          <div className={`folder-drop-row root-folder-drop ${activeFilter === 'root' ? 'active' : ''}`} data-drop-folder="" onDragOver={allowFolderDrop} onDragLeave={leaveFolderDrop} onDrop={event => handleFolderDrop(event, '')}>
             <button className={`nav-item folder-item ${activeFilter === 'root' ? 'active' : ''}`} onClick={() => { setActiveFilter('root'); setMobileDrawer('none') }}><Folder size={16} /><span>Bez folderu</span><span className="nav-count">{notes.filter(note => !note.folder).length}</span></button>
           </div>
-          {notes.filter(note => !note.folder).map(note => <button key={note.id} className={`folder-file-item ${selectedId === note.id ? 'active' : ''}`} draggable onDragStart={event => event.dataTransfer.setData('application/x-no-tie-note', note.id)} onClick={() => { setActiveFilter('root'); setSelectedId(note.id); setMobileDrawer('none') }}><FileText size={13} /><span>{note.title || 'Bez tytułu'}</span></button>)}
+          {notes.filter(note => !note.folder).map(note => renderNoteFile(note))}
           {renderFolderTree('')}
           {!folders.length && !notes.some(note => !note.folder) && <p className="empty-hint">Utwórz folder lub przeciągnij tu notatkę.</p>}
         </div>
@@ -348,7 +597,7 @@ function App() {
         <div className="list-toolbar"><span>{visibleNotes.length} NOTATKI</span><label className="list-view-select"><span>Widok</span><select value={noteDisplayMode} onChange={event => setDisplayMode(event.target.value as NoteDisplayMode)} aria-label="Sposób wyświetlania notatek"><option value="full">Treść i tagi</option><option value="names-tags">Nazwy i tagi</option><option value="names">Same nazwy</option></select></label></div>
         <div className="note-list">
           {visibleNotes.map(note => (
-            <button key={note.id} className={`note-card view-${noteDisplayMode} ${selectedId === note.id ? 'selected' : ''}`} draggable onDragStart={event => event.dataTransfer.setData('application/x-no-tie-note', note.id)} onClick={() => { setSelectedId(note.id); setMobileDrawer('none') }}>
+            <button key={note.id} className={`note-card view-${noteDisplayMode} ${selectedId === note.id ? 'selected' : ''}`} draggable onDragStart={event => startEntryDrag(event, { kind: 'note', id: note.id })} onClick={() => { setSelectedId(note.id); setMobileDrawer('none') }}>
               {noteDisplayMode === 'full' && <div className="note-card-top"><span className="note-date">{dateLabel(note.updatedAt)}</span>{note.favorite && <Star size={14} className="favorite-mini" fill="currentColor" />}</div>}
               <strong>{note.title || 'Bez tytułu'}</strong>
               {noteDisplayMode === 'full' && <p>{excerpt(note.content) || 'Pusta notatka'}</p>}
@@ -379,7 +628,7 @@ function App() {
               <input className="note-title-input" value={selectedNote.title} onChange={event => patchNote(selectedNote.id, { title: event.target.value })} placeholder="Tytuł notatki" aria-label="Tytuł notatki" />
               <div className="tags-row"><Tag size={15} /><div className="tag-list">{selectedNote.tags.map(tag => <button className="editable-tag" key={tag} onClick={() => patchNote(selectedNote.id, { tags: selectedNote.tags.filter(item => item !== tag) })} title="Usuń tag">{tag}<X size={11} /></button>)}<input className="tag-input" value={tagInput} onChange={event => setTagInput(event.target.value)} onKeyDown={event => { if (event.key === 'Enter') { event.preventDefault(); addTag() } }} placeholder={selectedNote.tags.length ? 'Dodaj tag…' : 'Dodaj tag'} aria-label="Dodaj tag" />{tagInput && <button className="tag-add-button" onClick={addTag}>Dodaj</button>}</div></div>
               <div className="editor-tools-row">
-                <div className="editor-tools-left"><div className="view-mode-toggle" role="group" aria-label="Widok notatki"><button className={`view-mode-button ${editorMode === 'rendered' ? 'active' : ''}`} aria-pressed={editorMode === 'rendered'} onClick={() => setEditorMode('rendered')}><Eye size={14} />Wizualny</button><button className={`view-mode-button ${editorMode === 'source' ? 'active' : ''}`} aria-pressed={editorMode === 'source'} onClick={() => setEditorMode('source')}><Code2 size={14} />Surowy Markdown</button></div><span className="toolbar-separator" /><button className="inline-tool" onClick={() => { setEditingAsset(undefined); setShowDrawing(true) }}><Sparkles size={15} />Dodaj schemat</button>{currentAssets.map(asset => <button className="inline-tool asset-tool" key={asset.id} onClick={() => { setEditingAsset(asset); setShowDrawing(true) }}><Lightbulb size={14} />{asset.fileName}</button>)}</div>
+                <div className="editor-tools-left"><div className="view-mode-toggle" role="group" aria-label="Widok notatki"><button className={`view-mode-button ${editorMode === 'rendered' ? 'active' : ''}`} title="Widok wizualny" aria-label="Widok wizualny" aria-pressed={editorMode === 'rendered'} onClick={() => setEditorMode('rendered')}><Eye size={16} /></button><button className={`view-mode-button ${editorMode === 'source' ? 'active' : ''}`} title="Surowy Markdown" aria-label="Surowy Markdown" aria-pressed={editorMode === 'source'} onClick={() => setEditorMode('source')}><FileText size={16} /></button></div><span className="toolbar-separator" /><button className="inline-tool" onClick={() => { setEditingAsset(undefined); setShowDrawing(true) }}><Sparkles size={15} />Dodaj schemat</button>{currentAssets.map(asset => <button className="inline-tool asset-tool" key={asset.id} onClick={() => { setEditingAsset(asset); setShowDrawing(true) }}><Lightbulb size={14} />{asset.fileName}</button>)}</div>
                 <select className="template-select" defaultValue="" aria-label="Wstaw szablon" onChange={event => { const template = templates.find(item => item.id === event.target.value); if (template) { patchNote(selectedNote.id, { title: template.title, content: template.content, tags: [...new Set([...selectedNote.tags, ...template.tags])] }); setEditorRevision(value => value + 1) } event.target.value = '' }}><option value="" disabled>Szablon</option>{templates.map(template => <option key={template.id} value={template.id}>{template.title}</option>)}</select>
               </div>
               {editorMode === 'source' ? <textarea className="markdown-source-editor" aria-label="Surowy tekst Markdown" spellCheck={false} value={selectedNote.content} onChange={event => patchNote(selectedNote.id, { content: event.target.value })} /> : <Suspense fallback={<div className="editor-loading">Otwieram edytor…</div>}><MarkdownEditor key={`${selectedNote.id}-${editorRevision}`} noteId={selectedNote.id} markdown={selectedNote.content} assets={currentAssets} revision={editorRevision} onChange={content => patchNote(selectedNote.id, { content })} /></Suspense>}
@@ -393,6 +642,8 @@ function App() {
       </section>
       {showDrawing && selectedNote && <Suspense fallback={<div className="modal-backdrop"><div className="loading-screen">Otwieram edytor SVG…</div></div>}><VectorEditor asset={editingAsset} onClose={() => { setShowDrawing(false); setEditingAsset(undefined) }} onSave={svg => void saveDrawing(svg)} /></Suspense>}
       {showFolderDialog && <div className="modal-backdrop" role="presentation" onMouseDown={event => { if (event.target === event.currentTarget) setShowFolderDialog(false) }}><section className="folder-dialog" role="dialog" aria-modal="true" aria-labelledby="folder-dialog-title"><div className="folder-dialog-mark"><Folder size={20} /></div><h2 id="folder-dialog-title">Utwórz folder</h2><p>Foldery możesz później układać, przeciągając je na siebie w panelu po lewej.</p><form onSubmit={event => { event.preventDefault(); void createFolder() }}><label htmlFor="new-folder-name">Nazwa folderu</label><input id="new-folder-name" autoFocus value={folderDraft} onChange={event => setFolderDraft(event.target.value)} placeholder="np. Projekty" /><div className="folder-dialog-actions"><button type="button" className="button secondary" onClick={() => setShowFolderDialog(false)}>Anuluj</button><button type="submit" className="button primary" disabled={!folderDraft.trim()}>Utwórz folder</button></div></form></section></div>}
+      {renameTarget && <div className="modal-backdrop" role="presentation" onMouseDown={event => { if (event.target === event.currentTarget) setRenameTarget(null) }}><section className="folder-dialog action-dialog" role="dialog" aria-modal="true" aria-labelledby="rename-dialog-title"><div className="folder-dialog-mark"><Pencil size={19} /></div><h2 id="rename-dialog-title">Zmień nazwę</h2><p>{renameTarget.kind === 'folder' ? 'Zmienisz nazwę folderu wraz z jego podfolderami.' : 'Zmienisz nazwę notatki i zapisany plik Markdown.'}</p><form onSubmit={event => { event.preventDefault(); commitRename() }}><label htmlFor="entry-rename">Nowa nazwa</label><input id="entry-rename" autoFocus value={renameDraft} onChange={event => setRenameDraft(event.target.value)} onKeyDown={event => { if (event.key === 'Escape') setRenameTarget(null) }} /><div className="folder-dialog-actions"><button type="button" className="button secondary" onClick={() => setRenameTarget(null)}>Anuluj</button><button type="submit" className="button primary" disabled={!renameDraft.trim()}>Zapisz nazwę</button></div></form></section></div>}
+      {deleteTarget && <div className="modal-backdrop" role="presentation" onMouseDown={event => { if (event.target === event.currentTarget) setDeleteTarget(null) }}><section className="folder-dialog confirm-dialog" role="dialog" aria-modal="true" aria-labelledby="delete-dialog-title"><div className="danger-mark"><Trash2 size={19} /></div><h2 id="delete-dialog-title">{deleteTarget.kind === 'folder' ? 'Usuń folder?' : 'Usuń notatkę?'}</h2><p>{deleteTarget.kind === 'folder' ? <>Folder <strong>„{deleteTarget.label}”</strong> i jego zawartość zostaną trwale usunięte. {deleteTarget.noteCount ? `Usunięte zostanie też ${deleteTarget.noteCount} ${deleteTarget.noteCount === 1 ? 'notatka' : 'notatek'} wraz z załącznikami SVG.` : 'Folder jest pusty.'}</> : <>Notatka <strong>„{deleteTarget.label}”</strong> i dołączone do niej schematy SVG zostaną trwale usunięte.</>}</p><div className="folder-dialog-actions"><button className="button secondary" onClick={() => setDeleteTarget(null)}>Anuluj</button><button className="button danger-button" onClick={() => void confirmDelete()}><Trash2 size={14} />Usuń</button></div></section></div>}
       {toast && <div className="app-toast" role="status"><Check size={16} />{toast}</div>}
       {mobileDrawer !== 'none' && <button className="drawer-scrim" aria-label="Zamknij menu" onClick={() => setMobileDrawer('none')} />}
     </main>

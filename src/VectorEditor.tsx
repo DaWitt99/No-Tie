@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from 'react'
 import {
-  ArrowRight, Circle, Copy, Minus, MousePointer2, RectangleHorizontal,
-  RectangleVertical, Trash2, Triangle, Type, Undo2, X,
+  ArrowRight, Circle, ClipboardCopy, ClipboardPaste, Copy, Minus, MousePointer2, RectangleHorizontal,
+  RectangleVertical, Redo2, Trash2, Triangle, Type, Undo2, X,
 } from 'lucide-react'
 import { SVG, type Svg } from '@svgdotjs/svg.js'
 import type { NoteAsset } from './types'
@@ -13,6 +13,7 @@ type Box = { x: number; y: number; width: number; height: number }
 type Snap = { delta: number; target: number } | undefined
 type Interaction =
   | { type: 'draw'; tool: Tool; element: any; id: string; x: number; y: number; keepTool: boolean; startTarget?: string; startAnchor?: string }
+  | { type: 'connect'; line: SVGLineElement; id: string; side: 'start' | 'end'; x: number; y: number; moved: boolean }
   | { type: 'move'; ids: string[]; elements: SVGElement[]; others: Box[]; startX: number; startY: number; lastX: number; lastY: number; bounds: Box; moved: boolean }
   | { type: 'marquee'; x: number; y: number; additive: boolean; initialIds: string[]; moved: boolean }
 
@@ -116,6 +117,18 @@ function findAnchorHit(target: EventTarget | null): { id: string; anchor: string
   const id = element?.getAttribute('data-anchor-target')
   const anchor = element?.getAttribute('data-anchor')
   return id && anchor ? { id, anchor } : undefined
+}
+
+function findConnectorHandle(target: EventTarget | null): { id: string; side: 'start' | 'end' } | undefined {
+  const element = target instanceof Element ? target.closest('[data-connector-handle][data-connector-side]') : null
+  const id = element?.getAttribute('data-connector-handle')
+  const side = element?.getAttribute('data-connector-side')
+  return id && (side === 'start' || side === 'end') ? { id, side } : undefined
+}
+
+function setLineEndpoint(line: SVGLineElement, side: 'start' | 'end', point: { x: number; y: number }) {
+  line.setAttribute(side === 'start' ? 'x1' : 'x2', `${point.x}`)
+  line.setAttribute(side === 'start' ? 'y1' : 'y2', `${point.y}`)
 }
 
 function updateConnectors(stage: SVGSVGElement) {
@@ -244,7 +257,8 @@ function renderOverlay(stage: Drawing, ids: string[], options: OverlayOptions = 
       .stroke({ color: '#5d73d8', width: 2, dasharray: '7 4' })
   }
   const activeTool = stage.node.getAttribute('data-active-tool')
-  const showAllAnchors = activeTool === 'line' || activeTool === 'arrow'
+  const selectedLines = elementsForIds(stage.node, ids).filter(element => element.tagName.toLowerCase() === 'line')
+  const showAllAnchors = activeTool === 'line' || activeTool === 'arrow' || selectedLines.length > 0
   const anchorElements = (showAllAnchors ? directObjects(stage.node) : elementsForIds(stage.node, ids))
     .filter(element => !['line', 'text'].includes(element.tagName.toLowerCase()))
   for (const element of anchorElements) {
@@ -255,6 +269,18 @@ function renderOverlay(stage: Drawing, ids: string[], options: OverlayOptions = 
       if (!point) continue
       layer.circle(8).center(point.x, point.y).fill('#ffffff').stroke({ color: '#6879db', width: 1.7 })
         .attr({ 'data-anchor-target': id, 'data-anchor': name, 'pointer-events': 'all', cursor: 'crosshair' })
+    }
+  }
+  if (activeTool === 'select' && !stage.node.hasAttribute('data-connector-dragging')) {
+    for (const line of selectedLines) {
+      const id = line.getAttribute('data-object-id')
+      if (!id) continue
+      for (const side of ['start', 'end'] as const) {
+        const x = Number(line.getAttribute(side === 'start' ? 'x1' : 'x2'))
+        const y = Number(line.getAttribute(side === 'start' ? 'y1' : 'y2'))
+        layer.circle(12).center(x, y).fill('#fff').stroke({ color: '#25a68a', width: 2 })
+          .attr({ 'data-connector-handle': id, 'data-connector-side': side, 'pointer-events': 'all', cursor: 'crosshair' })
+      }
     }
   }
   if (options.marquee) {
@@ -301,11 +327,16 @@ export function VectorEditor({
   const mount = useRef<HTMLDivElement>(null)
   const drawing = useRef<Drawing | null>(null)
   const history = useRef<string[]>([])
+  const redoHistory = useRef<string[]>([])
   const interaction = useRef<Interaction | null>(null)
   const textEdit = useRef<TextEdit | null>(null)
   const selectedIdsRef = useRef<string[]>([])
   const undoAction = useRef<() => void>(() => {})
+  const redoAction = useRef<() => void>(() => {})
   const duplicateAction = useRef<() => void>(() => {})
+  const copyAction = useRef<() => void>(() => {})
+  const pasteAction = useRef<() => void>(() => {})
+  const clipboard = useRef<SVGElement[]>([])
   const toolRef = useRef<Tool>('select')
   const strokeColorRef = useRef('#596fd8')
   const fillColorRef = useRef('#dfe4ff')
@@ -325,6 +356,8 @@ export function VectorEditor({
   const [fitToContent, setFitToContent] = useState(false)
   const [selectedIds, setSelectedIds] = useState<string[]>([])
   const [canUndo, setCanUndo] = useState(false)
+  const [canRedo, setCanRedo] = useState(false)
+  const [hasClipboard, setHasClipboard] = useState(false)
 
   useEffect(() => { toolRef.current = tool }, [tool])
   useEffect(() => { strokeColorRef.current = strokeColor }, [strokeColor])
@@ -356,8 +389,10 @@ export function VectorEditor({
     const next = snapshotContent(stage)
     if (history.current.at(-1) === next) return
     history.current.push(next)
-    if (history.current.length > 60) history.current.shift()
+    if (history.current.length > 21) history.current.shift()
+    redoHistory.current = []
     setCanUndo(history.current.length > 1)
+    setCanRedo(false)
   }
 
   useEffect(() => {
@@ -376,7 +411,9 @@ export function VectorEditor({
     ensureObjectIds(stage.node)
     drawing.current = stage
     history.current = [snapshotContent(stage)]
+    redoHistory.current = []
     setCanUndo(false)
+    setCanRedo(false)
 
     const point = (event: PointerEvent) => {
       const bounds = stage.node.getBoundingClientRect()
@@ -496,6 +533,26 @@ export function VectorEditor({
         return
       }
 
+      const connectorHandle = findConnectorHandle(event.target)
+      if (connectorHandle) {
+        const line = elementsForIds(stage.node, [connectorHandle.id]).find(element => element.tagName.toLowerCase() === 'line') as SVGLineElement | undefined
+        if (line) {
+          select([connectorHandle.id])
+          stage.node.setAttribute('data-connector-dragging', 'true')
+          renderOverlay(stage, [connectorHandle.id])
+          interaction.current = {
+            type: 'connect',
+            line,
+            id: connectorHandle.id,
+            side: connectorHandle.side,
+            x: Number(line.getAttribute(connectorHandle.side === 'start' ? 'x1' : 'x2')),
+            y: Number(line.getAttribute(connectorHandle.side === 'start' ? 'y1' : 'y2')),
+            moved: false,
+          }
+        }
+        return
+      }
+
       const anchorHit = findAnchorHit(event.target)
       const target = anchorHit ? elementsForIds(stage.node, [anchorHit.id])[0] : findObjectTarget(stage.node, event.target)
       if (!target) {
@@ -559,6 +616,26 @@ export function VectorEditor({
         }
         updateConnectors(stage.node)
         renderOverlay(stage, [current.id])
+      } else if (current.type === 'connect') {
+        if (!current.moved && Math.hypot(location.x - current.x, location.y - current.y) < 2) return
+        current.moved = true
+        const hovered = document.elementFromPoint(event.clientX, event.clientY)
+        const hit = findAnchorHit(hovered)
+        const target = hit ? elementsForIds(stage.node, [hit.id])[0] : undefined
+        const targetPoint = target && hit ? anchorPosition(target, hit.anchor) : undefined
+        const otherSide = current.side === 'start' ? 'end' : 'start'
+        const otherTarget = current.line.getAttribute(`data-${otherSide}-target`)
+        if (hit && targetPoint && hit.id !== current.id && hit.id !== otherTarget) {
+          setLineEndpoint(current.line, current.side, targetPoint)
+          current.line.setAttribute(`data-${current.side}-target`, hit.id)
+          current.line.setAttribute(`data-${current.side}-anchor`, hit.anchor)
+        } else {
+          setLineEndpoint(current.line, current.side, location)
+          current.line.removeAttribute(`data-${current.side}-target`)
+          current.line.removeAttribute(`data-${current.side}-anchor`)
+        }
+        updateConnectors(stage.node)
+        renderOverlay(stage, [current.id])
       } else if (current.type === 'move') {
         const rawX = location.x - current.startX
         const rawY = location.y - current.startY
@@ -613,6 +690,10 @@ export function VectorEditor({
         recordHistory(stage)
         renderOverlay(stage, [current.id])
         if (!current.keepTool) chooseTool('select')
+      } else if (current.type === 'connect') {
+        stage.node.removeAttribute('data-connector-dragging')
+        if (current.moved) recordHistory(stage)
+        renderOverlay(stage, [current.id])
       } else if (current.type === 'move') {
         if (current.moved) recordHistory(stage)
         renderOverlay(stage, current.ids)
@@ -641,9 +722,35 @@ export function VectorEditor({
       } else if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === 'd' && selectedIdsRef.current.length) {
         event.preventDefault()
         duplicateAction.current()
-      } else if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === 'z') {
+      }
+    }
+
+    const historyKeydown = (event: KeyboardEvent) => {
+      const dialog = mount.current?.closest('[role="dialog"]')
+      if (!dialog || !(event.target instanceof Node) || !dialog.contains(event.target)) return
+      if (!(event.metaKey || event.ctrlKey)) return
+      const key = event.key.toLowerCase()
+      const editingText = event.target instanceof Element && Boolean(event.target.closest('input, textarea, select, [contenteditable="true"]'))
+      if (key === 'c' && !editingText && selectedIdsRef.current.length) {
         event.preventDefault()
+        event.stopPropagation()
+        copyAction.current()
+        return
+      }
+      if (key === 'v' && !editingText && clipboard.current.length) {
+        event.preventDefault()
+        event.stopPropagation()
+        pasteAction.current()
+        return
+      }
+      if (key === 'z' && !event.shiftKey) {
+        event.preventDefault()
+        event.stopPropagation()
         undoAction.current()
+      } else if (key === 'y' || (key === 'z' && event.shiftKey)) {
+        event.preventDefault()
+        event.stopPropagation()
+        redoAction.current()
       }
     }
 
@@ -662,6 +769,7 @@ export function VectorEditor({
     stage.node.addEventListener('pointercancel', finish)
     stage.node.addEventListener('keydown', keydown)
     stage.node.addEventListener('dblclick', doubleClick)
+    window.addEventListener('keydown', historyKeydown, true)
     return () => {
       stage.node.removeEventListener('pointerdown', start)
       stage.node.removeEventListener('pointermove', move)
@@ -669,6 +777,7 @@ export function VectorEditor({
       stage.node.removeEventListener('pointercancel', finish)
       stage.node.removeEventListener('keydown', keydown)
       stage.node.removeEventListener('dblclick', doubleClick)
+      window.removeEventListener('keydown', historyKeydown, true)
       textEdit.current?.input.remove()
       textEdit.current = null
       stage.remove()
@@ -684,22 +793,45 @@ export function VectorEditor({
   function undo() {
     const stage = drawing.current
     if (!stage || history.current.length < 2) return
-    history.current.pop()
+    redoHistory.current.push(history.current.pop()!)
     stage.clear()
     stage.svg(history.current.at(-1) ?? '')
     ensureObjectIds(stage.node)
+    updateConnectors(stage.node)
     selectedIdsRef.current = []
     setSelectedIds([])
     setCanUndo(history.current.length > 1)
+    setCanRedo(redoHistory.current.length > 0)
     renderOverlay(stage, [])
   }
 
-  function duplicateSelected() {
+  function redo() {
     const stage = drawing.current
-    const elements = stage ? elementsForIds(stage.node, selectedIdsRef.current) : []
-    if (!stage || !elements.length) return
+    const next = redoHistory.current.pop()
+    if (!stage || !next) return
+    history.current.push(next)
+    stage.clear()
+    stage.svg(next)
+    ensureObjectIds(stage.node)
+    updateConnectors(stage.node)
+    selectedIdsRef.current = []
+    setSelectedIds([])
+    setCanUndo(history.current.length > 1)
+    setCanRedo(redoHistory.current.length > 0)
+    renderOverlay(stage, [])
+  }
+
+  function copySelected() {
+    const stage = drawing.current
+    clipboard.current = stage ? elementsForIds(stage.node, selectedIdsRef.current).map(element => element.cloneNode(true) as SVGElement) : []
+    setHasClipboard(clipboard.current.length > 0)
+  }
+
+  function pasteCopied() {
+    const stage = drawing.current
+    if (!stage || !clipboard.current.length) return
     const idMap = new Map<string, string>()
-    const cloned = elements.map(element => {
+    const cloned = clipboard.current.map(element => {
       const copy = element.cloneNode(true) as SVGElement
       const id = crypto.randomUUID()
       const originalId = element.getAttribute('data-object-id')
@@ -731,9 +863,17 @@ export function VectorEditor({
     stage.node.focus({ preventScroll: true })
   }
 
+  function duplicateSelected() {
+    copySelected()
+    pasteCopied()
+  }
+
   useEffect(() => {
     undoAction.current = undo
+    redoAction.current = redo
     duplicateAction.current = duplicateSelected
+    copyAction.current = copySelected
+    pasteAction.current = pasteCopied
   })
 
   function deleteSelected() {
@@ -870,12 +1010,15 @@ export function VectorEditor({
           <label className="fill-toggle fit-content-toggle" title="Dopasuj rozmiar SVG do rysunku"><input type="checkbox" checked={fitToContent} onChange={event => setFitToContent(event.target.checked)} aria-label="Dopasuj obszar SVG do treści" />Przytnij SVG</label>
           <span className="toolbar-divider" />
           <span className="selection-count">{selectedIds.length ? `${selectedIds.length} zazn.` : 'Brak zaznaczenia'}</span>
+          <button className="tool-button" onClick={copySelected} disabled={!selectedIds.length} title="Kopiuj zaznaczenie (Ctrl+C)" aria-label="Kopiuj zaznaczenie"><ClipboardCopy size={16} /></button>
+          <button className="tool-button" onClick={pasteCopied} disabled={!hasClipboard} title="Wklej zaznaczenie (Ctrl+V)" aria-label="Wklej zaznaczenie"><ClipboardPaste size={16} /></button>
           <button className="tool-button" onClick={duplicateSelected} disabled={!selectedIds.length} title="Duplikuj zaznaczenie (Ctrl+D)" aria-label="Duplikuj zaznaczenie"><Copy size={16} /></button>
           <button className="tool-button delete-tool" onClick={deleteSelected} disabled={!selectedIds.length} title="Usuń zaznaczenie (Delete)" aria-label="Usuń zaznaczenie"><Trash2 size={16} /></button>
           <button className="tool-button" onClick={undo} disabled={!canUndo} title="Cofnij (Ctrl+Z)" aria-label="Cofnij"><Undo2 size={17} /></button>
+          <button className="tool-button" onClick={redo} disabled={!canRedo} title="Ponów (Ctrl+Y)" aria-label="Ponów"><Redo2 size={17} /></button>
         </div>
         <div className="drawing-stage-wrap"><div ref={mount} className="drawing-stage" /></div>
-        <footer className="modal-footer advanced-modal-footer"><p>Przeciągnij po pustym miejscu, aby zaznaczyć · Shift+dodaj · dwuklik tekstu edytuje · Ctrl+D duplikuj · Delete usuń</p><div><button className="button secondary" onClick={onClose}>Anuluj</button><button className="button primary" onClick={save}>Zapisz grafikę</button></div></footer>
+        <footer className="modal-footer advanced-modal-footer"><p>Przeciągnij po pustym miejscu, aby zaznaczyć · Shift+dodaj · przeciągnij uchwyt linii na punkt figury · Ctrl+Z cofnij · Ctrl+Y ponów · Ctrl+D duplikuj</p><div><button className="button secondary" onClick={onClose}>Anuluj</button><button className="button primary" onClick={save}>Zapisz grafikę</button></div></footer>
       </section>
     </div>
   )

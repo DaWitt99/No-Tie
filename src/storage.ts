@@ -142,6 +142,12 @@ export async function saveFolders(folders: string[]): Promise<void> {
   }
 }
 
+export async function removeFolderFromDisk(folder: string): Promise<void> {
+  if (!usesNativeFiles || !folder.trim()) return
+  const directory = await folderDirectory(folder)
+  if (await exists(directory)) await remove(directory, { recursive: true })
+}
+
 async function collectMarkdownFiles(directory: string): Promise<string[]> {
   const paths: string[] = []
   for (const entry of await readDir(directory)) {

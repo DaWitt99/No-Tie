@@ -1,3 +1,4 @@
+import { invoke, isTauri } from '@tauri-apps/api/core'
 import { strFromU8, strToU8, unzipSync, zipSync } from 'fflate'
 import { markdownToNote, noteToMarkdown, sanitizeSvg } from './content'
 import type { Note, NoteAsset } from './types'
@@ -47,18 +48,79 @@ export function parseArchive(bytes: Uint8Array): { notes: Note[]; assets: NoteAs
   return { notes, assets }
 }
 
-export function downloadArchive(notes: Note[], assets: NoteAsset[]) {
-  const archive = buildArchive(notes, assets)
+function archiveBlob(archive: Uint8Array): Blob {
   const buffer = new ArrayBuffer(archive.byteLength)
   new Uint8Array(buffer).set(archive)
-  const blob = new Blob([buffer], { type: 'application/zip' })
+  return new Blob([buffer], { type: 'application/zip' })
+}
+
+export function downloadArchive(notes: Note[], assets: NoteAsset[]) {
+  const archive = buildArchive(notes, assets)
+  const blob = archiveBlob(archive)
   const href = URL.createObjectURL(blob)
   const anchor = document.createElement('a')
   anchor.href = href
-  anchor.download = `no-tie-notatki-${new Date().toISOString().slice(0, 10)}.zip`
+  anchor.download = archiveFileName()
   anchor.style.display = 'none'
   document.body.append(anchor)
   anchor.click()
   anchor.remove()
   window.setTimeout(() => URL.revokeObjectURL(href), 1000)
+}
+
+function archiveFileName(): string {
+  const stamp = new Date().toISOString().replace(/[:.]/g, '-').replace('T', '-')
+  return `no-tie-notatki-${stamp.slice(0, 19)}.zip`
+}
+
+type WritableFile = {
+  write(data: Blob): Promise<void>
+  close(): Promise<void>
+}
+
+type DirectoryHandle = {
+  name: string
+  getFileHandle(name: string, options: { create: boolean }): Promise<{ createWritable(): Promise<WritableFile> }>
+}
+
+type FilePickerWindow = Window & {
+  showDirectoryPicker?: (options?: { mode?: 'readwrite' }) => Promise<DirectoryHandle>
+  showSaveFilePicker?: (options?: { suggestedName?: string; types?: { description: string; accept: Record<string, string[]> }[] }) => Promise<{ createWritable(): Promise<WritableFile> }>
+}
+
+export async function exportArchiveToFolder(notes: Note[], assets: NoteAsset[]): Promise<string | null> {
+  const archive = buildArchive(notes, assets)
+  const fileName = archiveFileName()
+  const blob = archiveBlob(archive)
+
+  if (isTauri()) {
+    return invoke<string | null>('save_archive_file', {
+      fileName,
+      bytes: Array.from(archive),
+    })
+  }
+
+  const picker = window as FilePickerWindow
+  if (picker.showDirectoryPicker) {
+    const directory = await picker.showDirectoryPicker({ mode: 'readwrite' })
+    const file = await directory.getFileHandle(fileName, { create: true })
+    const writable = await file.createWritable()
+    await writable.write(blob)
+    await writable.close()
+    return `${directory.name}/${fileName}`
+  }
+
+  if (picker.showSaveFilePicker) {
+    const file = await picker.showSaveFilePicker({
+      suggestedName: fileName,
+      types: [{ description: 'Paczka ZIP', accept: { 'application/zip': ['.zip'] } }],
+    })
+    const writable = await file.createWritable()
+    await writable.write(blob)
+    await writable.close()
+    return fileName
+  }
+
+  downloadArchive(notes, assets)
+  return fileName
 }
