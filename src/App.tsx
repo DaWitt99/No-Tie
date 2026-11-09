@@ -51,6 +51,24 @@ const templates: Template[] = [
 const dateLabel = (value: number) => new Intl.DateTimeFormat('pl-PL', { day: 'numeric', month: 'short' }).format(value)
 const currentTimestamp = () => Date.now()
 const excerpt = (content: string) => content.replace(/^#+\s*/gm, '').replace(/[>*_`!-]/g, '').replace(/\(\.\/assets\/[^)]+\)/g, '').replace(/\s+/g, ' ').trim().slice(0, 110)
+const countEditorText = (text: string) => ({
+  words: text.match(/[\p{L}\p{N}]+(?:[’'-][\p{L}\p{N}]+)*/gu)?.length ?? 0,
+  characters: Array.from(text).length,
+})
+const markdownTextForCounts = (markdown: string) => markdown
+  .replace(/```[^\n]*\n?([\s\S]*?)```/g, '$1')
+  .replace(/!\[([^\]]*)\]\([^)]*\)/g, '$1')
+  .replace(/\[([^\]]+)\]\([^)]*\)/g, '$1')
+  .replace(/`([^`]+)`/g, '$1')
+  .replace(/^\s{0,3}(?:#{1,6}\s+|>\s?|[-+*]\s+|\d+[.)]\s+)/gm, '')
+  .replace(/[*_~]/g, '')
+  .replace(/\\([*_`])/g, '$1')
+function polishCount(value: number, forms: [string, string, string]) {
+  const mod100 = value % 100
+  const mod10 = value % 10
+  const form = value === 1 ? forms[0] : mod10 >= 2 && mod10 <= 4 && !(mod100 >= 12 && mod100 <= 14) ? forms[1] : forms[2]
+  return `${value.toLocaleString('pl-PL')} ${form}`
+}
 const entryColors: EntryColor[] = [
   { value: '#ef7777', label: 'Koral' },
   { value: '#e99a4a', label: 'Mandarynka' },
@@ -91,7 +109,7 @@ function App() {
   const [loadError, setLoadError] = useState('')
   const [saved, setSaved] = useState(true)
   const [editorRevision, setEditorRevision] = useState(0)
-  const [editorMode, setEditorMode] = useState<'rendered' | 'source'>('rendered')
+  const [editorMode, setEditorModeState] = useState<'rendered' | 'source'>('rendered')
   const [showDrawing, setShowDrawing] = useState(false)
   const [editingAsset, setEditingAsset] = useState<NoteAsset | undefined>()
   const [mobileDrawer, setMobileDrawer] = useState<'none' | 'notes' | 'sidebar'>('none')
@@ -101,7 +119,9 @@ function App() {
   const [reviewSessions, setReviewSessions] = useState<ReviewSession[]>([])
   const [activeReviewSessionId, setActiveReviewSessionId] = useState('')
   const [showReviewSessionDialog, setShowReviewSessionDialog] = useState(false)
+  const [editingReviewSessionId, setEditingReviewSessionId] = useState('')
   const [reviewClockNow, setReviewClockNow] = useState(() => Date.now())
+  const [editorSelection, setEditorSelection] = useState({ noteId: '', mode: 'rendered' as 'rendered' | 'source', text: '' })
   const [entryDragVisual, setEntryDragVisual] = useState<EntryDragVisual | null>(null)
   const [showFolderDialog, setShowFolderDialog] = useState(false)
   const [folderDraft, setFolderDraft] = useState('')
@@ -308,6 +328,9 @@ function App() {
     }).sort((a, b) => b.updatedAt - a.updatedAt)
   }, [notes, activeFilter, query])
   const currentAssets = assets.filter(asset => asset.noteId === selectedId)
+  const documentCounts = selectedNote ? countEditorText(markdownTextForCounts(selectedNote.content)) : { words: 0, characters: 0 }
+  const selectionText = selectedNote && editorSelection.noteId === selectedNote.id && editorSelection.mode === editorMode ? editorSelection.text : ''
+  const selectionCounts = countEditorText(selectionText)
 
   function patchNote(id: string, patch: Partial<Note>) {
     const existing = notes.find(note => note.id === id)
@@ -320,6 +343,16 @@ function App() {
       if (id === selectedId) recordNoteHistory(updated)
       return updated
     }))
+  }
+
+  function selectNote(id: string) {
+    setEditorSelection({ noteId: id, mode: editorMode, text: '' })
+    setSelectedId(id)
+  }
+
+  function setEditorMode(mode: 'rendered' | 'source') {
+    setEditorSelection({ noteId: selectedId, mode, text: '' })
+    setEditorModeState(mode)
   }
 
   function recordNoteHistory(note: Note) {
@@ -363,10 +396,11 @@ function App() {
     setSaved(false)
     void saveNote(note).then(() => setSaved(true), () => setSaved(false))
     setNotes(current => [note, ...current])
+    setEditorSelection({ noteId: note.id, mode: editorMode, text: '' })
     setSelectedId(note.id)
     setEditorRevision(value => value + 1)
     setMobileDrawer('none')
-  }, [activeFilter])
+  }, [activeFilter, editorMode])
 
   async function createFolder() {
     const name = folderDraft.trim().replace(/^\/+|\/+$/g, '')
@@ -516,7 +550,7 @@ function App() {
     await removeNote(id)
     setAssets(current => current.filter(asset => asset.noteId !== id))
     setNotes(current => current.filter(note => note.id !== id))
-    if (selectedId === id) setSelectedId(notes.find(note => note.id !== id)?.id ?? '')
+    if (selectedId === id) selectNote(notes.find(note => note.id !== id)?.id ?? '')
     setSaved(true)
   }
 
@@ -535,7 +569,7 @@ function App() {
         const removedIds = new Set(removedNotes.map(note => note.id))
         setAssets(current => current.filter(asset => !removedIds.has(asset.noteId)))
         setNotes(current => current.filter(note => !removedIds.has(note.id)))
-        if (selectedId && removedIds.has(selectedId)) setSelectedId(notes.find(note => !removedIds.has(note.id))?.id ?? '')
+        if (selectedId && removedIds.has(selectedId)) selectNote(notes.find(note => !removedIds.has(note.id))?.id ?? '')
         const nextFolders = folders.filter(folder => folder !== target.path && !folder.startsWith(`${target.path}/`))
         setFolderRegistry(nextFolders)
         setFolderColors(current => Object.fromEntries(Object.entries(current).filter(([folder]) => folder !== target.path && !folder.startsWith(`${target.path}/`))))
@@ -566,8 +600,8 @@ function App() {
   function renderNoteFile(note: Note, depth = 0): React.ReactNode {
     const target: EntryTarget = { kind: 'note', id: note.id }
     const color = noteDisplayColor(note)
-    return <div key={note.id} className={`folder-file-row ${selectedId === note.id ? 'active' : ''}`} style={{ paddingLeft: `${27 + depth * 14}px` }}>
-      <button className={`folder-file-item ${color ? 'has-entry-color' : ''}`} style={entryColorStyle(color)} onPointerDown={event => startEntryPointerDrag(event, target, note.title || 'Bez tytułu')} onClick={() => { if (ignoreClickAfterDrag()) return; setActiveReviewSessionId(''); setActiveFilter(note.folder ? note.folder : 'root'); setSelectedId(note.id); setMobileDrawer('none') }} title="Przeciągnij notatkę do innego folderu"><FileText size={13} /><span>{note.title || 'Bez tytułu'}</span></button>
+    return <div key={note.id} className={`folder-file-row ${selectedId === note.id ? 'active' : ''} ${color ? 'has-entry-color' : ''}`} style={{ paddingLeft: `${27 + depth * 14}px`, ...(entryColorStyle(color) ?? {}) }}>
+      <button className={`folder-file-item ${color ? 'has-entry-color' : ''}`} style={entryColorStyle(color)} onPointerDown={event => startEntryPointerDrag(event, target, note.title || 'Bez tytułu')} onClick={() => { if (ignoreClickAfterDrag()) return; setActiveReviewSessionId(''); setActiveFilter(note.folder ? note.folder : 'root'); selectNote(note.id); setMobileDrawer('none') }} title="Przeciągnij notatkę do innego folderu"><FileText size={13} /><span>{note.title || 'Bez tytułu'}</span></button>
       {renderEntryMenu(target)}
     </div>
   }
@@ -581,7 +615,7 @@ function App() {
       const target: EntryTarget = { kind: 'folder', path: folder }
       const color = folderDisplayColor(folder)
       return <div key={folder} className="folder-tree-node" data-drop-folder={folder}>
-        <div className={`folder-drop-row ${activeFilter === folder ? 'active' : ''}`} style={{ paddingLeft: `${10 + depth * 14}px` }} data-drop-folder={folder}>
+        <div className={`folder-drop-row ${activeFilter === folder ? 'active' : ''} ${color ? 'has-entry-color' : ''}`} style={{ paddingLeft: `${10 + depth * 14}px`, ...(entryColorStyle(color) ?? {}) }} data-drop-folder={folder}>
           <button className={`nav-item folder-item ${activeFilter === folder && !activeReviewSession ? 'active' : ''} ${color ? 'has-entry-color' : ''}`} style={entryColorStyle(color)} onPointerDown={event => startEntryPointerDrag(event, target, label)} onClick={() => { if (ignoreClickAfterDrag()) return; setActiveReviewSessionId(''); setActiveFilter(folder); setMobileDrawer('none') }} title={`Przeciągnij folder „${label}”, aby go przenieść`}><Folder size={16} /><span>{label}</span><span className="nav-count">{count}</span></button>
           {renderEntryMenu(target)}
         </div>
@@ -636,7 +670,47 @@ function App() {
     setReviewSessions(current => [session, ...current])
     setActiveReviewSessionId(session.id)
     setShowReviewSessionDialog(false)
+    setEditingReviewSessionId('')
     setMobileDrawer('none')
+  }
+
+  function updateReviewSession(sessionId: string, title: string, noteIds: string[]) {
+    const validNoteIds = [...new Set(noteIds.filter(id => notes.some(note => note.id === id)))]
+    if (!validNoteIds.length) return
+    const now = Date.now()
+    setReviewSessions(current => current.map(session => {
+      if (session.id !== sessionId) return session
+      const checkpointed = checkpointReviewSession(session, now)
+      return {
+        ...checkpointed,
+        title: title.trim() || session.title,
+        noteIds: validNoteIds,
+        noteTimesMs: Object.fromEntries(validNoteIds.map(id => [id, checkpointed.noteTimesMs[id] ?? 0])),
+        activeNoteId: session.activeNoteId && validNoteIds.includes(session.activeNoteId) ? session.activeNoteId : validNoteIds[0],
+        updatedAt: now,
+      }
+    }))
+    setActiveReviewSessionId(sessionId)
+    setShowReviewSessionDialog(false)
+    setEditingReviewSessionId('')
+    setMobileDrawer('none')
+  }
+
+  function reorderReviewSession(sessionId: string, noteIds: string[]) {
+    const now = Date.now()
+    setReviewSessions(current => current.map(session => session.id === sessionId
+      ? { ...checkpointReviewSession(session, now), noteIds: [...noteIds], updatedAt: now }
+      : session))
+  }
+
+  function openReviewSessionEditor(sessionId = '') {
+    setEditingReviewSessionId(sessionId)
+    setShowReviewSessionDialog(true)
+  }
+
+  function closeReviewSessionEditor() {
+    setShowReviewSessionDialog(false)
+    setEditingReviewSessionId('')
   }
 
   function startReviewTimer(sessionId: string) {
@@ -681,7 +755,7 @@ function App() {
     const note = notes.find(item => item.id === noteId)
     if (!note) return
     setActiveReviewSessionId('')
-    setSelectedId(note.id)
+    selectNote(note.id)
     setActiveFilter(note.folder || 'root')
     setMobileDrawer('none')
   }
@@ -835,7 +909,7 @@ function App() {
         imported.assets.forEach(asset => byId.set(asset.id, asset))
         return [...byId.values()]
       })
-      setSelectedId(imported.notes[0].id)
+      selectNote(imported.notes[0].id)
       setActiveFilter('all')
       setEditorRevision(value => value + 1)
       window.alert(`Zaimportowano ${imported.notes.length} notatek.`)
@@ -894,8 +968,8 @@ function App() {
             <button className="nav-item" onClick={() => { setActiveReviewSessionId(''); setActiveFilter('all'); setQuery(''); setMobileDrawer('notes') }}><Clock3 size={17} /><span>Ostatnie</span></button>
           </div>
           <div className="sidebar-section review-sidebar-section">
-            <div className="section-heading"><span className="section-label">POWTÓRKI</span><button className="tiny-icon" title="Nowa powtórka" aria-label="Nowa powtórka" onClick={() => setShowReviewSessionDialog(true)}><Plus size={15} /></button></div>
-            <button className="nav-item review-new-button" onClick={() => setShowReviewSessionDialog(true)}><Repeat2 size={16} /><span>Nowa powtórka</span></button>
+            <div className="section-heading"><span className="section-label">POWTÓRKI</span><button className="tiny-icon" title="Nowa powtórka" aria-label="Nowa powtórka" onClick={() => openReviewSessionEditor()}><Plus size={15} /></button></div>
+            <button className="nav-item review-new-button" onClick={() => openReviewSessionEditor()}><Repeat2 size={16} /><span>Nowa powtórka</span></button>
             {reviewSessions.map(session => <button key={session.id} className={`nav-item review-session-nav ${activeReviewSessionId === session.id ? 'active' : ''}`} onClick={() => { setActiveReviewSessionId(session.id); setMobileDrawer('none') }} title={session.title} aria-current={activeReviewSessionId === session.id ? 'page' : undefined}><Repeat2 size={14} /><span className={`review-session-dot ${session.status === 'running' ? 'running' : ''}`} /><span>{session.title}</span><span className="nav-count">{session.noteIds.length}</span></button>)}
             {!reviewSessions.length && <p className="review-sidebar-empty">Utwórz sesję, aby zapisać listę notatek do powtórki.</p>}
           </div>
@@ -921,7 +995,7 @@ function App() {
         <div className="list-toolbar"><span>{visibleNotes.length} NOTATKI</span><label className="list-view-select"><span>Widok</span><select value={noteDisplayMode} onChange={event => setDisplayMode(event.target.value as NoteDisplayMode)} aria-label="Sposób wyświetlania notatek"><option value="full">Treść i tagi</option><option value="names-tags">Nazwy i tagi</option><option value="names">Same nazwy</option></select></label></div>
         <div className="note-list">
           {visibleNotes.map(note => (
-            <button key={note.id} className={`note-card view-${noteDisplayMode} ${selectedId === note.id ? 'selected' : ''} ${noteDisplayColor(note) ? 'has-entry-color' : ''}`} style={entryColorStyle(noteDisplayColor(note))} onPointerDown={event => startEntryPointerDrag(event, { kind: 'note', id: note.id }, note.title || 'Bez tytułu')} onClick={() => { if (ignoreClickAfterDrag()) return; setActiveReviewSessionId(''); setSelectedId(note.id); setMobileDrawer('none') }}>
+            <button key={note.id} className={`note-card view-${noteDisplayMode} ${selectedId === note.id ? 'selected' : ''} ${noteDisplayColor(note) ? 'has-entry-color' : ''}`} style={entryColorStyle(noteDisplayColor(note))} onPointerDown={event => startEntryPointerDrag(event, { kind: 'note', id: note.id }, note.title || 'Bez tytułu')} onClick={() => { if (ignoreClickAfterDrag()) return; setActiveReviewSessionId(''); selectNote(note.id); setMobileDrawer('none') }}>
               {noteDisplayMode === 'full' && <div className="note-card-top"><span className="note-date">{dateLabel(note.updatedAt)}</span>{note.favorite && <Star size={14} className="favorite-mini" fill="currentColor" />}</div>}
               <strong>{note.title || 'Bez tytułu'}</strong>
               {noteDisplayMode === 'full' && <p>{excerpt(note.content) || 'Pusta notatka'}</p>}
@@ -958,6 +1032,8 @@ function App() {
             onReset={() => resetReviewTimer(activeReviewSession.id)}
             onSetActiveNote={noteId => setActiveReviewNote(activeReviewSession.id, noteId)}
             onOpenNote={openReviewNote}
+            onEdit={() => openReviewSessionEditor(activeReviewSession.id)}
+            onReorder={noteIds => reorderReviewSession(activeReviewSession.id, noteIds)}
           />
         ) : selectedNote ? (
           <article className="note-editor" key={selectedNote.id}>
@@ -969,7 +1045,19 @@ function App() {
                 <div className="editor-tools-left"><div className="view-mode-toggle" role="group" aria-label="Widok notatki"><button className={`view-mode-button ${editorMode === 'rendered' ? 'active' : ''}`} title="Widok wizualny" aria-label="Widok wizualny" aria-pressed={editorMode === 'rendered'} onClick={() => setEditorMode('rendered')}><Eye size={16} /></button><button className={`view-mode-button ${editorMode === 'source' ? 'active' : ''}`} title="Surowy Markdown" aria-label="Surowy Markdown" aria-pressed={editorMode === 'source'} onClick={() => setEditorMode('source')}><FileText size={16} /></button></div><span className="toolbar-separator" /><button className="inline-tool" onClick={() => { setEditingAsset(undefined); setShowDrawing(true) }}><Sparkles size={15} />Dodaj schemat</button>{currentAssets.map(asset => <button className="inline-tool asset-tool" key={asset.id} onClick={() => { setEditingAsset(asset); setShowDrawing(true) }}><Lightbulb size={14} />{asset.fileName}</button>)}</div>
                 <select className="template-select" defaultValue="" aria-label="Wstaw szablon" onChange={event => { const template = templates.find(item => item.id === event.target.value); if (template) { patchNote(selectedNote.id, { title: template.title, content: template.content, tags: [...new Set([...selectedNote.tags, ...template.tags])] }); setEditorRevision(value => value + 1) } event.target.value = '' }}><option value="" disabled>Szablon</option>{templates.map(template => <option key={template.id} value={template.id}>{template.title}</option>)}</select>
               </div>
-              {editorMode === 'source' ? <textarea className="markdown-source-editor" aria-label="Surowy tekst Markdown" spellCheck={false} value={selectedNote.content} onChange={event => patchNote(selectedNote.id, { content: event.target.value })} /> : <Suspense fallback={<div className="editor-loading">Otwieram edytor…</div>}><MarkdownEditor key={`${selectedNote.id}-${editorRevision}`} noteId={selectedNote.id} markdown={selectedNote.content} assets={currentAssets} revision={editorRevision} onChange={content => patchNote(selectedNote.id, { content })} /></Suspense>}
+              {editorMode === 'source' ? <textarea
+                className="markdown-source-editor"
+                aria-label="Surowy tekst Markdown"
+                spellCheck={false}
+                value={selectedNote.content}
+                onSelect={event => { const input = event.currentTarget; setEditorSelection({ noteId: selectedNote.id, mode: 'source', text: input.value.slice(input.selectionStart, input.selectionEnd) }) }}
+                onChange={event => { const input = event.currentTarget; patchNote(selectedNote.id, { content: input.value }); setEditorSelection({ noteId: selectedNote.id, mode: 'source', text: input.value.slice(input.selectionStart, input.selectionEnd) }) }}
+              /> : <Suspense fallback={<div className="editor-loading">Otwieram edytor…</div>}><MarkdownEditor key={`${selectedNote.id}-${editorRevision}`} noteId={selectedNote.id} markdown={selectedNote.content} assets={currentAssets} revision={editorRevision} onChange={content => patchNote(selectedNote.id, { content })} onSelectionChange={text => setEditorSelection({ noteId: selectedNote.id, mode: 'rendered', text })} /></Suspense>}
+              <div className="editor-content-stats" aria-label="Statystyki dokumentu i zaznaczenia">
+                <span>Dokument: <strong>{polishCount(documentCounts.words, ['słowo', 'słowa', 'słów'])}</strong><i>·</i><strong>{polishCount(documentCounts.characters, ['znak', 'znaki', 'znaków'])}</strong></span>
+                <span className="editor-stats-divider" aria-hidden="true" />
+                <span>Zaznaczenie: <strong>{polishCount(selectionCounts.words, ['słowo', 'słowa', 'słów'])}</strong><i>·</i><strong>{polishCount(selectionCounts.characters, ['znak', 'znaki', 'znaków'])}</strong></span>
+              </div>
               <div className="editor-end-note"><span className="end-line" /><span>Koniec notatki</span><span className="end-line" /></div>
             </div>
             <footer className="editor-footer"><span><Sparkles size={14} />Zapis automatyczny</span><div><button className={`footer-icon ${selectedNote.favorite ? 'favorited' : ''}`} onClick={() => patchNote(selectedNote.id, { favorite: !selectedNote.favorite })} title={selectedNote.favorite ? 'Usuń z ulubionych' : 'Dodaj do ulubionych'}><Star size={17} fill={selectedNote.favorite ? 'currentColor' : 'none'} /></button><button className="footer-icon delete-note" onClick={() => void deleteSelected()} title="Usuń notatkę"><Trash2 size={17} /></button></div></footer>
@@ -978,10 +1066,15 @@ function App() {
           <div className="empty-state editor-empty"><div className="empty-illustration"><FilePlus2 size={25} /></div><p className="eyebrow">TWOJA PRZESTRZEŃ</p><h2>Zapisz pierwszą myśl</h2><span>Twoje notatki będą dostępne lokalnie i offline.</span><button className="button primary" onClick={() => createNote()}><Plus size={16} />Nowa notatka</button></div>
         )}
       </section>
-      <ChatPanel open={showChat} baseUrl={ollamaBaseUrl} model={ollamaModel} note={selectedNote} onClose={closeChat} onOpenSettings={openOllamaSettings} />
+      <ChatPanel open={showChat} baseUrl={ollamaBaseUrl} model={ollamaModel} note={selectedNote} notes={notes} assets={assets} onClose={closeChat} onOpenSettings={openOllamaSettings} />
       {entryDragVisual && <div className="entry-drag-ghost" style={{ left: entryDragVisual.x, top: entryDragVisual.y }} aria-hidden="true"><div>{entryDragVisual.target.kind === 'folder' ? <Folder size={15} /> : <FileText size={15} />}<strong>{entryDragVisual.label}</strong></div><span>{entryDragVisual.dropFolder === null ? 'Upuść na folder' : entryDragVisual.dropFolder ? `Przenieś do: ${entryDragVisual.dropFolder}` : 'Przenieś do: Bez folderu'}</span></div>}
       {showDrawing && selectedNote && <Suspense fallback={<div className="modal-backdrop"><div className="loading-screen">Otwieram edytor SVG…</div></div>}><VectorEditor asset={editingAsset} onClose={() => { setShowDrawing(false); setEditingAsset(undefined) }} onSave={svg => void saveDrawing(svg)} /></Suspense>}
-      {showReviewSessionDialog && <ReviewSessionDialog notes={notes} onCancel={() => setShowReviewSessionDialog(false)} onCreate={createReviewSession} />}
+      {showReviewSessionDialog && <ReviewSessionDialog
+        notes={notes}
+        session={reviewSessions.find(session => session.id === editingReviewSessionId)}
+        onCancel={closeReviewSessionEditor}
+        onSave={(title, noteIds) => editingReviewSessionId ? updateReviewSession(editingReviewSessionId, title, noteIds) : createReviewSession(title, noteIds)}
+      />}
       {showFolderDialog && <div className="modal-backdrop" role="presentation" onMouseDown={event => { if (event.target === event.currentTarget) setShowFolderDialog(false) }}><section className="folder-dialog" role="dialog" aria-modal="true" aria-labelledby="folder-dialog-title"><div className="folder-dialog-mark"><Folder size={20} /></div><h2 id="folder-dialog-title">Utwórz folder</h2><p>Foldery możesz później układać, przeciągając je na siebie w panelu po lewej.</p><form onSubmit={event => { event.preventDefault(); void createFolder() }}><label htmlFor="new-folder-name">Nazwa folderu</label><input id="new-folder-name" autoFocus value={folderDraft} onChange={event => setFolderDraft(event.target.value)} placeholder="np. Projekty" /><div className="folder-dialog-actions"><button type="button" className="button secondary" onClick={() => setShowFolderDialog(false)}>Anuluj</button><button type="submit" className="button primary" disabled={!folderDraft.trim()}>Utwórz folder</button></div></form></section></div>}
       {renameTarget && <div className="modal-backdrop" role="presentation" onMouseDown={event => { if (event.target === event.currentTarget) setRenameTarget(null) }}><section className="folder-dialog action-dialog" role="dialog" aria-modal="true" aria-labelledby="rename-dialog-title"><div className="folder-dialog-mark"><Pencil size={19} /></div><h2 id="rename-dialog-title">Zmień nazwę</h2><p>{renameTarget.kind === 'folder' ? 'Zmienisz nazwę folderu wraz z jego podfolderami.' : 'Zmienisz nazwę notatki i zapisany plik Markdown.'}</p><form onSubmit={event => { event.preventDefault(); commitRename() }}><label htmlFor="entry-rename">Nowa nazwa</label><input id="entry-rename" autoFocus value={renameDraft} onChange={event => setRenameDraft(event.target.value)} onKeyDown={event => { if (event.key === 'Escape') setRenameTarget(null) }} /><div className="folder-dialog-actions"><button type="button" className="button secondary" onClick={() => setRenameTarget(null)}>Anuluj</button><button type="submit" className="button primary" disabled={!renameDraft.trim()}>Zapisz nazwę</button></div></form></section></div>}
       {deleteTarget && <div className="modal-backdrop" role="presentation" onMouseDown={event => { if (event.target === event.currentTarget) setDeleteTarget(null) }}><section className="folder-dialog confirm-dialog" role="dialog" aria-modal="true" aria-labelledby="delete-dialog-title"><div className="danger-mark"><Trash2 size={19} /></div><h2 id="delete-dialog-title">{deleteTarget.kind === 'folder' ? 'Usuń folder?' : 'Usuń notatkę?'}</h2><p>{deleteTarget.kind === 'folder' ? <>Folder <strong>„{deleteTarget.label}”</strong> i jego zawartość zostaną trwale usunięte. {deleteTarget.noteCount ? `Usunięte zostanie też ${deleteTarget.noteCount} ${deleteTarget.noteCount === 1 ? 'notatka' : 'notatek'} wraz z załącznikami SVG.` : 'Folder jest pusty.'}</> : <>Notatka <strong>„{deleteTarget.label}”</strong> i dołączone do niej schematy SVG zostaną trwale usunięte.</>}</p><div className="folder-dialog-actions"><button className="button secondary" onClick={() => setDeleteTarget(null)}>Anuluj</button><button className="button danger-button" onClick={() => void confirmDelete()}><Trash2 size={14} />Usuń</button></div></section></div>}

@@ -11,18 +11,22 @@ export function MarkdownEditor({
   assets,
   revision,
   onChange,
+  onSelectionChange,
 }: {
   noteId: string
   markdown: string
   assets: NoteAsset[]
   revision: number
   onChange: (markdown: string) => void
+  onSelectionChange: (text: string) => void
 }) {
   const root = useRef<HTMLDivElement>(null)
   const onChangeRef = useRef(onChange)
+  const onSelectionChangeRef = useRef(onSelectionChange)
   const [initialDocument] = useState(() => ({ markdown, assets }))
 
   useEffect(() => { onChangeRef.current = onChange }, [onChange])
+  useEffect(() => { onSelectionChangeRef.current = onSelectionChange }, [onSelectionChange])
 
   useEffect(() => {
     if (!root.current) return
@@ -39,6 +43,17 @@ export function MarkdownEditor({
     void editor.create()
     return () => { void editor.destroy() }
   }, [noteId, revision, initialDocument])
+
+  useEffect(() => {
+    function updateSelection() {
+      const selection = window.getSelection()
+      const container = root.current
+      if (selection && container?.contains(selection.anchorNode)) onSelectionChangeRef.current(selection.toString())
+      else onSelectionChangeRef.current('')
+    }
+    document.addEventListener('selectionchange', updateSelection)
+    return () => document.removeEventListener('selectionchange', updateSelection)
+  }, [])
 
   return <div className="markdown-editor" ref={root} aria-label="Treść notatki" />
 }

@@ -1,5 +1,16 @@
 import type { ReviewSession, ReviewSessionStatus } from './types'
 
+export function moveReviewNote(noteIds: string[], noteId: string, destinationIndex: number): string[] {
+  const sourceIndex = noteIds.indexOf(noteId)
+  if (sourceIndex < 0 || !noteIds.length) return noteIds
+  const targetIndex = Math.max(0, Math.min(noteIds.length - 1, destinationIndex))
+  if (sourceIndex === targetIndex) return noteIds
+  const next = [...noteIds]
+  const [moved] = next.splice(sourceIndex, 1)
+  next.splice(targetIndex, 0, moved)
+  return next
+}
+
 export function checkpointReviewSession(
   session: ReviewSession,
   now = Date.now(),

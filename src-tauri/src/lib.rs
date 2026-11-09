@@ -88,6 +88,8 @@ struct OllamaTagsResponse {
 struct OllamaMessage {
     role: String,
     content: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    images: Option<Vec<String>>,
 }
 
 #[derive(Deserialize)]

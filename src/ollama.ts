@@ -1,4 +1,5 @@
 import { Channel, invoke, isTauri } from '@tauri-apps/api/core'
+import { sanitizeSvg } from './content'
 
 export type OllamaModel = {
   name: string
@@ -9,6 +10,60 @@ export type OllamaModel = {
 export type OllamaMessage = {
   role: 'system' | 'user' | 'assistant'
   content: string
+  images?: string[]
+}
+
+export async function svgToPngBase64(svg: string): Promise<string> {
+  const safeSvg = sanitizeSvg(svg)
+  const parsedDocument = new DOMParser().parseFromString(safeSvg, 'image/svg+xml')
+  const root = parsedDocument.documentElement
+  const dimension = (value: string | null) => {
+    if (!value || /%\s*$/.test(value)) return undefined
+    const parsed = Number.parseFloat(value)
+    return Number.isFinite(parsed) && parsed > 0 ? parsed : undefined
+  }
+  const viewBox = root.getAttribute('viewBox')?.trim().split(/[\s,]+/).map(Number)
+  const hasValidViewBox = viewBox?.length === 4 && viewBox.every(Number.isFinite) && viewBox[2] > 0 && viewBox[3] > 0
+  const viewBoxWidth = hasValidViewBox ? viewBox[2] : undefined
+  const viewBoxHeight = hasValidViewBox ? viewBox[3] : undefined
+  const widthAttribute = dimension(root.getAttribute('width'))
+  const heightAttribute = dimension(root.getAttribute('height'))
+  const sourceWidth = widthAttribute ?? (heightAttribute && viewBoxWidth && viewBoxHeight
+    ? heightAttribute * viewBoxWidth / viewBoxHeight
+    : viewBoxWidth ?? 800)
+  const sourceHeight = heightAttribute ?? (viewBoxWidth && viewBoxHeight
+    ? sourceWidth * viewBoxHeight / viewBoxWidth
+    : 500)
+  if (!Number.isFinite(sourceWidth) || !Number.isFinite(sourceHeight) || sourceWidth <= 0 || sourceHeight <= 0) {
+    throw new Error('Grafika SVG ma nieprawidłowe wymiary.')
+  }
+  root.setAttribute('width', String(sourceWidth))
+  root.setAttribute('height', String(sourceHeight))
+
+  const objectUrl = URL.createObjectURL(new Blob([new XMLSerializer().serializeToString(root)], { type: 'image/svg+xml' }))
+  try {
+    const image = new Image()
+    await new Promise<void>((resolve, reject) => {
+      image.onload = () => resolve()
+      image.onerror = () => reject(new Error('Nie udało się przygotować schematu SVG dla modelu.'))
+      image.src = objectUrl
+    })
+    const scale = Math.min(2, 1536 / Math.max(sourceWidth, sourceHeight))
+    const width = Math.max(1, Math.round(sourceWidth * scale))
+    const height = Math.max(1, Math.round(sourceHeight * scale))
+    const canvas = document.createElement('canvas')
+    canvas.width = width
+    canvas.height = height
+    const context = canvas.getContext('2d')
+    if (!context) throw new Error('Nie udało się przygotować obrazu schematu.')
+    context.fillStyle = '#fff'
+    context.fillRect(0, 0, width, height)
+    context.drawImage(image, 0, 0, width, height)
+    const dataUrl = canvas.toDataURL('image/png')
+    return dataUrl.slice(dataUrl.indexOf(',') + 1)
+  } finally {
+    URL.revokeObjectURL(objectUrl)
+  }
 }
 
 function apiUrl(baseUrl: string, route: string): string {
