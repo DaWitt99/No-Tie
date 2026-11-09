@@ -44,7 +44,7 @@ export const starterAssets: NoteAsset[] = [
 ]
 
 export function noteToMarkdown(note: Note): string {
-  const metadata = stringifyYaml({
+  const metadata: Record<string, unknown> = {
     id: note.id,
     title: note.title,
     folder: note.folder,
@@ -52,8 +52,9 @@ export function noteToMarkdown(note: Note): string {
     favorite: note.favorite,
     createdAt: note.createdAt,
     updatedAt: note.updatedAt,
-  }).trimEnd()
-  return `---\n${metadata}\n---\n\n${note.content.trimStart()}\n`
+  }
+  if (typeof note.color === 'string' && /^#[\da-f]{6}$/i.test(note.color)) metadata.color = note.color
+  return `---\n${stringifyYaml(metadata).trimEnd()}\n---\n\n${note.content.trimStart()}\n`
 }
 
 export function markdownToNote(markdown: string, fallbackId: string, now = Date.now()): Note {
@@ -66,6 +67,7 @@ export function markdownToNote(markdown: string, fallbackId: string, now = Date.
     id: typeof metadata.id === 'string' ? metadata.id : fallbackId,
     title: typeof metadata.title === 'string' ? metadata.title : 'Importowana notatka',
     folder: typeof metadata.folder === 'string' ? metadata.folder : 'Importowane',
+    color: typeof metadata.color === 'string' && /^#[\da-f]{6}$/i.test(metadata.color) ? metadata.color : undefined,
     tags,
     favorite: metadata.favorite === true,
     createdAt: typeof metadata.createdAt === 'number' ? metadata.createdAt : now,

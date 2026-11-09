@@ -2,11 +2,13 @@ import { isTauri } from '@tauri-apps/api/core'
 import { documentDir, join } from '@tauri-apps/api/path'
 import { exists, mkdir, readDir, readTextFile, remove, rename, writeTextFile } from '@tauri-apps/plugin-fs'
 import { markdownToNote, noteToMarkdown, sanitizeSvg } from './content'
-import type { Note, NoteAsset } from './types'
+import type { Note, NoteAsset, ReviewSession, ReviewSessionStatus } from './types'
 
 const DATABASE = 'no-tie-notes'
 const DATABASE_VERSION = 2
 const NATIVE_NOTES_FOLDER = 'Notatki'
+const FOLDER_COLORS_FILE = '.no-tie-folder-colors.json'
+const REVIEW_SESSIONS_FILE = '.no-tie-review-sessions.json'
 
 let databasePromise: Promise<IDBDatabase> | undefined
 let nativeNotesRoot: Promise<string> | undefined
@@ -140,6 +142,94 @@ export async function saveFolders(folders: string[]): Promise<void> {
     await mkdir(directory, { recursive: true })
     await writeTextFile(await join(directory, FOLDER_MARKER), folder)
   }
+}
+
+function normalizeFolderColors(value: unknown): Record<string, string> {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return {}
+  return Object.fromEntries(Object.entries(value as Record<string, unknown>).flatMap(([folder, color]) => {
+    const path = folder.trim().replace(/^\/+|\/+$/g, '')
+    return path && typeof color === 'string' && /^#[\da-f]{6}$/i.test(color) ? [[path, color]] : []
+  }))
+}
+
+export async function getFolderColors(): Promise<Record<string, string>> {
+  if (!usesNativeFiles) {
+    const stored = await withStore<unknown>('settings', 'readonly', store => store.get('folderColors'))
+    return normalizeFolderColors(stored)
+  }
+  const path = await join(await getNativeNotesRoot(), FOLDER_COLORS_FILE)
+  if (!await exists(path)) return {}
+  try {
+    return normalizeFolderColors(JSON.parse(await readTextFile(path)))
+  } catch {
+    return {}
+  }
+}
+
+export async function saveFolderColors(colors: Record<string, string>): Promise<void> {
+  const normalized = normalizeFolderColors(colors)
+  if (!usesNativeFiles) {
+    await withStore<IDBValidKey>('settings', 'readwrite', store => store.put(normalized, 'folderColors'))
+    return
+  }
+  const root = await getNativeNotesRoot()
+  await writeTextFile(await join(root, FOLDER_COLORS_FILE), JSON.stringify(normalized, null, 2))
+}
+
+function normalizeReviewSessions(value: unknown): ReviewSession[] {
+  if (!Array.isArray(value)) return []
+  return value.flatMap((entry): ReviewSession[] => {
+    if (!entry || typeof entry !== 'object') return []
+    const session = entry as Partial<ReviewSession>
+    if (typeof session.id !== 'string' || !Array.isArray(session.noteIds)) return []
+    const noteIds = [...new Set(session.noteIds.filter((id): id is string => typeof id === 'string'))]
+    const noteTimes = session.noteTimesMs && typeof session.noteTimesMs === 'object' && !Array.isArray(session.noteTimesMs)
+      ? Object.fromEntries(Object.entries(session.noteTimesMs as Record<string, unknown>)
+        .filter(([id, milliseconds]) => noteIds.includes(id) && typeof milliseconds === 'number' && Number.isFinite(milliseconds) && milliseconds >= 0))
+      : {}
+    const status: ReviewSessionStatus = ['ready', 'running', 'paused', 'completed'].includes(session.status ?? '')
+      ? session.status as ReviewSessionStatus
+      : 'ready'
+    return [{
+      id: session.id,
+      title: typeof session.title === 'string' ? session.title : 'Powtórka',
+      noteIds,
+      createdAt: typeof session.createdAt === 'number' ? session.createdAt : Date.now(),
+      updatedAt: typeof session.updatedAt === 'number' ? session.updatedAt : Date.now(),
+      totalTimeMs: typeof session.totalTimeMs === 'number' && Number.isFinite(session.totalTimeMs) ? Math.max(0, session.totalTimeMs) : 0,
+      noteTimesMs: noteTimes as Record<string, number>,
+      activeNoteId: typeof session.activeNoteId === 'string' && noteIds.includes(session.activeNoteId) ? session.activeNoteId : noteIds[0] ?? null,
+      status: status === 'running' ? 'paused' : status,
+    }]
+  })
+}
+
+export async function getReviewSessions(): Promise<ReviewSession[]> {
+  if (!usesNativeFiles) {
+    const stored = await withStore<unknown>('settings', 'readonly', store => store.get('reviewSessions'))
+    return normalizeReviewSessions(stored)
+  }
+  const path = await join(await getNativeNotesRoot(), REVIEW_SESSIONS_FILE)
+  if (!await exists(path)) return []
+  try {
+    return normalizeReviewSessions(JSON.parse(await readTextFile(path)))
+  } catch {
+    return []
+  }
+}
+
+export async function saveReviewSessions(sessions: ReviewSession[]): Promise<void> {
+  const saved = sessions.map(session => ({
+    ...session,
+    status: session.status === 'running' ? 'paused' as const : session.status,
+    runningSince: undefined,
+  }))
+  if (!usesNativeFiles) {
+    await withStore<IDBValidKey>('settings', 'readwrite', store => store.put(saved, 'reviewSessions'))
+    return
+  }
+  const root = await getNativeNotesRoot()
+  await writeTextFile(await join(root, REVIEW_SESSIONS_FILE), JSON.stringify(saved, null, 2))
 }
 
 export async function removeFolderFromDisk(folder: string): Promise<void> {
