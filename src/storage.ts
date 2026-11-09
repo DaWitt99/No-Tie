@@ -79,8 +79,67 @@ async function getNativeNotesRoot(): Promise<string> {
   return nativeNotesRoot
 }
 
+async function folderDirectory(folder: string): Promise<string> {
+  const segments = folder.split('/').map(part => part.trim()).filter(Boolean).map(safeFilePart)
+  return join(await getNativeNotesRoot(), ...segments)
+}
+
 async function noteDirectory(note: Note): Promise<string> {
-  return join(await getNativeNotesRoot(), safeFilePart(note.folder), `${safeFilePart(note.title)}-${safeFilePart(note.id)}`)
+  return join(await folderDirectory(note.folder), `${safeFilePart(note.title)}-${safeFilePart(note.id)}`)
+}
+
+async function removeEmptyParents(directory: string): Promise<void> {
+  const root = await getNativeNotesRoot()
+  const separator = Math.max(directory.lastIndexOf('/'), directory.lastIndexOf('\\'))
+  let current = separator > 0 ? directory.slice(0, separator) : ''
+  while (current && current !== root && current.startsWith(root)) {
+    if (!await exists(current) || (await readDir(current)).length) break
+    await remove(current)
+    const parentSeparator = Math.max(current.lastIndexOf('/'), current.lastIndexOf('\\'))
+    current = parentSeparator > 0 ? current.slice(0, parentSeparator) : ''
+  }
+}
+
+const FOLDER_MARKER = '.no-tie-folder'
+
+async function collectFolderMarkers(directory: string): Promise<string[]> {
+  const folders: string[] = []
+  for (const entry of await readDir(directory)) {
+    if (!entry.isDirectory) continue
+    const path = await join(directory, entry.name)
+    const marker = await join(path, FOLDER_MARKER)
+    if (await exists(marker)) {
+      try { folders.push((await readTextFile(marker)).trim()) } catch { /* ignore malformed folder marker */ }
+    }
+    folders.push(...await collectFolderMarkers(path))
+  }
+  return folders.filter(Boolean)
+}
+
+export async function getFolders(): Promise<string[]> {
+  if (!usesNativeFiles) return (await withStore<string[] | undefined>('settings', 'readonly', store => store.get('folders'))) ?? []
+  return collectFolderMarkers(await getNativeNotesRoot())
+}
+
+export async function saveFolders(folders: string[]): Promise<void> {
+  const normalized = [...new Set(folders.map(folder => folder.trim().replace(/^\/+|\/+$/g, '')).filter(Boolean))]
+  if (!usesNativeFiles) {
+    await withStore<IDBValidKey>('settings', 'readwrite', store => store.put(normalized, 'folders'))
+    return
+  }
+  const root = await getNativeNotesRoot()
+  const current = await collectFolderMarkers(root)
+  for (const folder of current) {
+    if (!normalized.includes(folder)) {
+      const marker = await join(await folderDirectory(folder), FOLDER_MARKER)
+      if (await exists(marker)) await remove(marker)
+    }
+  }
+  for (const folder of normalized) {
+    const directory = await folderDirectory(folder)
+    await mkdir(directory, { recursive: true })
+    await writeTextFile(await join(directory, FOLDER_MARKER), folder)
+  }
 }
 
 async function collectMarkdownFiles(directory: string): Promise<string[]> {
@@ -157,6 +216,7 @@ export async function saveNote(note: Note): Promise<IDBValidKey | void> {
   if (oldDirectory && oldDirectory !== newDirectory && await exists(oldDirectory)) {
     if (await exists(newDirectory)) throw new Error(`Katalog notatki „${note.title}” już istnieje.`)
     await rename(oldDirectory, newDirectory)
+    await removeEmptyParents(oldDirectory)
   } else {
     await mkdir(newDirectory, { recursive: true })
   }

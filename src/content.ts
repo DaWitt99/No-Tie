@@ -102,7 +102,7 @@ export function sanitizeSvg(source: string): string {
   }
 
   const allowedTags = new Set(['svg', 'g', 'rect', 'circle', 'ellipse', 'line', 'path', 'polyline', 'polygon', 'text', 'tspan', 'defs', 'marker'])
-  const allowedAttributes = new Set(['xmlns', 'width', 'height', 'viewBox', 'x', 'y', 'x1', 'x2', 'y1', 'y2', 'cx', 'cy', 'r', 'rx', 'ry', 'd', 'points', 'fill', 'stroke', 'stroke-width', 'stroke-linecap', 'stroke-linejoin', 'text-anchor', 'font-family', 'font-size', 'marker-end', 'refX', 'refY', 'markerWidth', 'markerHeight', 'orient', 'id', 'transform'])
+  const allowedAttributes = new Set(['xmlns', 'width', 'height', 'viewBox', 'x', 'y', 'x1', 'x2', 'y1', 'y2', 'cx', 'cy', 'r', 'rx', 'ry', 'd', 'points', 'fill', 'stroke', 'stroke-width', 'stroke-linecap', 'stroke-linejoin', 'text-anchor', 'font-family', 'font-size', 'marker-end', 'marker-start', 'refX', 'refY', 'markerWidth', 'markerHeight', 'orient', 'id', 'transform', 'data-object-id', 'data-start-target', 'data-start-anchor', 'data-end-target', 'data-end-anchor'])
   document.querySelectorAll('*').forEach(element => {
     if (!allowedTags.has(element.tagName.toLowerCase())) {
       element.remove()

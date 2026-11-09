@@ -1,17 +1,18 @@
 import { useEffect, useRef, useState } from 'react'
 import {
-  ArrowRight, Circle, Copy, Diamond, Minus, MousePointer2, RectangleHorizontal,
+  ArrowRight, Circle, Copy, Minus, MousePointer2, RectangleHorizontal,
   RectangleVertical, Trash2, Triangle, Type, Undo2, X,
 } from 'lucide-react'
 import { SVG, type Svg } from '@svgdotjs/svg.js'
 import type { NoteAsset } from './types'
 import { sanitizeSvg } from './content'
 
-type Tool = 'select' | 'rect' | 'roundRect' | 'ellipse' | 'line' | 'arrow' | 'triangle' | 'diamond' | 'text'
+type Tool = 'select' | 'rect' | 'roundRect' | 'ellipse' | 'line' | 'arrow' | 'polygon' | 'text'
+type ArrowMode = 'end' | 'start' | 'both' | 'none'
 type Box = { x: number; y: number; width: number; height: number }
 type Snap = { delta: number; target: number } | undefined
 type Interaction =
-  | { type: 'draw'; tool: Tool; element: any; id: string; x: number; y: number }
+  | { type: 'draw'; tool: Tool; element: any; id: string; x: number; y: number; keepTool: boolean; startTarget?: string; startAnchor?: string }
   | { type: 'move'; ids: string[]; elements: SVGElement[]; others: Box[]; startX: number; startY: number; lastX: number; lastY: number; bounds: Box; moved: boolean }
   | { type: 'marquee'; x: number; y: number; additive: boolean; initialIds: string[]; moved: boolean }
 
@@ -23,7 +24,7 @@ type OverlayOptions = {
   otherBounds?: Box[]
 }
 
-type TextEdit = { input: HTMLInputElement; x: number; y: number; element?: SVGElement; fontSize: number }
+type TextEdit = { input: HTMLInputElement; x: number; y: number; element?: SVGElement; fontSize: number; keepTool: boolean }
 type Drawing = Svg
 
 const WIDTH = 800
@@ -76,6 +77,78 @@ function ensureObjectIds(stage: SVGSVGElement) {
 function elementsForIds(stage: SVGSVGElement, ids: string[]): SVGElement[] {
   const wanted = new Set(ids)
   return directObjects(stage).filter(element => wanted.has(element.getAttribute('data-object-id') ?? ''))
+}
+
+function anchorNames(): string[] {
+  return ['top-1', 'top-2', 'top-3', 'right-1', 'right-2', 'right-3', 'bottom-1', 'bottom-2', 'bottom-3', 'left-1', 'left-2', 'left-3']
+}
+
+function anchorPosition(element: SVGElement, name: string): { x: number; y: number } | undefined {
+  const box = getBox(element)
+  if (!box) return undefined
+  const [, edge, indexValue] = name.match(/^(top|right|bottom|left)-(\d)$/) ?? []
+  const index = Number(indexValue)
+  if (!edge || !index) return undefined
+  const fraction = index / 4
+  if (['ellipse', 'circle'].includes(element.tagName.toLowerCase())) {
+    const cx = box.x + box.width / 2
+    const cy = box.y + box.height / 2
+    const rx = box.width / 2
+    const ry = box.height / 2
+    const offset = fraction * 2 - 1
+    if (edge === 'top' || edge === 'bottom') {
+      const x = cx + rx * offset
+      const yOffset = ry * Math.sqrt(Math.max(0, 1 - offset * offset))
+      return { x, y: cy + (edge === 'top' ? -yOffset : yOffset) }
+    }
+    const y = cy + ry * offset
+    const xOffset = rx * Math.sqrt(Math.max(0, 1 - offset * offset))
+    return { x: cx + (edge === 'left' ? -xOffset : xOffset), y }
+  }
+  if (edge === 'top') return { x: box.x + box.width * fraction, y: box.y }
+  if (edge === 'right') return { x: box.x + box.width, y: box.y + box.height * fraction }
+  if (edge === 'bottom') return { x: box.x + box.width * fraction, y: box.y + box.height }
+  return { x: box.x, y: box.y + box.height * fraction }
+}
+
+function findAnchorHit(target: EventTarget | null): { id: string; anchor: string } | undefined {
+  const element = target instanceof Element ? target.closest('[data-anchor-target][data-anchor]') : null
+  const id = element?.getAttribute('data-anchor-target')
+  const anchor = element?.getAttribute('data-anchor')
+  return id && anchor ? { id, anchor } : undefined
+}
+
+function updateConnectors(stage: SVGSVGElement) {
+  stage.querySelectorAll<SVGLineElement>('line[data-start-target], line[data-end-target]').forEach(line => {
+    const startTarget = line.getAttribute('data-start-target')
+    const startAnchor = line.getAttribute('data-start-anchor')
+    const endTarget = line.getAttribute('data-end-target')
+    const endAnchor = line.getAttribute('data-end-anchor')
+    const startShape = startTarget ? elementsForIds(stage, [startTarget])[0] : undefined
+    const endShape = endTarget ? elementsForIds(stage, [endTarget])[0] : undefined
+    const start = startShape && startAnchor ? anchorPosition(startShape, startAnchor) : undefined
+    const end = endShape && endAnchor ? anchorPosition(endShape, endAnchor) : undefined
+    if (start) {
+      line.setAttribute('x1', `${start.x}`)
+      line.setAttribute('y1', `${start.y}`)
+    }
+    if (end) {
+      line.setAttribute('x2', `${end.x}`)
+      line.setAttribute('y2', `${end.y}`)
+    }
+  })
+}
+
+function detachConnectors(stage: SVGSVGElement, removedIds: string[]) {
+  const removed = new Set(removedIds)
+  stage.querySelectorAll<SVGLineElement>('line[data-start-target], line[data-end-target]').forEach(line => {
+    for (const side of ['start', 'end'] as const) {
+      const target = line.getAttribute(`data-${side}-target`)
+      if (!target || !removed.has(target)) continue
+      line.removeAttribute(`data-${side}-target`)
+      line.removeAttribute(`data-${side}-anchor`)
+    }
+  })
 }
 
 function intersect(a: Box, b: Box): boolean {
@@ -170,6 +243,20 @@ function renderOverlay(stage: Drawing, ids: string[], options: OverlayOptions = 
       .fill('none')
       .stroke({ color: '#5d73d8', width: 2, dasharray: '7 4' })
   }
+  const activeTool = stage.node.getAttribute('data-active-tool')
+  const showAllAnchors = activeTool === 'line' || activeTool === 'arrow'
+  const anchorElements = (showAllAnchors ? directObjects(stage.node) : elementsForIds(stage.node, ids))
+    .filter(element => !['line', 'text'].includes(element.tagName.toLowerCase()))
+  for (const element of anchorElements) {
+    const id = element.getAttribute('data-object-id')
+    if (!id) continue
+    for (const name of anchorNames()) {
+      const point = anchorPosition(element, name)
+      if (!point) continue
+      layer.circle(8).center(point.x, point.y).fill('#ffffff').stroke({ color: '#6879db', width: 1.7 })
+        .attr({ 'data-anchor-target': id, 'data-anchor': name, 'pointer-events': 'all', cursor: 'crosshair' })
+    }
+  }
   if (options.marquee) {
     const box = options.marquee
     layer.rect(box.width, box.height).move(box.x, box.y).fill('#7587e51c').stroke({ color: '#6378dd', width: 1.5, dasharray: '6 4' })
@@ -194,11 +281,12 @@ function findObjectTarget(stage: SVGSVGElement, target: EventTarget | null): SVG
 }
 
 function updateMarkerColor(stage: SVGSVGElement, element: SVGElement, color: string) {
-  const reference = element.getAttribute('marker-end') ?? element.getAttribute('marker-start')
-  const markerId = reference?.match(/#([^)]+)/)?.[1]?.replaceAll("'", '').replaceAll('"', '')
-  if (!markerId) return
-  const marker = stage.querySelector(`[id="${CSS.escape(markerId)}"]`)
-  marker?.querySelectorAll('path,polygon').forEach(shape => shape.setAttribute('fill', color))
+  for (const reference of [element.getAttribute('marker-end'), element.getAttribute('marker-start')]) {
+    const markerId = reference?.match(/#([^)]+)/)?.[1]?.replaceAll("'", '').replaceAll('"', '')
+    if (!markerId) continue
+    const marker = stage.querySelector(`[id="${CSS.escape(markerId)}"]`)
+    marker?.querySelectorAll('path,polygon').forEach(shape => shape.setAttribute('fill', color))
+  }
 }
 
 export function VectorEditor({
@@ -224,12 +312,17 @@ export function VectorEditor({
   const fillEnabledRef = useRef(true)
   const strokeWidthRef = useRef(3)
   const fontSizeRef = useRef(24)
+  const polygonSidesRef = useRef(6)
+  const arrowModeRef = useRef<ArrowMode>('end')
   const [tool, setTool] = useState<Tool>('select')
   const [strokeColor, setStrokeColor] = useState('#596fd8')
   const [fillColor, setFillColor] = useState('#dfe4ff')
   const [fillEnabled, setFillEnabled] = useState(true)
   const [strokeWidth, setStrokeWidth] = useState(3)
   const [fontSize, setFontSize] = useState(24)
+  const [polygonSides, setPolygonSides] = useState(6)
+  const [arrowMode, setArrowMode] = useState<ArrowMode>('end')
+  const [fitToContent, setFitToContent] = useState(false)
   const [selectedIds, setSelectedIds] = useState<string[]>([])
   const [canUndo, setCanUndo] = useState(false)
 
@@ -239,6 +332,17 @@ export function VectorEditor({
   useEffect(() => { fillEnabledRef.current = fillEnabled }, [fillEnabled])
   useEffect(() => { strokeWidthRef.current = strokeWidth }, [strokeWidth])
   useEffect(() => { fontSizeRef.current = fontSize }, [fontSize])
+  useEffect(() => { polygonSidesRef.current = polygonSides }, [polygonSides])
+  useEffect(() => { arrowModeRef.current = arrowMode }, [arrowMode])
+
+  const chooseTool = (nextTool: Tool) => {
+    toolRef.current = nextTool
+    setTool(nextTool)
+    if (drawing.current) {
+      drawing.current.node.setAttribute('data-active-tool', nextTool)
+      renderOverlay(drawing.current, selectedIdsRef.current)
+    }
+  }
 
   const select = (ids: string[]) => {
     const unique = [...new Set(ids)]
@@ -282,7 +386,7 @@ export function VectorEditor({
       }
     }
 
-    const beginTextEdit = (location: { x: number; y: number }, existing?: SVGElement) => {
+    const beginTextEdit = (location: { x: number; y: number }, existing?: SVGElement, keepTool = false) => {
       textEdit.current?.input.remove()
       const container = mount.current
       if (!container) return
@@ -302,7 +406,7 @@ export function VectorEditor({
       input.style.fontSize = `${size * bounds.width / WIDTH}px`
       input.style.color = existing?.getAttribute('fill') ?? strokeColorRef.current
       container.append(input)
-      textEdit.current = { input, x, y, element: existing, fontSize: size }
+      textEdit.current = { input, x, y, element: existing, fontSize: size, keepTool }
 
       const cancel = () => {
         if (textEdit.current?.input !== input) return
@@ -321,6 +425,7 @@ export function VectorEditor({
           const id = crypto.randomUUID()
           created.attr('data-object-id', id)
           select([id])
+          if (!editing.keepTool) chooseTool('select')
         }
         textEdit.current = null
         input.remove()
@@ -351,11 +456,13 @@ export function VectorEditor({
         element = stage.ellipse(1, 1).move(location.x, location.y)
       } else if (currentTool === 'line' || currentTool === 'arrow') {
         element = stage.line(location.x, location.y, location.x, location.y)
-        if (currentTool === 'arrow') element.marker('end', 14, 14, (marker: any) => marker.path('M 0 0 L 14 7 L 0 14 z').fill(color))
-      } else if (currentTool === 'triangle') {
+        if (currentTool === 'arrow' && arrowModeRef.current !== 'none') {
+          const addMarker = (side: 'start' | 'end') => element.marker(side, 14, 14, (marker: any) => marker.path('M 0 0 L 14 7 L 0 14 z').fill(color).attr({ orient: 'auto-start-reverse' }))
+          if (arrowModeRef.current === 'start' || arrowModeRef.current === 'both') addMarker('start')
+          if (arrowModeRef.current === 'end' || arrowModeRef.current === 'both') addMarker('end')
+        }
+      } else if (currentTool === 'polygon') {
         element = stage.polygon(`${location.x},${location.y} ${location.x},${location.y} ${location.x},${location.y}`)
-      } else if (currentTool === 'diamond') {
-        element = stage.polygon(`${location.x},${location.y} ${location.x},${location.y} ${location.x},${location.y} ${location.x},${location.y}`)
       }
       if (!element) return
       element.stroke({ color, width: size, linecap: 'round', linejoin: 'round' })
@@ -372,17 +479,25 @@ export function VectorEditor({
       const location = point(event)
       const currentTool = toolRef.current
       if (currentTool === 'text') {
-        if (event.detail <= 1) beginTextEdit(location)
+        if (event.detail <= 1) beginTextEdit(location, undefined, event.ctrlKey)
         return
       }
       stage.node.setPointerCapture(event.pointerId)
       if (currentTool !== 'select') {
-        const created = startShape(currentTool, location)
-        if (created) interaction.current = { type: 'draw', tool: currentTool, element: created.element, id: created.id, x: location.x, y: location.y }
+        const anchor = (currentTool === 'line' || currentTool === 'arrow') ? findAnchorHit(event.target) : undefined
+        const target = anchor ? elementsForIds(stage.node, [anchor.id])[0] : undefined
+        const anchorPoint = target && anchor ? anchorPosition(target, anchor.anchor) : undefined
+        const startPoint = anchorPoint ?? location
+        const created = startShape(currentTool, startPoint)
+        if (created) {
+          if (anchor && anchorPoint) created.element.attr({ 'data-start-target': anchor.id, 'data-start-anchor': anchor.anchor })
+          interaction.current = { type: 'draw', tool: currentTool, element: created.element, id: created.id, x: startPoint.x, y: startPoint.y, keepTool: event.ctrlKey, startTarget: anchor?.id, startAnchor: anchor?.anchor }
+        }
         return
       }
 
-      const target = findObjectTarget(stage.node, event.target)
+      const anchorHit = findAnchorHit(event.target)
+      const target = anchorHit ? elementsForIds(stage.node, [anchorHit.id])[0] : findObjectTarget(stage.node, event.target)
       if (!target) {
         const initialIds = event.shiftKey ? selectedIdsRef.current : []
         if (!event.shiftKey) select([])
@@ -412,15 +527,37 @@ export function VectorEditor({
       if (!current) return
       const location = point(event)
       if (current.type === 'draw') {
+        current.keepTool = current.keepTool || event.ctrlKey
         const x = Math.min(current.x, location.x)
         const y = Math.min(current.y, location.y)
         const width = Math.max(12, Math.abs(location.x - current.x))
         const height = Math.max(12, Math.abs(location.y - current.y))
         if (current.tool === 'rect' || current.tool === 'roundRect') current.element.move(x, y).size(width, height)
         else if (current.tool === 'ellipse') current.element.move(x, y).size(width, height)
-        else if (current.tool === 'line' || current.tool === 'arrow') current.element.plot(current.x, current.y, location.x, location.y)
-        else if (current.tool === 'triangle') current.element.plot(`${x + width / 2},${y} ${x + width},${y + height} ${x},${y + height}`)
-        else if (current.tool === 'diamond') current.element.plot(`${x + width / 2},${y} ${x + width},${y + height / 2} ${x + width / 2},${y + height} ${x},${y + height / 2}`)
+        else if (current.tool === 'line' || current.tool === 'arrow') {
+          const hovered = document.elementFromPoint(event.clientX, event.clientY)
+          const hit = findAnchorHit(hovered)
+          const endShape = hit ? elementsForIds(stage.node, [hit.id])[0] : undefined
+          const end = endShape && hit ? anchorPosition(endShape, hit.anchor) : undefined
+          if (hit && end && hit.id !== current.startTarget) {
+            current.element.plot(current.x, current.y, end.x, end.y)
+            current.element.attr({ 'data-end-target': hit.id, 'data-end-anchor': hit.anchor })
+          } else {
+            current.element.plot(current.x, current.y, location.x, location.y)
+            current.element.node.removeAttribute('data-end-target')
+            current.element.node.removeAttribute('data-end-anchor')
+          }
+        } else if (current.tool === 'polygon') {
+          const sides = polygonSidesRef.current
+          const cx = x + width / 2
+          const cy = y + height / 2
+          const points = Array.from({ length: sides }, (_, index) => {
+            const angle = -Math.PI / 2 + index * Math.PI * 2 / sides
+            return `${cx + Math.cos(angle) * width / 2},${cy + Math.sin(angle) * height / 2}`
+          }).join(' ')
+          current.element.plot(points)
+        }
+        updateConnectors(stage.node)
         renderOverlay(stage, [current.id])
       } else if (current.type === 'move') {
         const rawX = location.x - current.startX
@@ -435,6 +572,7 @@ export function VectorEditor({
         const deltaY = totalY - current.lastY
         if (Math.abs(deltaX) + Math.abs(deltaY) > 0.1) current.moved = true
         current.elements.forEach(element => (SVG(element) as any).dmove(deltaX, deltaY))
+        updateConnectors(stage.node)
         current.lastX = totalX
         current.lastY = totalY
         const movedBounds = unionBoxes(current.elements.map(getBox))
@@ -461,8 +599,20 @@ export function VectorEditor({
       if (!current) return
       interaction.current = null
       if (current.type === 'draw') {
+        current.keepTool = current.keepTool || event.ctrlKey
+        if (current.tool === 'line' || current.tool === 'arrow') {
+          const hit = findAnchorHit(document.elementFromPoint(event.clientX, event.clientY))
+          const target = hit ? elementsForIds(stage.node, [hit.id])[0] : undefined
+          const anchor = target && hit ? anchorPosition(target, hit.anchor) : undefined
+          if (hit && anchor && hit.id !== current.startTarget) {
+            current.element.plot(current.x, current.y, anchor.x, anchor.y)
+            current.element.attr({ 'data-end-target': hit.id, 'data-end-anchor': hit.anchor })
+          }
+          updateConnectors(stage.node)
+        }
         recordHistory(stage)
         renderOverlay(stage, [current.id])
+        if (!current.keepTool) chooseTool('select')
       } else if (current.type === 'move') {
         if (current.moved) recordHistory(stage)
         renderOverlay(stage, current.ids)
@@ -484,6 +634,7 @@ export function VectorEditor({
       if ((event.key === 'Delete' || event.key === 'Backspace') && selectedIdsRef.current.length) {
         event.preventDefault()
         const ids = new Set(selectedIdsRef.current)
+        detachConnectors(stage.node, [...ids])
         elementsForIds(stage.node, [...ids]).forEach(element => element.remove())
         select([])
         recordHistory(stage)
@@ -501,7 +652,7 @@ export function VectorEditor({
       if (target?.tagName.toLowerCase() === 'text') {
         event.preventDefault()
         const bounds = getBox(target)
-        if (bounds) beginTextEdit({ x: bounds.x, y: bounds.y }, target)
+        if (bounds) beginTextEdit({ x: bounds.x, y: bounds.y }, target, event.ctrlKey)
       }
     }
 
@@ -527,6 +678,7 @@ export function VectorEditor({
 
   useEffect(() => {
     drawing.current?.node.setAttribute('data-active-tool', tool)
+    if (drawing.current) renderOverlay(drawing.current, selectedIdsRef.current)
   }, [tool])
 
   function undo() {
@@ -546,14 +698,32 @@ export function VectorEditor({
     const stage = drawing.current
     const elements = stage ? elementsForIds(stage.node, selectedIdsRef.current) : []
     if (!stage || !elements.length) return
-    const copies = elements.map(element => {
+    const idMap = new Map<string, string>()
+    const cloned = elements.map(element => {
       const copy = element.cloneNode(true) as SVGElement
       const id = crypto.randomUUID()
+      const originalId = element.getAttribute('data-object-id')
+      if (originalId) idMap.set(originalId, id)
       copy.setAttribute('data-object-id', id)
       stage.node.append(copy)
       ;(SVG(copy) as any).dmove(20, 20)
-      return id
+      return { copy, id }
     })
+    cloned.forEach(({ copy }) => {
+      for (const side of ['start', 'end'] as const) {
+        const attribute = `data-${side}-target`
+        const target = copy.getAttribute(attribute)
+        if (!target) continue
+        const replacement = idMap.get(target)
+        if (replacement) copy.setAttribute(attribute, replacement)
+        else {
+          copy.removeAttribute(attribute)
+          copy.removeAttribute(`data-${side}-anchor`)
+        }
+      }
+    })
+    updateConnectors(stage.node)
+    const copies = cloned.map(({ id }) => id)
     selectedIdsRef.current = copies
     setSelectedIds(copies)
     recordHistory(stage)
@@ -569,6 +739,7 @@ export function VectorEditor({
   function deleteSelected() {
     const stage = drawing.current
     if (!stage || !selectedIdsRef.current.length) return
+    detachConnectors(stage.node, selectedIdsRef.current)
     elementsForIds(stage.node, selectedIdsRef.current).forEach(element => element.remove())
     selectedIdsRef.current = []
     setSelectedIds([])
@@ -639,10 +810,21 @@ export function VectorEditor({
     if (!stage) return
     const copy = stage.node.cloneNode(true) as SVGSVGElement
     copy.querySelectorAll('[data-editor-ui]').forEach(element => element.remove())
-    copy.querySelectorAll('[data-object-id], [data-background]').forEach(element => {
-      element.removeAttribute('data-object-id')
-      element.removeAttribute('data-background')
-    })
+    if (fitToContent) copy.querySelectorAll('[data-background]').forEach(element => element.remove())
+    else copy.querySelectorAll('[data-background]').forEach(element => element.removeAttribute('data-background'))
+    if (fitToContent) {
+      const bounds = unionBoxes(directObjects(stage.node).map(getBox))
+      if (bounds) {
+        const margin = 20
+        const x = Math.floor(bounds.x - margin)
+        const y = Math.floor(bounds.y - margin)
+        const width = Math.max(1, Math.ceil(bounds.width + margin * 2))
+        const height = Math.max(1, Math.ceil(bounds.height + margin * 2))
+        copy.setAttribute('viewBox', `${x} ${y} ${width} ${height}`)
+        copy.setAttribute('width', `${width}`)
+        copy.setAttribute('height', `${height}`)
+      }
+    }
     onSave(sanitizeSvg(new XMLSerializer().serializeToString(copy)))
   }
 
@@ -653,8 +835,7 @@ export function VectorEditor({
     { id: 'ellipse', label: 'Elipsa', icon: Circle },
     { id: 'line', label: 'Linia', icon: Minus },
     { id: 'arrow', label: 'Strzałka', icon: ArrowRight },
-    { id: 'triangle', label: 'Trójkąt', icon: Triangle },
-    { id: 'diamond', label: 'Romb', icon: Diamond },
+    { id: 'polygon', label: 'Wielokąt', icon: Triangle },
     { id: 'text', label: 'Tekst na planszy', icon: Type },
   ]
 
@@ -669,9 +850,11 @@ export function VectorEditor({
           <div className="drawing-tool-group" role="group" aria-label="Narzędzia rysowania">
             {tools.map(item => {
               const Icon = item.icon
-              return <button key={item.id} className={`tool-button ${tool === item.id ? 'selected' : ''}`} onClick={() => setTool(item.id)} title={item.label} aria-label={item.label} aria-pressed={tool === item.id}><Icon size={17} /></button>
+              return <button key={item.id} className={`tool-button ${tool === item.id ? 'selected' : ''}`} onClick={() => chooseTool(item.id)} title={item.label} aria-label={item.label} aria-pressed={tool === item.id}><Icon size={17} /></button>
             })}
           </div>
+          {tool === 'arrow' && <label className="drawing-select-control"><span>Strzałka</span><select value={arrowMode} onChange={event => setArrowMode(event.target.value as ArrowMode)} aria-label="Rodzaj strzałki"><option value="end">Grot na końcu</option><option value="start">Grot na początku</option><option value="both">Groty po obu stronach</option><option value="none">Bez grotu</option></select></label>}
+          {tool === 'polygon' && <label className="drawing-select-control"><span>Wielokąt</span><select value={polygonSides} onChange={event => setPolygonSides(Number(event.target.value))} aria-label="Typ wielokąta"><option value="3">Trójkąt</option><option value="4">Romb</option><option value="5">Pięciokąt</option><option value="6">Sześciokąt</option><option value="8">Ośmiokąt</option></select></label>}
           <span className="toolbar-divider" />
           <label className="color-control" title="Kolor konturu">
             <input type="color" value={strokeColor} onChange={event => applyStrokeColor(event.target.value)} aria-label="Kolor konturu" />
@@ -684,6 +867,7 @@ export function VectorEditor({
           <label className="fill-toggle"><input type="checkbox" checked={fillEnabled} onChange={event => applyFillEnabled(event.target.checked)} aria-label="Włącz wypełnienie" />Wypełnij</label>
           <label className="line-width-control" title="Grubość konturu"><span>Linia</span><input type="range" min="1" max="8" value={strokeWidth} onChange={event => applyStrokeWidth(Number(event.target.value))} aria-label="Grubość konturu" /><output>{strokeWidth}</output></label>
           <label className="font-size-control" title="Rozmiar tekstu"><Type size={14} /><input type="number" min="8" max="96" value={fontSize} onChange={event => applyFontSize(Number(event.target.value))} aria-label="Rozmiar tekstu" /></label>
+          <label className="fill-toggle fit-content-toggle" title="Dopasuj rozmiar SVG do rysunku"><input type="checkbox" checked={fitToContent} onChange={event => setFitToContent(event.target.checked)} aria-label="Dopasuj obszar SVG do treści" />Przytnij SVG</label>
           <span className="toolbar-divider" />
           <span className="selection-count">{selectedIds.length ? `${selectedIds.length} zazn.` : 'Brak zaznaczenia'}</span>
           <button className="tool-button" onClick={duplicateSelected} disabled={!selectedIds.length} title="Duplikuj zaznaczenie (Ctrl+D)" aria-label="Duplikuj zaznaczenie"><Copy size={16} /></button>

@@ -1,15 +1,21 @@
 import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import {
-  Archive, BookOpen, Check, ChevronDown, Clock3, Code2, Eye, FilePlus2, Folder, Heart, Import, Lightbulb,
-  Menu, MoreHorizontal, PanelLeft, Plus, Search, Settings2, Sparkles, Star, Tag, Trash2, X,
+  Archive, BookOpen, Check, Clock3, Code2, Eye, FilePlus2, Folder, Heart, Import, Lightbulb,
+  Menu, MoreHorizontal, PanelLeft, Plus, Search, Settings2, Sparkles, Star, Tag, Trash2, X, FileText,
 } from 'lucide-react'
 import { downloadArchive, parseArchive } from './archive'
 import { starterAssets, starterNotes } from './content'
-import { getAssets, getNotes, hasInitialized, markInitialized, removeAssetsForNote, removeNote, saveAsset, saveNote, storageLocationLabel, usesNativeFiles } from './storage'
+import { getAssets, getFolders, getNotes, hasInitialized, markInitialized, removeAssetsForNote, removeNote, saveAsset, saveFolders, saveNote, storageLocationLabel, usesNativeFiles } from './storage'
 import type { Note, NoteAsset } from './types'
 import './App.css'
 
 type Filter = 'all' | 'favorites' | string
+type NoteDisplayMode = 'full' | 'names-tags' | 'names'
+
+function folderParents(path: string): string[] {
+  const parts = path.split('/').map(part => part.trim()).filter(Boolean)
+  return parts.map((_, index) => parts.slice(0, index + 1).join('/'))
+}
 
 
 const MarkdownEditor = lazy(() => import('./MarkdownEditor').then(module => ({ default: module.MarkdownEditor })))
@@ -53,6 +59,14 @@ function App() {
   const [editingAsset, setEditingAsset] = useState<NoteAsset | undefined>()
   const [mobileDrawer, setMobileDrawer] = useState<'none' | 'notes' | 'sidebar'>('none')
   const [tagInput, setTagInput] = useState('')
+  const [folderRegistry, setFolderRegistry] = useState<string[]>([])
+  const [showFolderDialog, setShowFolderDialog] = useState(false)
+  const [folderDraft, setFolderDraft] = useState('')
+  const [toast, setToast] = useState('')
+  const [noteDisplayMode, setNoteDisplayMode] = useState<NoteDisplayMode>(() => {
+    const stored = localStorage.getItem('no-tie-note-display-mode')
+    return stored === 'names' || stored === 'names-tags' ? stored : 'full'
+  })
   const importInput = useRef<HTMLInputElement>(null)
   const searchInput = useRef<HTMLInputElement>(null)
 
@@ -62,6 +76,7 @@ function App() {
       try {
         let storedNotes = await getNotes()
         let storedAssets = await getAssets()
+        let storedFolders = await getFolders()
         if (!await hasInitialized()) {
           if (!storedNotes.length) {
             await Promise.all(starterNotes.map(saveNote))
@@ -72,6 +87,8 @@ function App() {
           await markInitialized()
         }
         if (!cancelled) {
+          storedFolders = [...new Set([...storedFolders, ...storedNotes.flatMap(note => folderParents(note.folder))])]
+          setFolderRegistry(storedFolders)
           setNotes(storedNotes.sort((a, b) => b.updatedAt - a.updatedAt))
           setAssets(storedAssets)
           setSelectedId(storedNotes[0]?.id ?? '')
@@ -95,13 +112,18 @@ function App() {
     return () => window.clearTimeout(timeout)
   }, [notes, ready])
 
-  const folders = useMemo(() => [...new Set(notes.map(note => note.folder).filter(Boolean))].sort((a, b) => a.localeCompare(b, 'pl')), [notes])
+  const folders = useMemo(() => [...new Set([...folderRegistry, ...notes.flatMap(note => folderParents(note.folder))])].sort((a, b) => a.localeCompare(b, 'pl')), [folderRegistry, notes])
+  const folderKey = folders.join('\u0000')
+  useEffect(() => {
+    if (ready) void saveFolders(folderKey ? folderKey.split('\u0000') : []).catch(() => setSaved(false))
+  }, [folderKey, ready])
   const selectedNote = notes.find(note => note.id === selectedId)
   const visibleNotes = useMemo(() => {
     const needle = query.trim().toLocaleLowerCase('pl')
     return notes.filter(note => {
       if (activeFilter === 'favorites' && !note.favorite) return false
-      if (activeFilter !== 'all' && activeFilter !== 'favorites' && note.folder !== activeFilter) return false
+      if (activeFilter === 'root' && note.folder) return false
+      if (activeFilter !== 'all' && activeFilter !== 'favorites' && activeFilter !== 'root' && note.folder !== activeFilter && !note.folder.startsWith(`${activeFilter}/`)) return false
       return !needle || `${note.title} ${note.content} ${note.tags.join(' ')}`.toLocaleLowerCase('pl').includes(needle)
     }).sort((a, b) => b.updatedAt - a.updatedAt)
   }, [notes, activeFilter, query])
@@ -113,7 +135,7 @@ function App() {
   }
 
   const createNote = useCallback((template?: Template, folderOverride?: string) => {
-    const folder = folderOverride ?? (activeFilter !== 'all' && activeFilter !== 'favorites' ? activeFilter : 'Osobiste')
+    const folder = folderOverride ?? (activeFilter === 'root' ? '' : activeFilter !== 'all' && activeFilter !== 'favorites' ? activeFilter : 'Osobiste')
     const note = makeNote(folder, template)
     setSaved(false)
     void saveNote(note).then(() => setSaved(true), () => setSaved(false))
@@ -122,6 +144,89 @@ function App() {
     setEditorRevision(value => value + 1)
     setMobileDrawer('none')
   }, [activeFilter])
+
+  async function createFolder() {
+    const name = folderDraft.trim().replace(/^\/+|\/+$/g, '')
+    if (!name) return
+    if (folders.includes(name)) {
+      setToast(`Folder „${name}” już istnieje`)
+      window.setTimeout(() => setToast(''), 2800)
+      return
+    }
+    const next = [...new Set([...folders, ...folderParents(name)])]
+    setFolderRegistry(next)
+    try {
+      await saveFolders(next)
+    } catch {
+      setToast('Nie udało się zapisać folderu')
+      window.setTimeout(() => setToast(''), 2800)
+      return
+    }
+    setActiveFilter(name)
+    setFolderDraft('')
+    setShowFolderDialog(false)
+    setToast(`Folder „${name}” został utworzony`)
+    window.setTimeout(() => setToast(''), 2800)
+  }
+
+  function moveNoteToFolder(id: string, folder: string) {
+    patchNote(id, { folder })
+    if (folder) setFolderRegistry(current => [...new Set([...current, ...folderParents(folder)])])
+  }
+
+  function moveFolder(source: string, target: string) {
+    if (!source || source === target || target.startsWith(`${source}/`)) return
+    const destination = target ? `${target}/${source.split('/').at(-1)}` : source.split('/').at(-1) ?? source
+    if (folders.includes(destination) && destination !== source) {
+      setToast('Folder o tej nazwie już istnieje')
+      window.setTimeout(() => setToast(''), 2800)
+      return
+    }
+    const relocate = (folder: string) => folder === source ? destination : folder.startsWith(`${source}/`) ? `${destination}${folder.slice(source.length)}` : folder
+    const nextFolders = [...new Set(folders.map(relocate).flatMap(folderParents))]
+    setFolderRegistry(nextFolders)
+    setActiveFilter(current => current === source || current.startsWith(`${source}/`) ? relocate(current) : current)
+    setNotes(current => current.map(note => note.folder === source || note.folder.startsWith(`${source}/`) ? { ...note, folder: relocate(note.folder), updatedAt: Date.now() } : note))
+  }
+
+  function handleFolderDrop(event: React.DragEvent, targetFolder: string) {
+    event.preventDefault()
+    const noteId = event.dataTransfer.getData('application/x-no-tie-note')
+    const sourceFolder = event.dataTransfer.getData('application/x-no-tie-folder')
+    if (noteId) moveNoteToFolder(noteId, targetFolder)
+    else if (sourceFolder) moveFolder(sourceFolder, targetFolder)
+  }
+
+  function renderFolderTree(parent: string, depth = 0): React.ReactNode {
+    const children = folders.filter(folder => (folder.includes('/') ? folder.slice(0, folder.lastIndexOf('/')) : '') === parent)
+    return children.map(folder => {
+      const label = folder.split('/').at(-1) ?? folder
+      const directNotes = notes.filter(note => note.folder === folder).sort((a, b) => a.title.localeCompare(b.title, 'pl'))
+      const count = notes.filter(note => note.folder === folder || note.folder.startsWith(`${folder}/`)).length
+      return <div key={folder} className="folder-tree-node">
+        <div className={`folder-drop-row ${activeFilter === folder ? 'active' : ''}`} style={{ paddingLeft: `${10 + depth * 14}px` }} onDragOver={event => event.preventDefault()} onDrop={event => handleFolderDrop(event, folder)}>
+          <button className={`nav-item folder-item ${activeFilter === folder ? 'active' : ''}`} draggable onDragStart={event => event.dataTransfer.setData('application/x-no-tie-folder', folder)} onClick={() => { setActiveFilter(folder); setMobileDrawer('none') }} title={`Przeciągnij folder „${label}”, aby go przenieść`}><Folder size={16} /><span>{label}</span><span className="nav-count">{count}</span></button>
+        </div>
+        {directNotes.map(note => <button key={note.id} className={`folder-file-item ${selectedId === note.id ? 'active' : ''}`} style={{ paddingLeft: `${27 + depth * 14}px` }} draggable onDragStart={event => event.dataTransfer.setData('application/x-no-tie-note', note.id)} onClick={() => { setActiveFilter(folder); setSelectedId(note.id); setMobileDrawer('none') }} title="Przeciągnij notatkę do innego folderu"><FileText size={13} /><span>{note.title || 'Bez tytułu'}</span></button>)}
+        {renderFolderTree(folder, depth + 1)}
+      </div>
+    })
+  }
+
+  function setDisplayMode(mode: NoteDisplayMode) {
+    setNoteDisplayMode(mode)
+    localStorage.setItem('no-tie-note-display-mode', mode)
+  }
+
+  function exportNotesArchive() {
+    try {
+      downloadArchive(notes, assets)
+      setToast('Eksport paczki notatek został rozpoczęty')
+    } catch (error) {
+      setToast(error instanceof Error ? error.message : 'Nie udało się przygotować paczki')
+    }
+    window.setTimeout(() => setToast(''), 2800)
+  }
 
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
@@ -223,9 +328,13 @@ function App() {
           <button className="nav-item" onClick={() => { setActiveFilter('all'); setQuery(''); setMobileDrawer('notes') }}><Clock3 size={17} /><span>Ostatnie</span></button>
         </div>
         <div className="sidebar-section folders-section">
-          <div className="section-heading"><span className="section-label">FOLDERY</span><button className="tiny-icon" title="Dodaj folder" onClick={() => { const name = window.prompt('Nazwa nowego folderu'); if (name?.trim()) { setActiveFilter(name.trim()); createNote(undefined, name.trim()) } }}><Plus size={15} /></button></div>
-          {folders.map(folder => <button key={folder} className={`nav-item folder-item ${activeFilter === folder ? 'active' : ''}`} onClick={() => { setActiveFilter(folder); setMobileDrawer('none') }}><Folder size={16} /><span>{folder}</span><span className="nav-count">{notes.filter(note => note.folder === folder).length}</span></button>)}
-          {!folders.length && <p className="empty-hint">Foldery pojawią się przy notatkach.</p>}
+          <div className="section-heading"><span className="section-label">FOLDERY</span><button className="tiny-icon" title="Dodaj folder" aria-label="Dodaj folder" onClick={() => { setFolderDraft(''); setShowFolderDialog(true) }}><Plus size={15} /></button></div>
+          <div className={`folder-drop-row root-folder-drop ${activeFilter === 'root' ? 'active' : ''}`} onDragOver={event => event.preventDefault()} onDrop={event => handleFolderDrop(event, '')}>
+            <button className={`nav-item folder-item ${activeFilter === 'root' ? 'active' : ''}`} onClick={() => { setActiveFilter('root'); setMobileDrawer('none') }}><Folder size={16} /><span>Bez folderu</span><span className="nav-count">{notes.filter(note => !note.folder).length}</span></button>
+          </div>
+          {notes.filter(note => !note.folder).map(note => <button key={note.id} className={`folder-file-item ${selectedId === note.id ? 'active' : ''}`} draggable onDragStart={event => event.dataTransfer.setData('application/x-no-tie-note', note.id)} onClick={() => { setActiveFilter('root'); setSelectedId(note.id); setMobileDrawer('none') }}><FileText size={13} /><span>{note.title || 'Bez tytułu'}</span></button>)}
+          {renderFolderTree('')}
+          {!folders.length && !notes.some(note => !note.folder) && <p className="empty-hint">Utwórz folder lub przeciągnij tu notatkę.</p>}
         </div>
         <div className="sidebar-bottom">
           <div className="offline-card"><span className="online-dot" /><div><strong>Dane lokalne</strong><span>{storageLocationLabel} · offline</span></div><Check size={15} /></div>
@@ -234,16 +343,16 @@ function App() {
       </aside>
 
       <section className={`notes-panel ${mobileDrawer === 'notes' ? 'mobile-visible' : ''}`}>
-        <div className="notes-panel-heading"><div><p className="eyebrow">TWOJA BIBLIOTEKA</p><h1>{activeFilter === 'all' ? 'Notatki' : activeFilter === 'favorites' ? 'Ulubione' : activeFilter}</h1></div><button className="mobile-close icon-button" onClick={() => setMobileDrawer('none')} aria-label="Zamknij listę"><X size={18} /></button></div>
+        <div className="notes-panel-heading"><div><p className="eyebrow">TWOJA BIBLIOTEKA</p><h1>{activeFilter === 'all' ? 'Notatki' : activeFilter === 'favorites' ? 'Ulubione' : activeFilter === 'root' ? 'Bez folderu' : activeFilter.split('/').at(-1)}</h1></div><button className="mobile-close icon-button" onClick={() => setMobileDrawer('none')} aria-label="Zamknij listę"><X size={18} /></button></div>
         <label className="search-box"><Search size={16} /><input ref={searchInput} value={query} onChange={event => setQuery(event.target.value)} placeholder="Szukaj notatek…" /><kbd>⌘/Ctrl K</kbd></label>
-        <div className="list-toolbar"><span>{visibleNotes.length} NOTATKI</span><button className="sort-button" title="Sortowane od najnowszych"><Clock3 size={14} /><ChevronDown size={13} /></button></div>
+        <div className="list-toolbar"><span>{visibleNotes.length} NOTATKI</span><label className="list-view-select"><span>Widok</span><select value={noteDisplayMode} onChange={event => setDisplayMode(event.target.value as NoteDisplayMode)} aria-label="Sposób wyświetlania notatek"><option value="full">Treść i tagi</option><option value="names-tags">Nazwy i tagi</option><option value="names">Same nazwy</option></select></label></div>
         <div className="note-list">
           {visibleNotes.map(note => (
-            <button key={note.id} className={`note-card ${selectedId === note.id ? 'selected' : ''}`} onClick={() => { setSelectedId(note.id); setMobileDrawer('none') }}>
-              <div className="note-card-top"><span className="note-date">{dateLabel(note.updatedAt)}</span>{note.favorite && <Star size={14} className="favorite-mini" fill="currentColor" />}</div>
+            <button key={note.id} className={`note-card view-${noteDisplayMode} ${selectedId === note.id ? 'selected' : ''}`} draggable onDragStart={event => event.dataTransfer.setData('application/x-no-tie-note', note.id)} onClick={() => { setSelectedId(note.id); setMobileDrawer('none') }}>
+              {noteDisplayMode === 'full' && <div className="note-card-top"><span className="note-date">{dateLabel(note.updatedAt)}</span>{note.favorite && <Star size={14} className="favorite-mini" fill="currentColor" />}</div>}
               <strong>{note.title || 'Bez tytułu'}</strong>
-              <p>{excerpt(note.content) || 'Pusta notatka'}</p>
-              <div className="note-card-bottom"><span className="folder-pill"><Folder size={12} />{note.folder}</span>{note.tags.slice(0, 2).map(tag => <span key={tag} className="tag-pill">{tag}</span>)}</div>
+              {noteDisplayMode === 'full' && <p>{excerpt(note.content) || 'Pusta notatka'}</p>}
+              {noteDisplayMode !== 'names' && <div className="note-card-bottom">{noteDisplayMode === 'full' && <span className="folder-pill"><Folder size={12} />{note.folder || 'Bez folderu'}</span>}{note.tags.map(tag => <span key={tag} className="tag-pill">{tag}</span>)}</div>}
             </button>
           ))}
           {!visibleNotes.length && <div className="empty-state compact"><div className="empty-illustration"><Search size={22} /></div><strong>Brak pasujących notatek</strong><span>Spróbuj zmienić wyszukiwanie albo utwórz nową notatkę.</span><button className="button secondary" onClick={() => createNote()}><Plus size={15} />Nowa notatka</button></div>}
@@ -257,7 +366,7 @@ function App() {
           <div className="breadcrumb"><span>Notatki</span><span className="crumb-slash">/</span><span>{selectedNote?.folder ?? 'Osobiste'}</span></div>
           <div className="topbar-actions">
             <span className={`save-indicator ${saved ? 'is-saved' : ''}`}><span className="save-dot" />{saved ? 'Zapisano' : 'Zapisywanie…'}</span>
-            <button className="button secondary export-button" onClick={() => downloadArchive(notes, assets)}><Archive size={15} /><span>Eksportuj</span></button>
+            <button className="button secondary export-button" onClick={exportNotesArchive}><Archive size={15} /><span>Eksportuj</span></button>
             <button className="icon-button import-icon" onClick={() => importInput.current?.click()} title="Importuj paczkę" aria-label="Importuj paczkę"><Import size={17} /></button>
             <input ref={importInput} type="file" accept=".zip,application/zip" hidden onChange={handleImport} />
           </div>
@@ -266,7 +375,7 @@ function App() {
         {selectedNote ? (
           <article className="note-editor" key={selectedNote.id}>
             <div className="editor-scroll">
-              <div className="note-meta-line"><span className="meta-dot" /><select className="folder-select" value={selectedNote.folder} onChange={event => patchNote(selectedNote.id, { folder: event.target.value })} aria-label="Folder notatki">{folders.map(folder => <option key={folder} value={folder}>{folder}</option>)}</select><span className="meta-divider">·</span>Utworzono {dateLabel(selectedNote.createdAt)}</div>
+              <div className="note-meta-line"><span className="meta-dot" /><select className="folder-select" value={selectedNote.folder} onChange={event => moveNoteToFolder(selectedNote.id, event.target.value)} aria-label="Folder notatki"><option value="">Bez folderu</option>{folders.map(folder => <option key={folder} value={folder}>{folder}</option>)}</select><span className="meta-divider">·</span>Utworzono {dateLabel(selectedNote.createdAt)}</div>
               <input className="note-title-input" value={selectedNote.title} onChange={event => patchNote(selectedNote.id, { title: event.target.value })} placeholder="Tytuł notatki" aria-label="Tytuł notatki" />
               <div className="tags-row"><Tag size={15} /><div className="tag-list">{selectedNote.tags.map(tag => <button className="editable-tag" key={tag} onClick={() => patchNote(selectedNote.id, { tags: selectedNote.tags.filter(item => item !== tag) })} title="Usuń tag">{tag}<X size={11} /></button>)}<input className="tag-input" value={tagInput} onChange={event => setTagInput(event.target.value)} onKeyDown={event => { if (event.key === 'Enter') { event.preventDefault(); addTag() } }} placeholder={selectedNote.tags.length ? 'Dodaj tag…' : 'Dodaj tag'} aria-label="Dodaj tag" />{tagInput && <button className="tag-add-button" onClick={addTag}>Dodaj</button>}</div></div>
               <div className="editor-tools-row">
@@ -283,6 +392,8 @@ function App() {
         )}
       </section>
       {showDrawing && selectedNote && <Suspense fallback={<div className="modal-backdrop"><div className="loading-screen">Otwieram edytor SVG…</div></div>}><VectorEditor asset={editingAsset} onClose={() => { setShowDrawing(false); setEditingAsset(undefined) }} onSave={svg => void saveDrawing(svg)} /></Suspense>}
+      {showFolderDialog && <div className="modal-backdrop" role="presentation" onMouseDown={event => { if (event.target === event.currentTarget) setShowFolderDialog(false) }}><section className="folder-dialog" role="dialog" aria-modal="true" aria-labelledby="folder-dialog-title"><div className="folder-dialog-mark"><Folder size={20} /></div><h2 id="folder-dialog-title">Utwórz folder</h2><p>Foldery możesz później układać, przeciągając je na siebie w panelu po lewej.</p><form onSubmit={event => { event.preventDefault(); void createFolder() }}><label htmlFor="new-folder-name">Nazwa folderu</label><input id="new-folder-name" autoFocus value={folderDraft} onChange={event => setFolderDraft(event.target.value)} placeholder="np. Projekty" /><div className="folder-dialog-actions"><button type="button" className="button secondary" onClick={() => setShowFolderDialog(false)}>Anuluj</button><button type="submit" className="button primary" disabled={!folderDraft.trim()}>Utwórz folder</button></div></form></section></div>}
+      {toast && <div className="app-toast" role="status"><Check size={16} />{toast}</div>}
       {mobileDrawer !== 'none' && <button className="drawer-scrim" aria-label="Zamknij menu" onClick={() => setMobileDrawer('none')} />}
     </main>
   )

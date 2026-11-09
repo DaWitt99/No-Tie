@@ -56,6 +56,9 @@ export function downloadArchive(notes: Note[], assets: NoteAsset[]) {
   const anchor = document.createElement('a')
   anchor.href = href
   anchor.download = `no-tie-notatki-${new Date().toISOString().slice(0, 10)}.zip`
+  anchor.style.display = 'none'
+  document.body.append(anchor)
   anchor.click()
-  URL.revokeObjectURL(href)
+  anchor.remove()
+  window.setTimeout(() => URL.revokeObjectURL(href), 1000)
 }
