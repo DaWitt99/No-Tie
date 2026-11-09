@@ -8,6 +8,7 @@
   overflow: hidden;
   background: var(--canvas);
 }
+.app-shell.with-ollama-chat { grid-template-columns: 248px 314px minmax(300px, 1fr) minmax(300px, 340px); }
 .sidebar {
   display: flex;
   min-height: 0;
@@ -42,6 +43,8 @@
 .folder-drop-row:has(.nav-item:hover), .folder-drop-row.active { background: #ffffff0d; }
 .folder-drop-row:has(.nav-item.active) { background: #303d5a; }
 .folder-drop-row.drop-target-active { background: #596edb35; box-shadow: inset 0 0 0 1px #8e9cff80; }
+.folder-tree-node.drop-target-active { border-radius: 8px; outline: 1px dashed #8795ff; outline-offset: 2px; background: #8795ff0a; }
+.folders-section.drop-target-active { border-radius: 8px; outline: 1px dashed #8795ff; outline-offset: 3px; }
 .folder-file-row { position: relative; display: flex; align-items: center; gap: 2px; min-height: 29px; border-radius: 6px; }
 .folder-file-row.active { background: #ffffff0d; }
 .folder-file-item { display: flex; flex: 1; align-items: center; gap: 8px; min-width: 0; width: auto; min-height: 29px; padding: 0 7px; border: 0; border-radius: 6px; color: #909bb3; background: transparent; text-align: left; font-size: 10px; cursor: grab; }
@@ -126,6 +129,8 @@
 .button.primary:hover { background: #5166d0; }
 .icon-button { display: grid; place-items: center; width: 32px; height: 32px; padding: 0; border: 0; border-radius: 7px; color: #7f8797; background: transparent; cursor: pointer; }
 .icon-button:hover { color: #39435b; background: #f3f4f8; }
+.icon-button.ollama-toggle { color: #7c87b8; }
+.icon-button.ollama-toggle:hover, .icon-button.ollama-toggle.active { color: #5268cf; background: #f0f2ff; }
 .mobile-close, .mobile-actions { display: none; }
 .note-editor { display: flex; flex: 1; flex-direction: column; min-height: 0; }
 .editor-scroll { flex: 1; min-height: 0; overflow: auto; padding: 43px clamp(24px, 6vw, 94px) 30px; }
@@ -211,6 +216,60 @@
 .confirm-dialog > p strong { color: #4a5263; font-weight: 650; }
 .danger-button { display: inline-flex; align-items: center; gap: 6px; border: 1px solid #c94f5d; color: white; background: #c95763; }
 .danger-button:hover { background: #b94754; }
+.ollama-settings-dialog { width: min(440px, 100%); }
+.ollama-settings-dialog form { gap: 9px; }
+.ollama-model-label { display: flex; align-items: center; justify-content: space-between; margin-top: 3px; }
+.link-button { padding: 3px 0; border: 0; color: #5e70cf; background: transparent; font-size: 10px; cursor: pointer; }
+.link-button:hover { color: #4359c2; text-decoration: underline; }
+.link-button:disabled { color: #9fa5bc; cursor: wait; }
+.ollama-settings-dialog form input { width: 100%; }
+.ollama-settings-dialog .ollama-settings-status, .ollama-settings-dialog .ollama-settings-error, .ollama-settings-dialog .ollama-settings-help { margin: 2px 0 0; font-size: 10px; line-height: 1.5; }
+.ollama-settings-dialog .ollama-settings-status { color: #368367; }
+.ollama-settings-dialog .ollama-settings-error { color: #b44f5b; overflow-wrap: anywhere; }
+.ollama-settings-dialog .ollama-settings-help { margin-top: 3px; color: #9298a6; }
+.ollama-settings-dialog code { padding: 1px 4px; border-radius: 4px; color: #5364b0; background: #f0f2ff; font-size: .95em; }
+.ollama-chat-panel { display: none; min-width: 0; min-height: 0; flex-direction: column; overflow: hidden; border-left: 1px solid #e8eaf0; background: #fbfbfd; }
+.app-shell.with-ollama-chat .ollama-chat-panel { display: flex; }
+.ollama-chat-header { display: flex; min-height: 58px; align-items: center; justify-content: space-between; gap: 8px; padding: 0 13px; border-bottom: 1px solid #e8eaf0; background: #fff; }
+.ollama-chat-identity { display: flex; min-width: 0; align-items: center; gap: 9px; }
+.ollama-chat-mark { display: grid; width: 33px; height: 33px; flex: 0 0 33px; place-items: center; border: 1px solid #e5e8fc; border-radius: 10px; color: #6175d3; background: #f2f4ff; }
+.ollama-chat-identity > div:last-child { display: flex; min-width: 0; flex-direction: column; gap: 4px; }
+.ollama-chat-identity strong { color: #30394e; font-size: 11px; font-weight: 700; }
+.ollama-chat-identity span { display: flex; min-width: 0; align-items: center; gap: 5px; overflow: hidden; color: #959baa; font-size: 9px; text-overflow: ellipsis; white-space: nowrap; }
+.model-status { width: 6px; height: 6px; flex: 0 0 6px; border-radius: 50%; background: #d5a45a; }
+.model-status.ready { background: #55b28d; box-shadow: 0 0 0 3px #55b28d1c; }
+.ollama-chat-actions { display: flex; flex: 0 0 auto; align-items: center; gap: 1px; }
+.chat-icon-button { display: grid; width: 28px; height: 28px; place-items: center; padding: 0; border: 0; border-radius: 6px; color: #969cac; background: transparent; cursor: pointer; }
+.chat-icon-button:hover { color: #5b6bc0; background: #f1f3fc; }
+.ollama-chat-messages { display: flex; min-height: 0; flex: 1; flex-direction: column; gap: 13px; overflow-y: auto; padding: 16px 12px; }
+.chat-welcome, .chat-unconfigured { display: flex; flex: 1; flex-direction: column; align-items: center; justify-content: center; padding: 22px; color: #9198a8; text-align: center; }
+.chat-empty-mark { display: grid; width: 48px; height: 48px; place-items: center; margin-bottom: 13px; border: 1px solid #e8eafb; border-radius: 15px; color: #7382d5; background: linear-gradient(145deg, #f3f5ff, #fff); }
+.chat-welcome strong, .chat-unconfigured strong { color: #485269; font-size: 12px; }
+.chat-welcome p, .chat-unconfigured p { max-width: 240px; margin: 7px 0 0; font-size: 10px; line-height: 1.6; }
+.chat-unconfigured .button { margin-top: 15px; }
+.chat-message { display: flex; align-items: flex-start; gap: 8px; }
+.chat-message-avatar { display: grid; width: 25px; height: 25px; flex: 0 0 25px; place-items: center; border: 1px solid #e8eaf2; border-radius: 8px; color: #7f88a4; background: #fff; }
+.chat-message.assistant .chat-message-avatar { color: #6476d2; background: #f4f5ff; border-color: #e6e9ff; }
+.chat-message-body { min-width: 0; flex: 1; padding: 8px 10px; border: 1px solid #e9eaf0; border-radius: 3px 9px 9px; background: #fff; }
+.chat-message.user .chat-message-body { border-color: #e4e8fb; background: #f5f6ff; }
+.chat-message-body > span { display: block; margin-bottom: 4px; color: #9198a7; font-size: 9px; font-weight: 650; }
+.chat-message-body p { margin: 0; color: #525b70; font-size: 11px; line-height: 1.65; overflow-wrap: anywhere; white-space: pre-wrap; }
+.chat-thinking { display: flex; align-items: center; gap: 7px; padding: 5px 4px; color: #8c93a2; font-size: 10px; }
+.chat-thinking svg { color: #6578d1; }
+.spin { animation: spin 1s linear infinite; }
+@keyframes spin { to { transform: rotate(360deg); } }
+.ollama-chat-composer { display: flex; flex-direction: column; gap: 8px; padding: 11px; border-top: 1px solid #e9eaf0; background: #fff; }
+.chat-context-toggle { display: flex; align-items: center; gap: 6px; color: #81889a; font-size: 9px; cursor: pointer; }
+.chat-context-toggle input { margin: 0; accent-color: #667ada; }
+.chat-error { margin: 0; color: #b44f5b; font-size: 10px; line-height: 1.5; overflow-wrap: anywhere; }
+.chat-compose-box { display: flex; align-items: flex-end; gap: 5px; padding: 6px; border: 1px solid #e3e5ec; border-radius: 9px; background: #fcfcfe; box-shadow: 0 2px 6px #1c264008; }
+.chat-compose-box:focus-within { border-color: #aab4ee; box-shadow: 0 0 0 3px #6579dc16; }
+.chat-compose-box textarea { min-width: 0; min-height: 56px; max-height: 140px; flex: 1; padding: 5px; border: 0; outline: 0; color: #3c455a; background: transparent; font-family: inherit; font-size: 11px; line-height: 1.55; resize: vertical; }
+.chat-compose-box textarea::placeholder { color: #a5aab6; }
+.chat-compose-box > button { display: grid; width: 29px; height: 29px; flex: 0 0 29px; place-items: center; border: 0; border-radius: 7px; color: #fff; background: #687bd7; cursor: pointer; }
+.chat-compose-box > button:hover:not(:disabled) { background: #5369cc; }
+.chat-compose-box > button:disabled { color: #b8bfdc; background: #eef0f8; cursor: default; }
+.chat-local-note { display: flex; align-items: center; justify-content: center; gap: 5px; color: #a1a6b1; font-size: 8px; }
 .app-toast { position: fixed; z-index: 90; right: 22px; bottom: 22px; display: flex; align-items: center; gap: 9px; padding: 12px 16px; border: 1px solid #dcece5; border-radius: 10px; color: #356d59; background: #f5fffa; box-shadow: 0 10px 35px #19243a20; font-size: 12px; animation: toast-in .18s ease-out; }
 .app-toast { max-width: min(520px, calc(100vw - 28px)); overflow-wrap: anywhere; }
 .app-toast svg { color: #46a17b; }
@@ -256,11 +315,13 @@
 
 @media (max-width: 1100px) {
   .app-shell { grid-template-columns: 218px 290px minmax(0, 1fr); }
+  .app-shell.with-ollama-chat { grid-template-columns: 180px 205px minmax(220px, 1fr) 250px; }
   .sidebar { padding-right: 11px; padding-left: 11px; }
   .editor-scroll { padding-right: 35px; padding-left: 35px; }
 }
 @media (max-width: 840px) and (min-width: 701px) {
   .app-shell { grid-template-columns: 68px 270px minmax(0, 1fr); }
+  .app-shell.with-ollama-chat { grid-template-columns: 68px minmax(150px, 190px) minmax(160px, 1fr) minmax(220px, 260px); }
   .sidebar { align-items: center; padding: 17px 7px 12px; }
   .brand-row { padding: 0; margin-bottom: 25px; }
   .brand-row > span, .new-note-button span, .new-note-button kbd, .section-label, .nav-item span, .nav-count, .sidebar-bottom, .section-heading .section-label { display: none; }
@@ -280,6 +341,7 @@
 }
 @media (max-width: 700px) {
   .app-shell { display: block; min-height: 0; }
+  .app-shell.with-ollama-chat { display: block; }
   .sidebar, .notes-panel { display: none; }
   .sidebar.mobile-visible, .notes-panel.mobile-visible { position: fixed; z-index: 61; inset: 0 auto 0 0; display: flex; width: min(330px, 88vw); height: 100dvh; box-shadow: 16px 0 50px #18223b2a; }
   .notes-panel.mobile-visible { z-index: 61; background: #fbfbfd; }
@@ -287,6 +349,8 @@
   .mobile-actions { display: flex; align-items: center; gap: 2px; }
   .drawer-scrim { position: fixed; z-index: 60; inset: 0; display: block; border: 0; background: #11182766; }
   .editor-panel { position: relative; z-index: 1; width: 100%; height: 100dvh; min-height: 0; }
+  .app-shell.with-ollama-chat .ollama-chat-panel { position: fixed; z-index: 63; inset: 0 0 0 auto; display: none; width: min(390px, 94vw); height: 100dvh; border-left: 1px solid #e8eaf0; box-shadow: -14px 0 45px #18223b2a; }
+  .app-shell.with-ollama-chat .ollama-chat-panel.mobile-visible { display: flex; }
   .topbar { min-height: 52px; padding: 0 11px; }
   .breadcrumb { gap: 6px; font-size: 10px; }
   .topbar-actions { gap: 4px; }
@@ -295,6 +359,7 @@
   .export-button { width: 33px; min-width: 33px; padding: 0; }
   .export-button span { display: none; }
   .import-icon { width: 29px; }
+  .ollama-chat-header { min-height: 54px; }
   .editor-scroll { padding: 27px 18px 28px; }
   .note-title-input { font-size: 30px; }
   .tags-row { margin: 15px 0 20px; }

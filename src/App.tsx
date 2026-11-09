@@ -1,10 +1,12 @@
 import { lazy, Suspense, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import {
   Archive, BookOpen, Check, Clock3, Eye, FilePlus2, FileText, Folder, Heart, Import, Lightbulb,
-  Menu, MoreHorizontal, MoreVertical, PanelLeft, Pencil, Plus, Search, Settings2, Sparkles, Star, Tag, Trash2, X,
+  Menu, MessageCircle, MoreHorizontal, MoreVertical, PanelLeft, Pencil, Plus, Search, Settings2, Sparkles, Star, Tag, Trash2, X,
 } from 'lucide-react'
 import { exportArchiveToFolder, parseArchive } from './archive'
+import { ChatPanel } from './ChatPanel'
 import { starterAssets, starterNotes } from './content'
+import { listOllamaModels, type OllamaModel } from './ollama'
 import { getAssets, getFolders, getNotes, hasInitialized, markInitialized, removeAssetsForNote, removeFolderFromDisk, removeNote, saveAsset, saveFolders, saveNote, storageLocationLabel, usesNativeFiles } from './storage'
 import type { Note, NoteAsset } from './types'
 import './App.css'
@@ -75,6 +77,16 @@ function App() {
   const [showFolderDialog, setShowFolderDialog] = useState(false)
   const [folderDraft, setFolderDraft] = useState('')
   const [toast, setToast] = useState('')
+  const [showChat, setShowChat] = useState(() => localStorage.getItem('no-tie-ollama-chat-open') === 'true')
+  const [ollamaBaseUrl, setOllamaBaseUrl] = useState(() => localStorage.getItem('no-tie-ollama-url') || 'http://localhost:11434')
+  const [ollamaModel, setOllamaModel] = useState(() => localStorage.getItem('no-tie-ollama-model') || '')
+  const [showOllamaSettings, setShowOllamaSettings] = useState(false)
+  const [ollamaDraftUrl, setOllamaDraftUrl] = useState('http://localhost:11434')
+  const [ollamaDraftModel, setOllamaDraftModel] = useState('')
+  const [ollamaModels, setOllamaModels] = useState<OllamaModel[]>([])
+  const [checkingOllama, setCheckingOllama] = useState(false)
+  const [ollamaSettingsMessage, setOllamaSettingsMessage] = useState('')
+  const [ollamaSettingsError, setOllamaSettingsError] = useState('')
   const [openActionMenu, setOpenActionMenu] = useState('')
   const [renameTarget, setRenameTarget] = useState<EntryTarget | null>(null)
   const [renameDraft, setRenameDraft] = useState('')
@@ -278,8 +290,13 @@ function App() {
 
   function allowFolderDrop(event: React.DragEvent) {
     event.preventDefault()
+    event.stopPropagation()
     event.dataTransfer.dropEffect = 'move'
     event.currentTarget.classList.add('drop-target-active')
+  }
+
+  function clearDropHighlights() {
+    document.querySelectorAll('.drop-target-active').forEach(element => element.classList.remove('drop-target-active'))
   }
 
   function leaveFolderDrop(event: React.DragEvent) {
@@ -289,7 +306,8 @@ function App() {
 
   function handleFolderDrop(event: React.DragEvent, targetFolder: string) {
     event.preventDefault()
-    event.currentTarget.classList.remove('drop-target-active')
+    event.stopPropagation()
+    clearDropHighlights()
     const payload = event.dataTransfer.getData('application/x-no-tie-item') || event.dataTransfer.getData('text/plain')
     if (payload.startsWith('note:')) moveNoteToFolder(payload.slice('note:'.length), targetFolder)
     else if (payload.startsWith('folder:')) moveFolder(payload.slice('folder:'.length), targetFolder)
@@ -411,7 +429,7 @@ function App() {
   function renderNoteFile(note: Note, depth = 0): React.ReactNode {
     const target: EntryTarget = { kind: 'note', id: note.id }
     return <div key={note.id} className={`folder-file-row ${selectedId === note.id ? 'active' : ''}`} style={{ paddingLeft: `${27 + depth * 14}px` }}>
-      <button className="folder-file-item" draggable onDragStart={event => startEntryDrag(event, target)} onClick={() => { setActiveFilter(note.folder ? note.folder : 'root'); setSelectedId(note.id); setMobileDrawer('none') }} title="Przeciągnij notatkę do innego folderu"><FileText size={13} /><span>{note.title || 'Bez tytułu'}</span></button>
+      <button className="folder-file-item" draggable onDragStart={event => startEntryDrag(event, target)} onDragEnd={clearDropHighlights} onClick={() => { setActiveFilter(note.folder ? note.folder : 'root'); setSelectedId(note.id); setMobileDrawer('none') }} title="Przeciągnij notatkę do innego folderu"><FileText size={13} /><span>{note.title || 'Bez tytułu'}</span></button>
       {renderEntryMenu(target)}
     </div>
   }
@@ -423,9 +441,9 @@ function App() {
       const directNotes = notes.filter(note => note.folder === folder).sort((a, b) => a.title.localeCompare(b.title, 'pl'))
       const count = notes.filter(note => note.folder === folder || note.folder.startsWith(`${folder}/`)).length
       const target: EntryTarget = { kind: 'folder', path: folder }
-      return <div key={folder} className="folder-tree-node">
+      return <div key={folder} className="folder-tree-node" data-drop-folder={folder} onDragOver={allowFolderDrop} onDragLeave={leaveFolderDrop} onDrop={event => handleFolderDrop(event, folder)}>
         <div className={`folder-drop-row ${activeFilter === folder ? 'active' : ''}`} style={{ paddingLeft: `${10 + depth * 14}px` }} data-drop-folder={folder} onDragOver={allowFolderDrop} onDragLeave={leaveFolderDrop} onDrop={event => handleFolderDrop(event, folder)}>
-          <button className={`nav-item folder-item ${activeFilter === folder ? 'active' : ''}`} draggable onDragStart={event => startEntryDrag(event, target)} onClick={() => { setActiveFilter(folder); setMobileDrawer('none') }} title={`Przeciągnij folder „${label}”, aby go przenieść`}><Folder size={16} /><span>{label}</span><span className="nav-count">{count}</span></button>
+          <button className={`nav-item folder-item ${activeFilter === folder ? 'active' : ''}`} draggable onDragStart={event => startEntryDrag(event, target)} onDragEnd={clearDropHighlights} onClick={() => { setActiveFilter(folder); setMobileDrawer('none') }} title={`Przeciągnij folder „${label}”, aby go przenieść`}><Folder size={16} /><span>{label}</span><span className="nav-count">{count}</span></button>
           {renderEntryMenu(target)}
         </div>
         {directNotes.map(note => renderNoteFile(note, depth))}
@@ -437,6 +455,62 @@ function App() {
   function setDisplayMode(mode: NoteDisplayMode) {
     setNoteDisplayMode(mode)
     localStorage.setItem('no-tie-note-display-mode', mode)
+  }
+
+  function toggleChat() {
+    setShowChat(current => {
+      const next = !current
+      localStorage.setItem('no-tie-ollama-chat-open', String(next))
+      return next
+    })
+  }
+
+  function closeChat() {
+    setShowChat(false)
+    localStorage.setItem('no-tie-ollama-chat-open', 'false')
+  }
+
+  function openOllamaSettings() {
+    setOllamaDraftUrl(ollamaBaseUrl)
+    setOllamaDraftModel(ollamaModel)
+    setOllamaSettingsMessage('')
+    setOllamaSettingsError('')
+    setShowOllamaSettings(true)
+  }
+
+  async function discoverOllamaModels() {
+    setCheckingOllama(true)
+    setOllamaSettingsMessage('Łączę się z lokalnym serwerem…')
+    setOllamaSettingsError('')
+    try {
+      const available = await listOllamaModels(ollamaDraftUrl)
+      setOllamaModels(available)
+      if (available.length) {
+        setOllamaDraftModel(current => available.some(model => model.name === current) ? current : available[0].name)
+        setOllamaSettingsMessage(`Połączono. Dostępne modele: ${available.length}.`)
+      } else {
+        setOllamaSettingsMessage('Połączono, ale nie znaleziono modeli. Pobierz model w Ollama, a potem odśwież listę.')
+      }
+    } catch (error) {
+      setOllamaSettingsMessage('')
+      setOllamaSettingsError(typeof error === 'string' ? error : error instanceof Error ? error.message : 'Nie udało się połączyć z Ollama.')
+    } finally {
+      setCheckingOllama(false)
+    }
+  }
+
+  function saveOllamaSettings() {
+    const baseUrl = ollamaDraftUrl.trim().replace(/\/+$/, '')
+    const model = ollamaDraftModel.trim()
+    if (!baseUrl) {
+      setOllamaSettingsError('Wpisz adres lokalnego serwera Ollama.')
+      return
+    }
+    setOllamaBaseUrl(baseUrl)
+    setOllamaModel(model)
+    localStorage.setItem('no-tie-ollama-url', baseUrl)
+    localStorage.setItem('no-tie-ollama-model', model)
+    setShowOllamaSettings(false)
   }
 
   async function exportNotesArchive() {
@@ -566,7 +640,7 @@ function App() {
   }
 
   return (
-    <main className={`app-shell ${mobileDrawer !== 'none' ? 'drawer-open' : ''}`}>
+    <main className={`app-shell ${mobileDrawer !== 'none' ? 'drawer-open' : ''} ${showChat ? 'with-ollama-chat' : ''}`}>
       <aside className={`sidebar ${mobileDrawer === 'sidebar' ? 'mobile-visible' : ''}`}>
         <div className="brand-row"><div className="brand-mark">N</div><span>No-Tie</span><button className="mobile-close icon-button" onClick={() => setMobileDrawer('none')} aria-label="Zamknij menu"><X size={18} /></button></div>
         <button className="new-note-button" onClick={() => createNote()}><Plus size={17} /><span>Nowa notatka</span><kbd>N</kbd></button>
@@ -576,7 +650,7 @@ function App() {
           <button className={`nav-item ${activeFilter === 'favorites' ? 'active' : ''}`} onClick={() => { setActiveFilter('favorites'); setMobileDrawer('none') }}><Heart size={17} /><span>Ulubione</span></button>
           <button className="nav-item" onClick={() => { setActiveFilter('all'); setQuery(''); setMobileDrawer('notes') }}><Clock3 size={17} /><span>Ostatnie</span></button>
         </div>
-        <div className="sidebar-section folders-section">
+        <div className="sidebar-section folders-section" data-drop-folder="" onDragOver={allowFolderDrop} onDragLeave={leaveFolderDrop} onDrop={event => handleFolderDrop(event, '')}>
           <div className="section-heading"><span className="section-label">FOLDERY</span><button className="tiny-icon" title="Dodaj folder" aria-label="Dodaj folder" onClick={() => { setFolderDraft(''); setShowFolderDialog(true) }}><Plus size={15} /></button></div>
           <div className={`folder-drop-row root-folder-drop ${activeFilter === 'root' ? 'active' : ''}`} data-drop-folder="" onDragOver={allowFolderDrop} onDragLeave={leaveFolderDrop} onDrop={event => handleFolderDrop(event, '')}>
             <button className={`nav-item folder-item ${activeFilter === 'root' ? 'active' : ''}`} onClick={() => { setActiveFilter('root'); setMobileDrawer('none') }}><Folder size={16} /><span>Bez folderu</span><span className="nav-count">{notes.filter(note => !note.folder).length}</span></button>
@@ -597,7 +671,7 @@ function App() {
         <div className="list-toolbar"><span>{visibleNotes.length} NOTATKI</span><label className="list-view-select"><span>Widok</span><select value={noteDisplayMode} onChange={event => setDisplayMode(event.target.value as NoteDisplayMode)} aria-label="Sposób wyświetlania notatek"><option value="full">Treść i tagi</option><option value="names-tags">Nazwy i tagi</option><option value="names">Same nazwy</option></select></label></div>
         <div className="note-list">
           {visibleNotes.map(note => (
-            <button key={note.id} className={`note-card view-${noteDisplayMode} ${selectedId === note.id ? 'selected' : ''}`} draggable onDragStart={event => startEntryDrag(event, { kind: 'note', id: note.id })} onClick={() => { setSelectedId(note.id); setMobileDrawer('none') }}>
+            <button key={note.id} className={`note-card view-${noteDisplayMode} ${selectedId === note.id ? 'selected' : ''}`} draggable onDragStart={event => startEntryDrag(event, { kind: 'note', id: note.id })} onDragEnd={clearDropHighlights} onClick={() => { setSelectedId(note.id); setMobileDrawer('none') }}>
               {noteDisplayMode === 'full' && <div className="note-card-top"><span className="note-date">{dateLabel(note.updatedAt)}</span>{note.favorite && <Star size={14} className="favorite-mini" fill="currentColor" />}</div>}
               <strong>{note.title || 'Bez tytułu'}</strong>
               {noteDisplayMode === 'full' && <p>{excerpt(note.content) || 'Pusta notatka'}</p>}
@@ -606,7 +680,7 @@ function App() {
           ))}
           {!visibleNotes.length && <div className="empty-state compact"><div className="empty-illustration"><Search size={22} /></div><strong>Brak pasujących notatek</strong><span>Spróbuj zmienić wyszukiwanie albo utwórz nową notatkę.</span><button className="button secondary" onClick={() => createNote()}><Plus size={15} />Nowa notatka</button></div>}
         </div>
-        <div className="notes-list-footer"><span><span className="online-dot" />{usesNativeFiles ? ' Pliki na tym urządzeniu' : ' Zapis na tym urządzeniu'}</span><button title="Ustawienia" aria-label="Ustawienia"><Settings2 size={16} /></button></div>
+        <div className="notes-list-footer"><span><span className="online-dot" />{usesNativeFiles ? ' Pliki na tym urządzeniu' : ' Zapis na tym urządzeniu'}</span><button title="Ustawienia Ollama" aria-label="Ustawienia Ollama" onClick={openOllamaSettings}><Settings2 size={16} /></button></div>
       </section>
 
       <section className="editor-panel">
@@ -615,6 +689,7 @@ function App() {
           <div className="breadcrumb"><span>Notatki</span><span className="crumb-slash">/</span><span>{selectedNote?.folder ?? 'Osobiste'}</span></div>
           <div className="topbar-actions">
             <span className={`save-indicator ${saved ? 'is-saved' : ''}`}><span className="save-dot" />{saved ? 'Zapisano' : 'Zapisywanie…'}</span>
+            <button className={`icon-button ollama-toggle ${showChat ? 'active' : ''}`} onClick={toggleChat} title={showChat ? 'Ukryj czat Ollama' : 'Pokaż czat Ollama'} aria-label={showChat ? 'Ukryj czat Ollama' : 'Pokaż czat Ollama'} aria-pressed={showChat}><MessageCircle size={17} /></button>
             <button className="button secondary export-button" onClick={exportNotesArchive}><Archive size={15} /><span>Eksportuj</span></button>
             <button className="icon-button import-icon" onClick={() => importInput.current?.click()} title="Importuj paczkę" aria-label="Importuj paczkę"><Import size={17} /></button>
             <input ref={importInput} type="file" accept=".zip,application/zip" hidden onChange={handleImport} />
@@ -640,10 +715,12 @@ function App() {
           <div className="empty-state editor-empty"><div className="empty-illustration"><FilePlus2 size={25} /></div><p className="eyebrow">TWOJA PRZESTRZEŃ</p><h2>Zapisz pierwszą myśl</h2><span>Twoje notatki będą dostępne lokalnie i offline.</span><button className="button primary" onClick={() => createNote()}><Plus size={16} />Nowa notatka</button></div>
         )}
       </section>
+      <ChatPanel open={showChat} baseUrl={ollamaBaseUrl} model={ollamaModel} note={selectedNote} onClose={closeChat} onOpenSettings={openOllamaSettings} />
       {showDrawing && selectedNote && <Suspense fallback={<div className="modal-backdrop"><div className="loading-screen">Otwieram edytor SVG…</div></div>}><VectorEditor asset={editingAsset} onClose={() => { setShowDrawing(false); setEditingAsset(undefined) }} onSave={svg => void saveDrawing(svg)} /></Suspense>}
       {showFolderDialog && <div className="modal-backdrop" role="presentation" onMouseDown={event => { if (event.target === event.currentTarget) setShowFolderDialog(false) }}><section className="folder-dialog" role="dialog" aria-modal="true" aria-labelledby="folder-dialog-title"><div className="folder-dialog-mark"><Folder size={20} /></div><h2 id="folder-dialog-title">Utwórz folder</h2><p>Foldery możesz później układać, przeciągając je na siebie w panelu po lewej.</p><form onSubmit={event => { event.preventDefault(); void createFolder() }}><label htmlFor="new-folder-name">Nazwa folderu</label><input id="new-folder-name" autoFocus value={folderDraft} onChange={event => setFolderDraft(event.target.value)} placeholder="np. Projekty" /><div className="folder-dialog-actions"><button type="button" className="button secondary" onClick={() => setShowFolderDialog(false)}>Anuluj</button><button type="submit" className="button primary" disabled={!folderDraft.trim()}>Utwórz folder</button></div></form></section></div>}
       {renameTarget && <div className="modal-backdrop" role="presentation" onMouseDown={event => { if (event.target === event.currentTarget) setRenameTarget(null) }}><section className="folder-dialog action-dialog" role="dialog" aria-modal="true" aria-labelledby="rename-dialog-title"><div className="folder-dialog-mark"><Pencil size={19} /></div><h2 id="rename-dialog-title">Zmień nazwę</h2><p>{renameTarget.kind === 'folder' ? 'Zmienisz nazwę folderu wraz z jego podfolderami.' : 'Zmienisz nazwę notatki i zapisany plik Markdown.'}</p><form onSubmit={event => { event.preventDefault(); commitRename() }}><label htmlFor="entry-rename">Nowa nazwa</label><input id="entry-rename" autoFocus value={renameDraft} onChange={event => setRenameDraft(event.target.value)} onKeyDown={event => { if (event.key === 'Escape') setRenameTarget(null) }} /><div className="folder-dialog-actions"><button type="button" className="button secondary" onClick={() => setRenameTarget(null)}>Anuluj</button><button type="submit" className="button primary" disabled={!renameDraft.trim()}>Zapisz nazwę</button></div></form></section></div>}
       {deleteTarget && <div className="modal-backdrop" role="presentation" onMouseDown={event => { if (event.target === event.currentTarget) setDeleteTarget(null) }}><section className="folder-dialog confirm-dialog" role="dialog" aria-modal="true" aria-labelledby="delete-dialog-title"><div className="danger-mark"><Trash2 size={19} /></div><h2 id="delete-dialog-title">{deleteTarget.kind === 'folder' ? 'Usuń folder?' : 'Usuń notatkę?'}</h2><p>{deleteTarget.kind === 'folder' ? <>Folder <strong>„{deleteTarget.label}”</strong> i jego zawartość zostaną trwale usunięte. {deleteTarget.noteCount ? `Usunięte zostanie też ${deleteTarget.noteCount} ${deleteTarget.noteCount === 1 ? 'notatka' : 'notatek'} wraz z załącznikami SVG.` : 'Folder jest pusty.'}</> : <>Notatka <strong>„{deleteTarget.label}”</strong> i dołączone do niej schematy SVG zostaną trwale usunięte.</>}</p><div className="folder-dialog-actions"><button className="button secondary" onClick={() => setDeleteTarget(null)}>Anuluj</button><button className="button danger-button" onClick={() => void confirmDelete()}><Trash2 size={14} />Usuń</button></div></section></div>}
+      {showOllamaSettings && <div className="modal-backdrop" role="presentation" onMouseDown={event => { if (event.target === event.currentTarget) setShowOllamaSettings(false) }}><section className="folder-dialog ollama-settings-dialog" role="dialog" aria-modal="true" aria-labelledby="ollama-settings-title"><div className="folder-dialog-mark"><MessageCircle size={19} /></div><h2 id="ollama-settings-title">Lokalny model Ollama</h2><p>Podłącz uruchomiony serwer Ollama. Domyślny adres lokalny to <code>http://localhost:11434</code>.</p><form onSubmit={event => { event.preventDefault(); saveOllamaSettings() }}><label htmlFor="ollama-base-url">Adres serwera</label><input id="ollama-base-url" autoFocus type="url" value={ollamaDraftUrl} onChange={event => { setOllamaDraftUrl(event.target.value); setOllamaModels([]); setOllamaSettingsMessage('') }} placeholder="http://localhost:11434" /><div className="ollama-model-label"><label htmlFor="ollama-model-name">Model</label><button type="button" className="link-button" onClick={() => void discoverOllamaModels()} disabled={checkingOllama}><span>{checkingOllama ? 'Łączenie…' : 'Pobierz listę modeli'}</span></button></div><input id="ollama-model-name" list="ollama-model-options" value={ollamaDraftModel} onChange={event => setOllamaDraftModel(event.target.value)} placeholder="np. llama3.2" /><datalist id="ollama-model-options">{ollamaModels.map(model => <option key={model.name} value={model.name} />)}</datalist>{ollamaSettingsMessage && <p className="ollama-settings-status" role="status">{ollamaSettingsMessage}</p>}{ollamaSettingsError && <p className="ollama-settings-error" role="alert">{ollamaSettingsError}</p>}<p className="ollama-settings-help">Modele pobierzesz poleceniem <code>ollama pull llama3.2</code>. Rozmowy są obsługiwane przez lokalny serwer.</p><div className="folder-dialog-actions"><button type="button" className="button secondary" onClick={() => setShowOllamaSettings(false)}>Anuluj</button><button type="submit" className="button primary">Zapisz ustawienia</button></div></form></section></div>}
       {toast && <div className="app-toast" role="status"><Check size={16} />{toast}</div>}
       {mobileDrawer !== 'none' && <button className="drawer-scrim" aria-label="Zamknij menu" onClick={() => setMobileDrawer('none')} />}
     </main>

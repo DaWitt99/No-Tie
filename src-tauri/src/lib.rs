@@ -1,3 +1,4 @@
+use serde::{Deserialize, Serialize};
 #[cfg(desktop)]
 use std::io::Write;
 #[cfg(desktop)]
@@ -69,6 +70,96 @@ async fn save_archive_file(
     }
 }
 
+#[derive(Clone, Deserialize, Serialize)]
+struct OllamaModel {
+    name: String,
+    #[serde(default)]
+    size: Option<u64>,
+    #[serde(default)]
+    modified_at: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct OllamaTagsResponse {
+    models: Vec<OllamaModel>,
+}
+
+#[derive(Clone, Deserialize, Serialize)]
+struct OllamaMessage {
+    role: String,
+    content: String,
+}
+
+#[derive(Deserialize)]
+struct OllamaChatResponse {
+    message: OllamaMessage,
+}
+
+fn ollama_api_url(base_url: &str, route: &str) -> Result<String, String> {
+    let base_url = base_url.trim().trim_end_matches('/');
+    let parsed = reqwest::Url::parse(base_url).map_err(|_| {
+        "Podaj prawidłowy adres serwera Ollama, np. http://localhost:11434.".to_string()
+    })?;
+    if !matches!(parsed.scheme(), "http" | "https") {
+        return Err("Adres Ollama musi zaczynać się od http:// lub https://.".into());
+    }
+    let base_url = base_url.strip_suffix("/api").unwrap_or(base_url);
+    Ok(format!("{base_url}/api/{route}"))
+}
+
+#[tauri::command]
+async fn ollama_list_models(base_url: String) -> Result<Vec<OllamaModel>, String> {
+    let url = ollama_api_url(&base_url, "tags")?;
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(12))
+        .build()
+        .map_err(|error| format!("Nie udało się przygotować połączenia: {error}"))?;
+    let response = client
+        .get(url)
+        .send()
+        .await
+        .map_err(|_| format!("Nie można połączyć się z Ollama pod adresem {base_url}. Sprawdź, czy Ollama jest uruchomiona."))?;
+    let response = response
+        .error_for_status()
+        .map_err(|error| format!("Ollama zwróciła błąd: {error}"))?;
+    response
+        .json::<OllamaTagsResponse>()
+        .await
+        .map(|result| result.models)
+        .map_err(|error| format!("Nie udało się odczytać listy modeli Ollama: {error}"))
+}
+
+#[tauri::command]
+async fn ollama_chat(
+    base_url: String,
+    model: String,
+    messages: Vec<OllamaMessage>,
+) -> Result<String, String> {
+    let model = model.trim();
+    if model.is_empty() {
+        return Err("Wybierz model w ustawieniach Ollama.".into());
+    }
+    let url = ollama_api_url(&base_url, "chat")?;
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(300))
+        .build()
+        .map_err(|error| format!("Nie udało się przygotować połączenia: {error}"))?;
+    let response = client
+        .post(url)
+        .json(&serde_json::json!({ "model": model, "messages": messages, "stream": false }))
+        .send()
+        .await
+        .map_err(|_| format!("Nie można połączyć się z Ollama pod adresem {base_url}. Sprawdź, czy Ollama jest uruchomiona."))?;
+    let response = response
+        .error_for_status()
+        .map_err(|error| format!("Ollama zwróciła błąd: {error}"))?;
+    response
+        .json::<OllamaChatResponse>()
+        .await
+        .map(|result| result.message.content)
+        .map_err(|error| format!("Nie udało się odczytać odpowiedzi modelu: {error}"))
+}
+
 #[cfg(mobile)]
 #[tauri::command]
 async fn save_archive_file(
@@ -110,7 +201,11 @@ pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_fs::init())
-        .invoke_handler(tauri::generate_handler![save_archive_file])
+        .invoke_handler(tauri::generate_handler![
+            save_archive_file,
+            ollama_list_models,
+            ollama_chat
+        ])
         .run(tauri::generate_context!())
         .expect("Błąd uruchamiania aplikacji No-Tie");
 }
