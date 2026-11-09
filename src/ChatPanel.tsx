@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from 'react'
 import { Bot, LoaderCircle, MessageSquare, Send, Settings2, Sparkles, Trash2, UserRound, X } from 'lucide-react'
 import type { Note } from './types'
-import { sendOllamaMessage, type OllamaMessage } from './ollama'
+import { streamOllamaMessage, type OllamaMessage } from './ollama'
 
 type ChatPanelProps = {
   open: boolean
@@ -59,6 +59,8 @@ export function ChatPanel({ open, baseUrl, model, note, onClose, onOpenSettings 
     setDraft('')
     setConversationErrors(current => ({ ...current, [requestKey]: '' }))
     setSending(true)
+    let answer = ''
+    setConversations(current => ({ ...current, [requestKey]: [...nextMessages, { role: 'assistant', content: '' }] }))
 
     const prompt: OllamaMessage[] = []
     if (useNoteContext && note) {
@@ -70,12 +72,18 @@ export function ChatPanel({ open, baseUrl, model, note, onClose, onOpenSettings 
     }
 
     try {
-      const answer = await sendOllamaMessage(baseUrl, model, [...prompt, ...nextMessages])
-      const complete = [...nextMessages, { role: 'assistant' as const, content: answer }]
+      await streamOllamaMessage(baseUrl, model, [...prompt, ...nextMessages], chunk => {
+        answer += chunk
+        setConversations(current => ({ ...current, [requestKey]: [...nextMessages, { role: 'assistant', content: answer }] }))
+      })
+      const complete = answer ? [...nextMessages, { role: 'assistant' as const, content: answer }] : nextMessages
       localStorage.setItem(requestKey, JSON.stringify(complete))
       setConversations(current => ({ ...current, [requestKey]: complete }))
     } catch (sendError) {
       const message = typeof sendError === 'string' ? sendError : sendError instanceof Error ? sendError.message : 'Nie udało się uzyskać odpowiedzi modelu.'
+      const partial = answer ? [...nextMessages, { role: 'assistant' as const, content: answer }] : nextMessages
+      localStorage.setItem(requestKey, JSON.stringify(partial))
+      setConversations(current => ({ ...current, [requestKey]: partial }))
       setConversationErrors(current => ({ ...current, [requestKey]: message }))
     } finally {
       setSending(false)
@@ -115,9 +123,9 @@ export function ChatPanel({ open, baseUrl, model, note, onClose, onOpenSettings 
             {messages.length === 0 && <div className="chat-welcome"><div className="chat-empty-mark"><Sparkles size={21} /></div><strong>{note ? 'Porozmawiaj o tej notatce' : 'Zacznij rozmowę'}</strong><p>{note ? `Kontekst: ${note.title}` : 'Wiadomości są wysyłane do lokalnego serwera Ollama.'}</p></div>}
             {messages.map((message, index) => <article key={`${index}-${message.role}`} className={`chat-message ${message.role}`}>
               <div className="chat-message-avatar">{message.role === 'user' ? <UserRound size={14} /> : <Bot size={14} />}</div>
-              <div className="chat-message-body"><span>{message.role === 'user' ? 'Ty' : 'Asystent'}</span><p>{message.content}</p></div>
+              <div className="chat-message-body"><span>{message.role === 'user' ? 'Ty' : 'Asystent'}</span><p>{message.content}{sending && index === messages.length - 1 && message.role === 'assistant' && message.content && <span className="chat-stream-cursor" aria-hidden="true">▍</span>}</p></div>
             </article>)}
-            {sending && <div className="chat-thinking"><LoaderCircle size={15} className="spin" />Model przygotowuje odpowiedź…</div>}
+            {sending && messages.at(-1)?.role === 'assistant' && !messages.at(-1)?.content && <div className="chat-thinking"><LoaderCircle size={15} className="spin" />Model przygotowuje odpowiedź…</div>}
             <div ref={messagesEnd} />
           </div>
           <form className="ollama-chat-composer" onSubmit={event => { event.preventDefault(); void sendMessage() }}>

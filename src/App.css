@@ -4,30 +4,34 @@
   grid-template-rows: minmax(0, 1fr);
   width: 100%;
   height: 100dvh;
-  min-height: 520px;
   overflow: hidden;
   background: var(--canvas);
 }
 .app-shell.with-ollama-chat { grid-template-columns: 248px 314px minmax(300px, 1fr) minmax(300px, 340px); }
+.app-shell.library-hidden { grid-template-columns: 248px minmax(0, 1fr); }
+.app-shell.with-ollama-chat.library-hidden { grid-template-columns: 248px minmax(0, 1fr) minmax(300px, 340px); }
 .sidebar {
   display: flex;
   min-height: 0;
   flex-direction: column;
   min-width: 0;
-  overflow-x: hidden;
-  overflow-y: auto;
+  overflow: hidden;
   padding: 22px 14px 16px;
   color: #e9ecf6;
   background: #19243a;
   border-right: 1px solid #253149;
 }
+.sidebar-content { display: flex; width: 100%; min-height: 0; flex: 1 1 auto; flex-direction: column; overflow: hidden; }
 .brand-row { display: flex; align-items: center; gap: 10px; padding: 0 8px; margin: 0 0 27px; font-size: 17px; font-weight: 700; letter-spacing: -.4px; }
 .brand-mark { display: grid; place-items: center; width: 32px; height: 32px; flex: 0 0 32px; border-radius: 11px; background: #6579df; color: white; font-size: 17px; font-weight: 800; box-shadow: 0 4px 12px #111a31; }
 .new-note-button { display: flex; align-items: center; gap: 10px; width: 100%; min-height: 42px; padding: 0 11px; border: 1px solid #7182e8; border-radius: 10px; color: #fff; background: linear-gradient(125deg, #687ce7, #586dd7); font-weight: 600; cursor: pointer; box-shadow: 0 6px 14px #111a3133; }
 .new-note-button:hover { background: #7285eb; }
 .new-note-button kbd { margin-left: auto; color: #d5dcff; font-size: 10px; font-weight: 500; }
 .sidebar-section { margin-top: 27px; }
-.review-sidebar-section { max-height: 190px; overflow: auto; margin-top: 18px; }
+.review-sidebar-section, .folders-section { min-height: 0; flex: 1 1 0; overflow-x: hidden; overflow-y: auto; overscroll-behavior: contain; scrollbar-width: none; }
+.review-sidebar-section::-webkit-scrollbar, .folders-section::-webkit-scrollbar { display: none; }
+.review-sidebar-section { margin-top: 18px; }
+.review-sidebar-section > .section-heading, .folders-section > .section-heading { position: sticky; z-index: 5; top: 0; background: #19243a; }
 .review-sidebar-section .section-heading { padding-bottom: 4px; }
 .review-new-button { min-height: 32px; color: #c6ceeb; font-size: 11px; }
 .review-new-button svg { color: #9aa8ec; }
@@ -96,6 +100,7 @@
 .avatar { display: grid; place-items: center; width: 30px; height: 30px; border: 1px solid #7182a5; border-radius: 50%; color: #e8eaff; background: #425478; font-size: 12px; font-weight: 700; }
 
 .notes-panel { display: flex; flex-direction: column; min-width: 0; min-height: 0; background: #fbfbfd; border-right: 1px solid var(--line); }
+.notes-panel[hidden] { display: none !important; }
 .notes-panel-heading { display: flex; align-items: center; justify-content: space-between; padding: 26px 21px 19px; }
 .eyebrow { margin: 0 0 6px; color: #9499a8; font-size: 9px; font-weight: 700; letter-spacing: 1.2px; }
 .notes-panel-heading h1 { margin: 0; color: #242c40; font-size: 22px; font-weight: 700; letter-spacing: -.7px; }
@@ -152,6 +157,8 @@
 .icon-button:hover { color: #39435b; background: #f3f4f8; }
 .icon-button.ollama-toggle { color: #7c87b8; }
 .icon-button.ollama-toggle:hover, .icon-button.ollama-toggle.active { color: #5268cf; background: #f0f2ff; }
+.icon-button.library-toggle { color: #7c87b8; }
+.icon-button.library-toggle:hover, .icon-button.library-toggle.active { color: #5268cf; background: #f0f2ff; }
 .mobile-close, .mobile-actions { display: none; }
 .note-editor { display: flex; flex: 1; flex-direction: column; min-height: 0; }
 .editor-scroll { flex: 1; min-height: 0; overflow: auto; padding: 43px clamp(24px, 6vw, 94px) 30px; }
@@ -344,6 +351,8 @@
 .chat-message.user .chat-message-body { border-color: #e4e8fb; background: #f5f6ff; }
 .chat-message-body > span { display: block; margin-bottom: 4px; color: #9198a7; font-size: 9px; font-weight: 650; }
 .chat-message-body p { margin: 0; color: #525b70; font-size: 11px; line-height: 1.65; overflow-wrap: anywhere; white-space: pre-wrap; }
+.chat-stream-cursor { display: inline-block; margin-left: 1px; color: #6578d1; animation: chat-cursor-blink .9s steps(2, start) infinite; }
+@keyframes chat-cursor-blink { to { visibility: hidden; } }
 .chat-thinking { display: flex; align-items: center; gap: 7px; padding: 5px 4px; color: #8c93a2; font-size: 10px; }
 .chat-thinking svg { color: #6578d1; }
 .spin { animation: spin 1s linear infinite; }
@@ -411,13 +420,18 @@
 @media (max-width: 1100px) {
   .app-shell { grid-template-columns: 218px 290px minmax(0, 1fr); }
   .app-shell.with-ollama-chat { grid-template-columns: 180px 205px minmax(220px, 1fr) 250px; }
+  .app-shell.library-hidden { grid-template-columns: 218px minmax(0, 1fr); }
+  .app-shell.with-ollama-chat.library-hidden { grid-template-columns: 180px minmax(220px, 1fr) 250px; }
   .sidebar { padding-right: 11px; padding-left: 11px; }
   .editor-scroll { padding-right: 35px; padding-left: 35px; }
 }
 @media (max-width: 840px) and (min-width: 701px) {
   .app-shell { grid-template-columns: 68px 270px minmax(0, 1fr); }
   .app-shell.with-ollama-chat { grid-template-columns: 68px minmax(150px, 190px) minmax(160px, 1fr) minmax(220px, 260px); }
+  .app-shell.library-hidden { grid-template-columns: 68px minmax(0, 1fr); }
+  .app-shell.with-ollama-chat.library-hidden { grid-template-columns: 68px minmax(160px, 1fr) minmax(220px, 260px); }
   .sidebar { align-items: center; padding: 17px 7px 12px; }
+  .sidebar-content { width: 100%; }
   .brand-row { padding: 0; margin-bottom: 25px; }
   .brand-row > span, .new-note-button span, .new-note-button kbd, .section-label, .nav-item span, .nav-count, .sidebar-bottom, .section-heading .section-label { display: none; }
   .new-note-button { justify-content: center; width: 42px; min-height: 40px; padding: 0; }
@@ -492,4 +506,13 @@
   .diagram-text { width: 76px; }
   .tool-button { width: 29px; }
   .color-control span { display: none; }
+}
+
+@media (max-height: 600px) and (min-width: 701px) {
+  .sidebar { padding-top: 10px; padding-bottom: 8px; }
+  .brand-row { margin-bottom: 10px; }
+  .sidebar-section { margin-top: 12px; }
+  .review-sidebar-section { margin-top: 8px; }
+  .sidebar-bottom .user-row { display: none; }
+  .offline-card { padding-top: 8px; padding-bottom: 8px; }
 }

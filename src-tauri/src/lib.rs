@@ -91,8 +91,11 @@ struct OllamaMessage {
 }
 
 #[derive(Deserialize)]
-struct OllamaChatResponse {
-    message: OllamaMessage,
+struct OllamaChatStreamChunk {
+    #[serde(default)]
+    message: Option<OllamaMessage>,
+    #[serde(default)]
+    error: Option<String>,
 }
 
 fn ollama_api_url(base_url: &str, route: &str) -> Result<String, String> {
@@ -129,12 +132,37 @@ async fn ollama_list_models(base_url: String) -> Result<Vec<OllamaModel>, String
         .map_err(|error| format!("Nie udało się odczytać listy modeli Ollama: {error}"))
 }
 
+fn forward_ollama_stream_line(
+    line: &[u8],
+    on_chunk: &tauri::ipc::Channel<String>,
+) -> Result<(), String> {
+    let line = String::from_utf8_lossy(line);
+    let line = line.trim();
+    if line.is_empty() {
+        return Ok(());
+    }
+    let chunk: OllamaChatStreamChunk = serde_json::from_str(line)
+        .map_err(|error| format!("Nie udało się odczytać strumienia Ollama: {error}"))?;
+    if let Some(error) = chunk.error {
+        return Err(error);
+    }
+    if let Some(message) = chunk.message {
+        if !message.content.is_empty() {
+            on_chunk
+                .send(message.content)
+                .map_err(|error| format!("Nie udało się przesłać odpowiedzi do interfejsu: {error}"))?;
+        }
+    }
+    Ok(())
+}
+
 #[tauri::command]
-async fn ollama_chat(
+async fn ollama_chat_stream(
     base_url: String,
     model: String,
     messages: Vec<OllamaMessage>,
-) -> Result<String, String> {
+    on_chunk: tauri::ipc::Channel<String>,
+) -> Result<(), String> {
     let model = model.trim();
     if model.is_empty() {
         return Err("Wybierz model w ustawieniach Ollama.".into());
@@ -146,18 +174,30 @@ async fn ollama_chat(
         .map_err(|error| format!("Nie udało się przygotować połączenia: {error}"))?;
     let response = client
         .post(url)
-        .json(&serde_json::json!({ "model": model, "messages": messages, "stream": false }))
+        .json(&serde_json::json!({ "model": model, "messages": messages, "stream": true }))
         .send()
         .await
         .map_err(|_| format!("Nie można połączyć się z Ollama pod adresem {base_url}. Sprawdź, czy Ollama jest uruchomiona."))?;
     let response = response
         .error_for_status()
         .map_err(|error| format!("Ollama zwróciła błąd: {error}"))?;
-    response
-        .json::<OllamaChatResponse>()
+    let mut response = response;
+    let mut pending = Vec::new();
+    while let Some(chunk) = response
+        .chunk()
         .await
-        .map(|result| result.message.content)
-        .map_err(|error| format!("Nie udało się odczytać odpowiedzi modelu: {error}"))
+        .map_err(|error| format!("Nie udało się odebrać strumienia Ollama: {error}"))?
+    {
+        pending.extend_from_slice(&chunk);
+        while let Some(line_end) = pending.iter().position(|byte| *byte == b'\n') {
+            let line = pending.drain(..=line_end).collect::<Vec<_>>();
+            forward_ollama_stream_line(&line, &on_chunk)?;
+        }
+    }
+    if !pending.is_empty() {
+        forward_ollama_stream_line(&pending, &on_chunk)?;
+    }
+    Ok(())
 }
 
 #[cfg(mobile)]
@@ -204,7 +244,7 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             save_archive_file,
             ollama_list_models,
-            ollama_chat
+            ollama_chat_stream
         ])
         .run(tauri::generate_context!())
         .expect("Błąd uruchamiania aplikacji No-Tie");

@@ -106,6 +106,7 @@ function App() {
   const [showFolderDialog, setShowFolderDialog] = useState(false)
   const [folderDraft, setFolderDraft] = useState('')
   const [toast, setToast] = useState('')
+  const [showLibrary, setShowLibrary] = useState(() => localStorage.getItem('no-tie-library-visible') !== 'false')
   const [showChat, setShowChat] = useState(() => localStorage.getItem('no-tie-ollama-chat-open') === 'true')
   const [ollamaBaseUrl, setOllamaBaseUrl] = useState(() => localStorage.getItem('no-tie-ollama-url') || 'http://localhost:11434')
   const [ollamaModel, setOllamaModel] = useState(() => localStorage.getItem('no-tie-ollama-model') || '')
@@ -703,6 +704,14 @@ function App() {
     localStorage.setItem('no-tie-ollama-chat-open', 'false')
   }
 
+  function toggleLibrary() {
+    setShowLibrary(current => {
+      const next = !current
+      localStorage.setItem('no-tie-library-visible', String(next))
+      return next
+    })
+  }
+
   function openOllamaSettings() {
     setOllamaDraftUrl(ollamaBaseUrl)
     setOllamaDraftModel(ollamaModel)
@@ -873,30 +882,32 @@ function App() {
   }
 
   return (
-    <main className={`app-shell ${mobileDrawer !== 'none' ? 'drawer-open' : ''} ${showChat ? 'with-ollama-chat' : ''}`}>
+    <main className={`app-shell ${mobileDrawer !== 'none' ? 'drawer-open' : ''} ${showChat ? 'with-ollama-chat' : ''} ${showLibrary ? '' : 'library-hidden'}`}>
       <aside className={`sidebar ${mobileDrawer === 'sidebar' ? 'mobile-visible' : ''}`}>
-        <div className="brand-row"><div className="brand-mark">N</div><span>No-Tie</span><button className="mobile-close icon-button" onClick={() => setMobileDrawer('none')} aria-label="Zamknij menu"><X size={18} /></button></div>
-        <button className="new-note-button" onClick={() => createNote()}><Plus size={17} /><span>Nowa notatka</span><kbd>N</kbd></button>
-        <div className="sidebar-section">
-          <span className="section-label">BIBLIOTEKA</span>
-          <button className={`nav-item ${activeFilter === 'all' && !activeReviewSession ? 'active' : ''}`} onClick={() => { setActiveReviewSessionId(''); setActiveFilter('all'); setMobileDrawer('none') }}><BookOpen size={17} /><span>Wszystkie notatki</span><span className="nav-count">{notes.length}</span></button>
-          <button className={`nav-item ${activeFilter === 'favorites' && !activeReviewSession ? 'active' : ''}`} onClick={() => { setActiveReviewSessionId(''); setActiveFilter('favorites'); setMobileDrawer('none') }}><Heart size={17} /><span>Ulubione</span></button>
-          <button className="nav-item" onClick={() => { setActiveReviewSessionId(''); setActiveFilter('all'); setQuery(''); setMobileDrawer('notes') }}><Clock3 size={17} /><span>Ostatnie</span></button>
-        </div>
-        <div className="sidebar-section review-sidebar-section">
-          <div className="section-heading"><span className="section-label">POWTÓRKI</span><button className="tiny-icon" title="Nowa powtórka" aria-label="Nowa powtórka" onClick={() => setShowReviewSessionDialog(true)}><Plus size={15} /></button></div>
-          <button className="nav-item review-new-button" onClick={() => setShowReviewSessionDialog(true)}><Repeat2 size={16} /><span>Nowa powtórka</span></button>
-          {reviewSessions.map(session => <button key={session.id} className={`nav-item review-session-nav ${activeReviewSessionId === session.id ? 'active' : ''}`} onClick={() => { setActiveReviewSessionId(session.id); setMobileDrawer('none') }} title={session.title} aria-current={activeReviewSessionId === session.id ? 'page' : undefined}><Repeat2 size={14} /><span className={`review-session-dot ${session.status === 'running' ? 'running' : ''}`} /><span>{session.title}</span><span className="nav-count">{session.noteIds.length}</span></button>)}
-          {!reviewSessions.length && <p className="review-sidebar-empty">Utwórz sesję, aby zapisać listę notatek do powtórki.</p>}
-        </div>
-        <div className="sidebar-section folders-section" data-drop-folder="">
-          <div className="section-heading"><span className="section-label">FOLDERY</span><button className="tiny-icon" title="Dodaj folder" aria-label="Dodaj folder" onClick={() => { setFolderDraft(''); setShowFolderDialog(true) }}><Plus size={15} /></button></div>
-          <div className={`folder-drop-row root-folder-drop ${activeFilter === 'root' ? 'active' : ''}`} data-drop-folder="">
-            <button className={`nav-item folder-item ${activeFilter === 'root' && !activeReviewSession ? 'active' : ''}`} onClick={() => { setActiveReviewSessionId(''); setActiveFilter('root'); setMobileDrawer('none') }}><Folder size={16} /><span>Bez folderu</span><span className="nav-count">{notes.filter(note => !note.folder).length}</span></button>
+        <div className="sidebar-content">
+          <div className="brand-row"><div className="brand-mark">N</div><span>No-Tie</span><button className="mobile-close icon-button" onClick={() => setMobileDrawer('none')} aria-label="Zamknij menu"><X size={18} /></button></div>
+          <button className="new-note-button" onClick={() => createNote()}><Plus size={17} /><span>Nowa notatka</span><kbd>N</kbd></button>
+          <div className="sidebar-section">
+            <span className="section-label">BIBLIOTEKA</span>
+            <button className={`nav-item ${activeFilter === 'all' && !activeReviewSession ? 'active' : ''}`} onClick={() => { setActiveReviewSessionId(''); setActiveFilter('all'); setMobileDrawer('none') }}><BookOpen size={17} /><span>Wszystkie notatki</span><span className="nav-count">{notes.length}</span></button>
+            <button className={`nav-item ${activeFilter === 'favorites' && !activeReviewSession ? 'active' : ''}`} onClick={() => { setActiveReviewSessionId(''); setActiveFilter('favorites'); setMobileDrawer('none') }}><Heart size={17} /><span>Ulubione</span></button>
+            <button className="nav-item" onClick={() => { setActiveReviewSessionId(''); setActiveFilter('all'); setQuery(''); setMobileDrawer('notes') }}><Clock3 size={17} /><span>Ostatnie</span></button>
           </div>
-          {notes.filter(note => !note.folder).map(note => renderNoteFile(note))}
-          {renderFolderTree('')}
-          {!folders.length && !notes.some(note => !note.folder) && <p className="empty-hint">Utwórz folder lub przeciągnij tu notatkę.</p>}
+          <div className="sidebar-section review-sidebar-section">
+            <div className="section-heading"><span className="section-label">POWTÓRKI</span><button className="tiny-icon" title="Nowa powtórka" aria-label="Nowa powtórka" onClick={() => setShowReviewSessionDialog(true)}><Plus size={15} /></button></div>
+            <button className="nav-item review-new-button" onClick={() => setShowReviewSessionDialog(true)}><Repeat2 size={16} /><span>Nowa powtórka</span></button>
+            {reviewSessions.map(session => <button key={session.id} className={`nav-item review-session-nav ${activeReviewSessionId === session.id ? 'active' : ''}`} onClick={() => { setActiveReviewSessionId(session.id); setMobileDrawer('none') }} title={session.title} aria-current={activeReviewSessionId === session.id ? 'page' : undefined}><Repeat2 size={14} /><span className={`review-session-dot ${session.status === 'running' ? 'running' : ''}`} /><span>{session.title}</span><span className="nav-count">{session.noteIds.length}</span></button>)}
+            {!reviewSessions.length && <p className="review-sidebar-empty">Utwórz sesję, aby zapisać listę notatek do powtórki.</p>}
+          </div>
+          <div className="sidebar-section folders-section" data-drop-folder="">
+            <div className="section-heading"><span className="section-label">FOLDERY</span><button className="tiny-icon" title="Dodaj folder" aria-label="Dodaj folder" onClick={() => { setFolderDraft(''); setShowFolderDialog(true) }}><Plus size={15} /></button></div>
+            <div className={`folder-drop-row root-folder-drop ${activeFilter === 'root' ? 'active' : ''}`} data-drop-folder="">
+              <button className={`nav-item folder-item ${activeFilter === 'root' && !activeReviewSession ? 'active' : ''}`} onClick={() => { setActiveReviewSessionId(''); setActiveFilter('root'); setMobileDrawer('none') }}><Folder size={16} /><span>Bez folderu</span><span className="nav-count">{notes.filter(note => !note.folder).length}</span></button>
+            </div>
+            {notes.filter(note => !note.folder).map(note => renderNoteFile(note))}
+            {renderFolderTree('')}
+            {!folders.length && !notes.some(note => !note.folder) && <p className="empty-hint">Utwórz folder lub przeciągnij tu notatkę.</p>}
+          </div>
         </div>
         <div className="sidebar-bottom">
           <div className="offline-card"><span className="online-dot" /><div><strong>Dane lokalne</strong><span>{storageLocationLabel} · offline</span></div><Check size={15} /></div>
@@ -904,7 +915,7 @@ function App() {
         </div>
       </aside>
 
-      <section className={`notes-panel ${mobileDrawer === 'notes' ? 'mobile-visible' : ''}`}>
+      <section className={`notes-panel ${mobileDrawer === 'notes' ? 'mobile-visible' : ''}`} hidden={!showLibrary}>
         <div className="notes-panel-heading"><div><p className="eyebrow">TWOJA BIBLIOTEKA</p><h1>{activeFilter === 'all' ? 'Notatki' : activeFilter === 'favorites' ? 'Ulubione' : activeFilter === 'root' ? 'Bez folderu' : activeFilter.split('/').at(-1)}</h1></div><button className="mobile-close icon-button" onClick={() => setMobileDrawer('none')} aria-label="Zamknij listę"><X size={18} /></button></div>
         <label className="search-box"><Search size={16} /><input ref={searchInput} value={query} onChange={event => setQuery(event.target.value)} placeholder="Szukaj notatek…" /><kbd>⌘/Ctrl K</kbd></label>
         <div className="list-toolbar"><span>{visibleNotes.length} NOTATKI</span><label className="list-view-select"><span>Widok</span><select value={noteDisplayMode} onChange={event => setDisplayMode(event.target.value as NoteDisplayMode)} aria-label="Sposób wyświetlania notatek"><option value="full">Treść i tagi</option><option value="names-tags">Nazwy i tagi</option><option value="names">Same nazwy</option></select></label></div>
@@ -924,10 +935,11 @@ function App() {
 
       <section className="editor-panel">
         <header className="topbar">
-          <div className="mobile-actions"><button className="icon-button" onClick={() => setMobileDrawer('sidebar')} aria-label="Otwórz menu"><Menu size={19} /></button><button className="icon-button" onClick={() => setMobileDrawer('notes')} aria-label="Pokaż notatki"><PanelLeft size={18} /></button></div>
+          <div className="mobile-actions"><button className="icon-button" onClick={() => setMobileDrawer('sidebar')} aria-label="Otwórz menu"><Menu size={19} /></button><button className="icon-button" onClick={() => { if (!showLibrary) { localStorage.setItem('no-tie-library-visible', 'true'); setShowLibrary(true) } setMobileDrawer('notes') }} aria-label={showLibrary ? 'Pokaż notatki' : 'Pokaż bibliotekę'}><PanelLeft size={18} /></button></div>
           <div className="breadcrumb"><span>{activeReviewSession ? 'Powtórki' : 'Notatki'}</span><span className="crumb-slash">/</span><span>{activeReviewSession?.title ?? selectedNote?.folder ?? 'Osobiste'}</span></div>
           <div className="topbar-actions">
             <span className={`save-indicator ${saved ? 'is-saved' : ''}`}><span className="save-dot" />{saved ? 'Zapisano' : 'Zapisywanie…'}</span>
+            <button className={`icon-button library-toggle ${showLibrary ? 'active' : ''}`} onClick={toggleLibrary} title={showLibrary ? 'Ukryj bibliotekę' : 'Pokaż bibliotekę'} aria-label={showLibrary ? 'Ukryj bibliotekę' : 'Pokaż bibliotekę'} aria-pressed={showLibrary}><PanelLeft size={17} /></button>
             <button className={`icon-button ollama-toggle ${showChat ? 'active' : ''}`} onClick={toggleChat} title={showChat ? 'Ukryj czat Ollama' : 'Pokaż czat Ollama'} aria-label={showChat ? 'Ukryj czat Ollama' : 'Pokaż czat Ollama'} aria-pressed={showChat}><MessageCircle size={17} /></button>
             <button className="button secondary export-button" onClick={exportNotesArchive}><Archive size={15} /><span>Eksportuj</span></button>
             <button className="icon-button import-icon" onClick={() => importInput.current?.click()} title="Importuj paczkę" aria-label="Importuj paczkę"><Import size={17} /></button>

@@ -1,4 +1,4 @@
-import { invoke, isTauri } from '@tauri-apps/api/core'
+import { Channel, invoke, isTauri } from '@tauri-apps/api/core'
 
 export type OllamaModel = {
   name: string
@@ -51,18 +51,61 @@ export async function listOllamaModels(baseUrl: string): Promise<OllamaModel[]> 
   }
 }
 
-export async function sendOllamaMessage(baseUrl: string, model: string, messages: OllamaMessage[]): Promise<string> {
-  if (isTauri()) return invoke<string>('ollama_chat', { baseUrl, model, messages })
+function readOllamaStreamLine(line: string, onChunk: (content: string) => void): void {
+  const trimmed = line.trim()
+  if (!trimmed) return
+  let item: { message?: { content?: unknown }; error?: unknown }
+  try {
+    item = JSON.parse(trimmed) as typeof item
+  } catch {
+    throw new Error('Ollama zwróciła nieprawidłowy fragment odpowiedzi.')
+  }
+  if (typeof item.error === 'string' && item.error) throw new Error(item.error)
+  if (typeof item.message?.content === 'string' && item.message.content) onChunk(item.message.content)
+}
+
+async function consumeOllamaStream(response: Response, onChunk: (content: string) => void): Promise<void> {
+  if (!response.ok) {
+    const message = await response.text().catch(() => '')
+    throw new Error(message || `Ollama zwróciła błąd HTTP ${response.status}.`)
+  }
+  if (!response.body) throw new Error('Ollama nie udostępniła strumienia odpowiedzi.')
+  const reader = response.body.getReader()
+  const decoder = new TextDecoder()
+  let pending = ''
+  while (true) {
+    const { done, value } = await reader.read()
+    if (done) break
+    pending += decoder.decode(value, { stream: true })
+    const lines = pending.split('\n')
+    pending = lines.pop() ?? ''
+    for (const line of lines) readOllamaStreamLine(line, onChunk)
+  }
+  pending += decoder.decode()
+  if (pending.trim()) readOllamaStreamLine(pending, onChunk)
+}
+
+export async function streamOllamaMessage(baseUrl: string, model: string, messages: OllamaMessage[], onChunk: (content: string) => void): Promise<void> {
+  if (!model.trim()) throw new Error('Wybierz model w ustawieniach Ollama.')
+  if (isTauri()) {
+    const onChunkChannel = new Channel<string>()
+    onChunkChannel.onmessage = onChunk
+    try {
+      await invoke<void>('ollama_chat_stream', { baseUrl, model, messages, onChunk: onChunkChannel })
+    } catch (error) {
+      if (typeof error === 'string') throw new Error(error)
+      throw connectionError(error, baseUrl)
+    }
+    return
+  }
   try {
     const response = await fetch(apiUrl(baseUrl, 'chat'), {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ model, messages, stream: false }),
+      body: JSON.stringify({ model, messages, stream: true }),
       signal: AbortSignal.timeout(5 * 60_000),
     })
-    const result = await readJson<{ message?: { content?: string } }>(response)
-    if (typeof result.message?.content !== 'string') throw new Error('Ollama nie zwróciła treści odpowiedzi.')
-    return result.message.content
+    await consumeOllamaStream(response, onChunk)
   } catch (error) {
     throw connectionError(error, baseUrl)
   }
