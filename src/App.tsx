@@ -20,6 +20,8 @@ type NoteDisplayMode = 'full' | 'names-tags' | 'names'
 type EntryTarget = { kind: 'folder'; path: string } | { kind: 'note'; id: string }
 type DeleteTarget = EntryTarget & { label: string; noteCount: number }
 type EntryColor = { value: string; label: string }
+type EntryPointerDrag = { target: EntryTarget; label: string; pointerId: number; startX: number; startY: number; started: boolean }
+type EntryDragVisual = { target: EntryTarget; label: string; x: number; y: number; dropFolder: string | null }
 
 function folderParents(path: string): string[] {
   const parts = path.split('/').map(part => part.trim()).filter(Boolean)
@@ -100,6 +102,7 @@ function App() {
   const [activeReviewSessionId, setActiveReviewSessionId] = useState('')
   const [showReviewSessionDialog, setShowReviewSessionDialog] = useState(false)
   const [reviewClockNow, setReviewClockNow] = useState(() => Date.now())
+  const [entryDragVisual, setEntryDragVisual] = useState<EntryDragVisual | null>(null)
   const [showFolderDialog, setShowFolderDialog] = useState(false)
   const [folderDraft, setFolderDraft] = useState('')
   const [toast, setToast] = useState('')
@@ -124,6 +127,12 @@ function App() {
   })
   const importInput = useRef<HTMLInputElement>(null)
   const searchInput = useRef<HTMLInputElement>(null)
+  const entryPointerDrag = useRef<EntryPointerDrag | null>(null)
+  const entryDropTarget = useRef<HTMLElement | null>(null)
+  const suppressEntryClick = useRef(false)
+  const entryDropAction = useRef<(target: EntryTarget, folder: string) => void>(() => {})
+  const entryDragRenderFrame = useRef<number | null>(null)
+  const nextEntryDragVisual = useRef<EntryDragVisual | null>(null)
 
   function reportDiskSaveError(error: unknown) {
     setSaved(false)
@@ -207,6 +216,75 @@ function App() {
       })
     }, 1000)
     return () => window.clearInterval(interval)
+  }, [])
+  useEffect(() => {
+    function clearPointerDrag() {
+      entryPointerDrag.current = null
+      entryDropTarget.current?.classList.remove('drop-target-active')
+      entryDropTarget.current = null
+      document.querySelectorAll('.drop-target-active').forEach(element => element.classList.remove('drop-target-active'))
+      if (entryDragRenderFrame.current !== null) window.cancelAnimationFrame(entryDragRenderFrame.current)
+      entryDragRenderFrame.current = null
+      nextEntryDragVisual.current = null
+      setEntryDragVisual(null)
+    }
+
+    function findDropTarget(x: number, y: number): HTMLElement | null {
+      return document.elementFromPoint(x, y)?.closest<HTMLElement>('[data-drop-folder]') ?? null
+    }
+
+    function onPointerMove(event: PointerEvent) {
+      const drag = entryPointerDrag.current
+      if (!drag || drag.pointerId !== event.pointerId) return
+      if (!drag.started && Math.hypot(event.clientX - drag.startX, event.clientY - drag.startY) < 6) return
+      if (event.cancelable) event.preventDefault()
+      drag.started = true
+      const targetElement = findDropTarget(event.clientX, event.clientY)
+      if (entryDropTarget.current !== targetElement) {
+        entryDropTarget.current?.classList.remove('drop-target-active')
+        targetElement?.classList.add('drop-target-active')
+        entryDropTarget.current = targetElement
+      }
+      nextEntryDragVisual.current = {
+        target: drag.target,
+        label: drag.label,
+        x: event.clientX,
+        y: event.clientY,
+        dropFolder: targetElement ? targetElement.dataset.dropFolder ?? '' : null,
+      }
+      if (entryDragRenderFrame.current === null) {
+        entryDragRenderFrame.current = window.requestAnimationFrame(() => {
+          entryDragRenderFrame.current = null
+          if (nextEntryDragVisual.current) setEntryDragVisual(nextEntryDragVisual.current)
+        })
+      }
+    }
+
+    function onPointerUp(event: PointerEvent) {
+      const drag = entryPointerDrag.current
+      if (!drag || drag.pointerId !== event.pointerId) return
+      if (drag.started) {
+        if (event.cancelable) event.preventDefault()
+        const targetElement = findDropTarget(event.clientX, event.clientY)
+        if (targetElement) entryDropAction.current(drag.target, targetElement.dataset.dropFolder ?? '')
+        suppressEntryClick.current = true
+        window.setTimeout(() => { suppressEntryClick.current = false }, 0)
+      }
+      clearPointerDrag()
+    }
+
+    function onPointerCancel(event: PointerEvent) {
+      if (entryPointerDrag.current?.pointerId === event.pointerId) clearPointerDrag()
+    }
+
+    window.addEventListener('pointermove', onPointerMove)
+    window.addEventListener('pointerup', onPointerUp)
+    window.addEventListener('pointercancel', onPointerCancel)
+    return () => {
+      window.removeEventListener('pointermove', onPointerMove)
+      window.removeEventListener('pointerup', onPointerUp)
+      window.removeEventListener('pointercancel', onPointerCancel)
+    }
   }, [])
   const selectedNote = notes.find(note => note.id === selectedId)
   const activeReviewSession = reviewSessions.find(session => session.id === activeReviewSessionId)
@@ -344,41 +422,28 @@ function App() {
     }))
   }
 
-  function startEntryDrag(event: React.DragEvent, target: EntryTarget) {
-    const payload = target.kind === 'folder' ? `folder:${target.path}` : `note:${target.id}`
-    // Use a standard format supported by the native WebView drag-and-drop bridge.
-    event.dataTransfer.setData('text/plain', payload)
-    event.dataTransfer.effectAllowed = 'move'
-  }
-
-  function allowFolderDrop(event: React.DragEvent) {
-    event.preventDefault()
-    event.stopPropagation()
-    event.dataTransfer.dropEffect = 'move'
-    event.currentTarget.classList.add('drop-target-active')
-  }
-
-  function clearDropHighlights() {
-    document.querySelectorAll('.drop-target-active').forEach(element => element.classList.remove('drop-target-active'))
-  }
-
-  function leaveFolderDrop(event: React.DragEvent) {
-    if (event.currentTarget.contains(event.relatedTarget as Node | null)) return
-    event.currentTarget.classList.remove('drop-target-active')
-  }
-
-  function handleFolderDrop(event: React.DragEvent, targetFolder: string) {
-    event.preventDefault()
-    event.stopPropagation()
-    clearDropHighlights()
-    let payload = ''
-    try {
-      payload = event.dataTransfer.getData('text/plain')
-    } catch {
-      // Ignore unsupported clipboard access; an empty payload is not an app entry.
+  function startEntryPointerDrag(event: React.PointerEvent, target: EntryTarget, label: string) {
+    if (event.button !== 0) return
+    entryDropAction.current = handleEntryDrop
+    entryPointerDrag.current = {
+      target,
+      label,
+      pointerId: event.pointerId,
+      startX: event.clientX,
+      startY: event.clientY,
+      started: false,
     }
-    if (payload.startsWith('note:')) moveNoteToFolder(payload.slice('note:'.length), targetFolder)
-    else if (payload.startsWith('folder:')) moveFolder(payload.slice('folder:'.length), targetFolder)
+  }
+
+  function ignoreClickAfterDrag(): boolean {
+    if (!suppressEntryClick.current) return false
+    suppressEntryClick.current = false
+    return true
+  }
+
+  function handleEntryDrop(target: EntryTarget, targetFolder: string) {
+    if (target.kind === 'note') moveNoteToFolder(target.id, targetFolder)
+    else moveFolder(target.path, targetFolder)
     setOpenActionMenu('')
   }
 
@@ -501,7 +566,7 @@ function App() {
     const target: EntryTarget = { kind: 'note', id: note.id }
     const color = noteDisplayColor(note)
     return <div key={note.id} className={`folder-file-row ${selectedId === note.id ? 'active' : ''}`} style={{ paddingLeft: `${27 + depth * 14}px` }}>
-      <button className={`folder-file-item ${color ? 'has-entry-color' : ''}`} style={entryColorStyle(color)} draggable onDragStart={event => startEntryDrag(event, target)} onDragEnd={clearDropHighlights} onClick={() => { setActiveReviewSessionId(''); setActiveFilter(note.folder ? note.folder : 'root'); setSelectedId(note.id); setMobileDrawer('none') }} title="Przeciągnij notatkę do innego folderu"><FileText size={13} /><span>{note.title || 'Bez tytułu'}</span></button>
+      <button className={`folder-file-item ${color ? 'has-entry-color' : ''}`} style={entryColorStyle(color)} onPointerDown={event => startEntryPointerDrag(event, target, note.title || 'Bez tytułu')} onClick={() => { if (ignoreClickAfterDrag()) return; setActiveReviewSessionId(''); setActiveFilter(note.folder ? note.folder : 'root'); setSelectedId(note.id); setMobileDrawer('none') }} title="Przeciągnij notatkę do innego folderu"><FileText size={13} /><span>{note.title || 'Bez tytułu'}</span></button>
       {renderEntryMenu(target)}
     </div>
   }
@@ -514,9 +579,9 @@ function App() {
       const count = notes.filter(note => note.folder === folder || note.folder.startsWith(`${folder}/`)).length
       const target: EntryTarget = { kind: 'folder', path: folder }
       const color = folderDisplayColor(folder)
-      return <div key={folder} className="folder-tree-node" data-drop-folder={folder} onDragOver={allowFolderDrop} onDragLeave={leaveFolderDrop} onDrop={event => handleFolderDrop(event, folder)}>
-        <div className={`folder-drop-row ${activeFilter === folder ? 'active' : ''}`} style={{ paddingLeft: `${10 + depth * 14}px` }} data-drop-folder={folder} onDragOver={allowFolderDrop} onDragLeave={leaveFolderDrop} onDrop={event => handleFolderDrop(event, folder)}>
-          <button className={`nav-item folder-item ${activeFilter === folder && !activeReviewSession ? 'active' : ''} ${color ? 'has-entry-color' : ''}`} style={entryColorStyle(color)} draggable onDragStart={event => startEntryDrag(event, target)} onDragEnd={clearDropHighlights} onClick={() => { setActiveReviewSessionId(''); setActiveFilter(folder); setMobileDrawer('none') }} title={`Przeciągnij folder „${label}”, aby go przenieść`}><Folder size={16} /><span>{label}</span><span className="nav-count">{count}</span></button>
+      return <div key={folder} className="folder-tree-node" data-drop-folder={folder}>
+        <div className={`folder-drop-row ${activeFilter === folder ? 'active' : ''}`} style={{ paddingLeft: `${10 + depth * 14}px` }} data-drop-folder={folder}>
+          <button className={`nav-item folder-item ${activeFilter === folder && !activeReviewSession ? 'active' : ''} ${color ? 'has-entry-color' : ''}`} style={entryColorStyle(color)} onPointerDown={event => startEntryPointerDrag(event, target, label)} onClick={() => { if (ignoreClickAfterDrag()) return; setActiveReviewSessionId(''); setActiveFilter(folder); setMobileDrawer('none') }} title={`Przeciągnij folder „${label}”, aby go przenieść`}><Folder size={16} /><span>{label}</span><span className="nav-count">{count}</span></button>
           {renderEntryMenu(target)}
         </div>
         {directNotes.map(note => renderNoteFile(note, depth))}
@@ -824,9 +889,9 @@ function App() {
           {reviewSessions.map(session => <button key={session.id} className={`nav-item review-session-nav ${activeReviewSessionId === session.id ? 'active' : ''}`} onClick={() => { setActiveReviewSessionId(session.id); setMobileDrawer('none') }} title={session.title} aria-current={activeReviewSessionId === session.id ? 'page' : undefined}><Repeat2 size={14} /><span className={`review-session-dot ${session.status === 'running' ? 'running' : ''}`} /><span>{session.title}</span><span className="nav-count">{session.noteIds.length}</span></button>)}
           {!reviewSessions.length && <p className="review-sidebar-empty">Utwórz sesję, aby zapisać listę notatek do powtórki.</p>}
         </div>
-        <div className="sidebar-section folders-section" data-drop-folder="" onDragOver={allowFolderDrop} onDragLeave={leaveFolderDrop} onDrop={event => handleFolderDrop(event, '')}>
+        <div className="sidebar-section folders-section" data-drop-folder="">
           <div className="section-heading"><span className="section-label">FOLDERY</span><button className="tiny-icon" title="Dodaj folder" aria-label="Dodaj folder" onClick={() => { setFolderDraft(''); setShowFolderDialog(true) }}><Plus size={15} /></button></div>
-          <div className={`folder-drop-row root-folder-drop ${activeFilter === 'root' ? 'active' : ''}`} data-drop-folder="" onDragOver={allowFolderDrop} onDragLeave={leaveFolderDrop} onDrop={event => handleFolderDrop(event, '')}>
+          <div className={`folder-drop-row root-folder-drop ${activeFilter === 'root' ? 'active' : ''}`} data-drop-folder="">
             <button className={`nav-item folder-item ${activeFilter === 'root' && !activeReviewSession ? 'active' : ''}`} onClick={() => { setActiveReviewSessionId(''); setActiveFilter('root'); setMobileDrawer('none') }}><Folder size={16} /><span>Bez folderu</span><span className="nav-count">{notes.filter(note => !note.folder).length}</span></button>
           </div>
           {notes.filter(note => !note.folder).map(note => renderNoteFile(note))}
@@ -845,7 +910,7 @@ function App() {
         <div className="list-toolbar"><span>{visibleNotes.length} NOTATKI</span><label className="list-view-select"><span>Widok</span><select value={noteDisplayMode} onChange={event => setDisplayMode(event.target.value as NoteDisplayMode)} aria-label="Sposób wyświetlania notatek"><option value="full">Treść i tagi</option><option value="names-tags">Nazwy i tagi</option><option value="names">Same nazwy</option></select></label></div>
         <div className="note-list">
           {visibleNotes.map(note => (
-            <button key={note.id} className={`note-card view-${noteDisplayMode} ${selectedId === note.id ? 'selected' : ''} ${noteDisplayColor(note) ? 'has-entry-color' : ''}`} style={entryColorStyle(noteDisplayColor(note))} draggable onDragStart={event => startEntryDrag(event, { kind: 'note', id: note.id })} onDragEnd={clearDropHighlights} onClick={() => { setActiveReviewSessionId(''); setSelectedId(note.id); setMobileDrawer('none') }}>
+            <button key={note.id} className={`note-card view-${noteDisplayMode} ${selectedId === note.id ? 'selected' : ''} ${noteDisplayColor(note) ? 'has-entry-color' : ''}`} style={entryColorStyle(noteDisplayColor(note))} onPointerDown={event => startEntryPointerDrag(event, { kind: 'note', id: note.id }, note.title || 'Bez tytułu')} onClick={() => { if (ignoreClickAfterDrag()) return; setActiveReviewSessionId(''); setSelectedId(note.id); setMobileDrawer('none') }}>
               {noteDisplayMode === 'full' && <div className="note-card-top"><span className="note-date">{dateLabel(note.updatedAt)}</span>{note.favorite && <Star size={14} className="favorite-mini" fill="currentColor" />}</div>}
               <strong>{note.title || 'Bez tytułu'}</strong>
               {noteDisplayMode === 'full' && <p>{excerpt(note.content) || 'Pusta notatka'}</p>}
@@ -902,6 +967,7 @@ function App() {
         )}
       </section>
       <ChatPanel open={showChat} baseUrl={ollamaBaseUrl} model={ollamaModel} note={selectedNote} onClose={closeChat} onOpenSettings={openOllamaSettings} />
+      {entryDragVisual && <div className="entry-drag-ghost" style={{ left: entryDragVisual.x, top: entryDragVisual.y }} aria-hidden="true"><div>{entryDragVisual.target.kind === 'folder' ? <Folder size={15} /> : <FileText size={15} />}<strong>{entryDragVisual.label}</strong></div><span>{entryDragVisual.dropFolder === null ? 'Upuść na folder' : entryDragVisual.dropFolder ? `Przenieś do: ${entryDragVisual.dropFolder}` : 'Przenieś do: Bez folderu'}</span></div>}
       {showDrawing && selectedNote && <Suspense fallback={<div className="modal-backdrop"><div className="loading-screen">Otwieram edytor SVG…</div></div>}><VectorEditor asset={editingAsset} onClose={() => { setShowDrawing(false); setEditingAsset(undefined) }} onSave={svg => void saveDrawing(svg)} /></Suspense>}
       {showReviewSessionDialog && <ReviewSessionDialog notes={notes} onCancel={() => setShowReviewSessionDialog(false)} onCreate={createReviewSession} />}
       {showFolderDialog && <div className="modal-backdrop" role="presentation" onMouseDown={event => { if (event.target === event.currentTarget) setShowFolderDialog(false) }}><section className="folder-dialog" role="dialog" aria-modal="true" aria-labelledby="folder-dialog-title"><div className="folder-dialog-mark"><Folder size={20} /></div><h2 id="folder-dialog-title">Utwórz folder</h2><p>Foldery możesz później układać, przeciągając je na siebie w panelu po lewej.</p><form onSubmit={event => { event.preventDefault(); void createFolder() }}><label htmlFor="new-folder-name">Nazwa folderu</label><input id="new-folder-name" autoFocus value={folderDraft} onChange={event => setFolderDraft(event.target.value)} placeholder="np. Projekty" /><div className="folder-dialog-actions"><button type="button" className="button secondary" onClick={() => setShowFolderDialog(false)}>Anuluj</button><button type="submit" className="button primary" disabled={!folderDraft.trim()}>Utwórz folder</button></div></form></section></div>}

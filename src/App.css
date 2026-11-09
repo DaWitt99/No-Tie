@@ -50,6 +50,9 @@
 .tiny-icon, .notes-list-footer button { display: grid; place-items: center; width: 23px; height: 23px; padding: 0; border: 0; border-radius: 6px; color: #909bb3; background: transparent; cursor: pointer; }
 .tiny-icon:hover, .notes-list-footer button:hover { background: #ffffff14; color: #fff; }
 .folder-item { min-height: 34px; }
+.folder-item, .folder-file-item, .note-card { -webkit-user-drag: none; user-select: none; }
+.folder-item, .folder-file-item, .note-card { cursor: grab; }
+.folder-item:active, .folder-file-item:active, .note-card:active { cursor: grabbing; }
 .folder-item svg { width: 15px; }
 .folder-drop-row { position: relative; display: flex; align-items: center; gap: 2px; min-height: 34px; padding-right: 3px; border-radius: 8px; transition: background .15s, box-shadow .15s; }
 .folder-drop-row > .folder-item { flex: 1; min-width: 0; width: auto; }
@@ -358,6 +361,11 @@
 .chat-compose-box > button:disabled { color: #b8bfdc; background: #eef0f8; cursor: default; }
 .chat-local-note { display: flex; align-items: center; justify-content: center; gap: 5px; color: #a1a6b1; font-size: 8px; }
 .app-toast { position: fixed; z-index: 90; right: 22px; bottom: 22px; display: flex; align-items: center; gap: 9px; padding: 12px 16px; border: 1px solid #dcece5; border-radius: 10px; color: #356d59; background: #f5fffa; box-shadow: 0 10px 35px #19243a20; font-size: 12px; animation: toast-in .18s ease-out; }
+.entry-drag-ghost { position: fixed; z-index: 100; display: flex; min-width: 150px; max-width: 250px; flex-direction: column; gap: 4px; padding: 8px 10px; transform: translate(12px, 12px); pointer-events: none; border: 1px solid #cbd2f4; border-radius: 8px; color: #39445e; background: #fff; box-shadow: 0 8px 22px #17213b38; }
+.entry-drag-ghost > div { display: flex; align-items: center; gap: 7px; min-width: 0; }
+.entry-drag-ghost svg { flex: 0 0 auto; color: #6478d4; }
+.entry-drag-ghost strong { overflow: hidden; font-size: 10px; font-weight: 650; text-overflow: ellipsis; white-space: nowrap; }
+.entry-drag-ghost > span { overflow: hidden; color: #8790a3; font-size: 8px; text-overflow: ellipsis; white-space: nowrap; }
 .app-toast { max-width: min(520px, calc(100vw - 28px)); overflow-wrap: anywhere; }
 .app-toast svg { color: #46a17b; }
 @keyframes toast-in { from { opacity: 0; transform: translateY(7px); } to { opacity: 1; transform: translateY(0); } }
