@@ -10,7 +10,7 @@ export const starterNotes: Note[] = [
     favorite: true,
     createdAt: Date.now() - 86_400_000,
     updatedAt: Date.now(),
-    content: '# Twoje myśli, w jednym miejscu\n\nNo-Tie przechowuje notatki lokalnie w tej przeglądarce. Możesz pisać w **Markdownie**, porządkować wpisy tagami i tworzyć własne schematy SVG.\n\n## Zacznij od pomysłu\n\n- Utwórz notatkę przyciskiem **Nowa notatka**.\n- Dodaj tagi, żeby łatwiej ją odnaleźć.\n- Narysuj prosty diagram i umieść go w treści.\n\n## Diagram przykładowy\n\n![Przepływ pomysłu](./assets/idea-map.svg)\n\n> Dane pozostają na tym urządzeniu. Użyj eksportu, aby przenieść je na inne.',
+    content: '# Twoje myśli, w jednym miejscu\n\nNo-Tie zapisuje notatki jako pliki Markdown i SVG na tym urządzeniu. Możesz pisać w **Markdownie**, porządkować wpisy tagami i tworzyć własne schematy SVG.\n\n## Zacznij od pomysłu\n\n- Utwórz notatkę przyciskiem **Nowa notatka**.\n- Dodaj tagi, żeby łatwiej ją odnaleźć.\n- Narysuj prosty diagram i umieść go w treści.\n\n## Diagram przykładowy\n\n![Przepływ pomysłu](./assets/idea-map.svg)\n\n> Dane pozostają na tym urządzeniu. Użyj eksportu, aby przenieść je na inne.',
   },
   {
     id: 'meeting-note',

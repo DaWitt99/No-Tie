@@ -1,0 +1,17 @@
+[package]
+name = "no-tie"
+version = "0.0.0"
+description = "Lokalne notatki Markdown i schematy SVG"
+authors = ["No-Tie contributors"]
+edition = "2021"
+
+[lib]
+name = "no_tie_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = [] }
+tauri-plugin-fs = "2"

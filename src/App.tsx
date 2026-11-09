@@ -1,12 +1,11 @@
 import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import {
-  Archive, BookOpen, Check, ChevronDown, Clock3, FilePlus2, Folder, Heart, Import, Lightbulb,
-  Menu, MoreHorizontal, NotebookPen, PanelLeft, Plus, Search, Settings2, Sparkles, Star, Tag,
-  Trash2, X,
+  Archive, BookOpen, Check, ChevronDown, Clock3, Code2, Eye, FilePlus2, Folder, Heart, Import, Lightbulb,
+  Menu, MoreHorizontal, PanelLeft, Plus, Search, Settings2, Sparkles, Star, Tag, Trash2, X,
 } from 'lucide-react'
 import { downloadArchive, parseArchive } from './archive'
 import { starterAssets, starterNotes } from './content'
-import { getAssets, getNotes, removeAssetsForNote, removeNote, saveAsset, saveNote } from './storage'
+import { getAssets, getNotes, hasInitialized, markInitialized, removeAssetsForNote, removeNote, saveAsset, saveNote, storageLocationLabel, usesNativeFiles } from './storage'
 import type { Note, NoteAsset } from './types'
 import './App.css'
 
@@ -46,8 +45,10 @@ function App() {
   const [activeFilter, setActiveFilter] = useState<Filter>('all')
   const [query, setQuery] = useState('')
   const [ready, setReady] = useState(false)
+  const [loadError, setLoadError] = useState('')
   const [saved, setSaved] = useState(true)
   const [editorRevision, setEditorRevision] = useState(0)
+  const [editorMode, setEditorMode] = useState<'rendered' | 'source'>('rendered')
   const [showDrawing, setShowDrawing] = useState(false)
   const [editingAsset, setEditingAsset] = useState<NoteAsset | undefined>()
   const [mobileDrawer, setMobileDrawer] = useState<'none' | 'notes' | 'sidebar'>('none')
@@ -61,11 +62,14 @@ function App() {
       try {
         let storedNotes = await getNotes()
         let storedAssets = await getAssets()
-        if (!storedNotes.length) {
-          await Promise.all(starterNotes.map(saveNote))
-          await Promise.all(starterAssets.map(saveAsset))
-          storedNotes = starterNotes
-          storedAssets = starterAssets
+        if (!await hasInitialized()) {
+          if (!storedNotes.length) {
+            await Promise.all(starterNotes.map(saveNote))
+            await Promise.all(starterAssets.map(saveAsset))
+            storedNotes = starterNotes
+            storedAssets = starterAssets
+          }
+          await markInitialized()
         }
         if (!cancelled) {
           setNotes(storedNotes.sort((a, b) => b.updatedAt - a.updatedAt))
@@ -73,8 +77,11 @@ function App() {
           setSelectedId(storedNotes[0]?.id ?? '')
           setReady(true)
         }
-      } catch {
-        if (!cancelled) setReady(true)
+      } catch (error) {
+        if (!cancelled) {
+          setLoadError(error instanceof Error ? error.message : 'Nie udało się otworzyć plików notatek.')
+          setReady(true)
+        }
       }
     })()
     return () => { cancelled = true }
@@ -199,6 +206,9 @@ function App() {
   if (!ready) {
     return <div className="loading-screen"><div className="brand-mark">N</div><p>Otwieram Twoje notatki…</p></div>
   }
+  if (loadError) {
+    return <div className="loading-screen"><div className="brand-mark">N</div><p>Nie udało się otworzyć notatek.</p><small className="storage-error">{loadError}</small></div>
+  }
 
   return (
     <main className={`app-shell ${mobileDrawer !== 'none' ? 'drawer-open' : ''}`}>
@@ -217,7 +227,7 @@ function App() {
           {!folders.length && <p className="empty-hint">Foldery pojawią się przy notatkach.</p>}
         </div>
         <div className="sidebar-bottom">
-          <div className="offline-card"><span className="online-dot" /><div><strong>Dane lokalne</strong><span>Ta przeglądarka · offline</span></div><Check size={15} /></div>
+          <div className="offline-card"><span className="online-dot" /><div><strong>Dane lokalne</strong><span>{storageLocationLabel} · offline</span></div><Check size={15} /></div>
           <div className="user-row"><div className="avatar">N</div><div><strong>Moje notatki</strong><span>Przestrzeń prywatna</span></div><MoreHorizontal size={19} /></div>
         </div>
       </aside>
@@ -237,7 +247,7 @@ function App() {
           ))}
           {!visibleNotes.length && <div className="empty-state compact"><div className="empty-illustration"><Search size={22} /></div><strong>Brak pasujących notatek</strong><span>Spróbuj zmienić wyszukiwanie albo utwórz nową notatkę.</span><button className="button secondary" onClick={() => createNote()}><Plus size={15} />Nowa notatka</button></div>}
         </div>
-        <div className="notes-list-footer"><span><span className="online-dot" /> Zapis na tym urządzeniu</span><button title="Ustawienia" aria-label="Ustawienia"><Settings2 size={16} /></button></div>
+        <div className="notes-list-footer"><span><span className="online-dot" />{usesNativeFiles ? ' Pliki na tym urządzeniu' : ' Zapis na tym urządzeniu'}</span><button title="Ustawienia" aria-label="Ustawienia"><Settings2 size={16} /></button></div>
       </section>
 
       <section className="editor-panel">
@@ -259,12 +269,10 @@ function App() {
               <input className="note-title-input" value={selectedNote.title} onChange={event => patchNote(selectedNote.id, { title: event.target.value })} placeholder="Tytuł notatki" aria-label="Tytuł notatki" />
               <div className="tags-row"><Tag size={15} /><div className="tag-list">{selectedNote.tags.map(tag => <button className="editable-tag" key={tag} onClick={() => patchNote(selectedNote.id, { tags: selectedNote.tags.filter(item => item !== tag) })} title="Usuń tag">{tag}<X size={11} /></button>)}<input className="tag-input" value={tagInput} onChange={event => setTagInput(event.target.value)} onKeyDown={event => { if (event.key === 'Enter') { event.preventDefault(); addTag() } }} placeholder={selectedNote.tags.length ? 'Dodaj tag…' : 'Dodaj tag'} aria-label="Dodaj tag" />{tagInput && <button className="tag-add-button" onClick={addTag}>Dodaj</button>}</div></div>
               <div className="editor-tools-row">
-                <div className="editor-tools-left"><span className="editor-mode"><NotebookPen size={15} /> Markdown</span><span className="toolbar-separator" /><button className="inline-tool" onClick={() => { setEditingAsset(undefined); setShowDrawing(true) }}><Sparkles size={15} />Dodaj schemat</button>{currentAssets.map(asset => <button className="inline-tool asset-tool" key={asset.id} onClick={() => { setEditingAsset(asset); setShowDrawing(true) }}><Lightbulb size={14} />{asset.fileName}</button>)}</div>
+                <div className="editor-tools-left"><div className="view-mode-toggle" role="group" aria-label="Widok notatki"><button className={`view-mode-button ${editorMode === 'rendered' ? 'active' : ''}`} aria-pressed={editorMode === 'rendered'} onClick={() => setEditorMode('rendered')}><Eye size={14} />Wizualny</button><button className={`view-mode-button ${editorMode === 'source' ? 'active' : ''}`} aria-pressed={editorMode === 'source'} onClick={() => setEditorMode('source')}><Code2 size={14} />Surowy Markdown</button></div><span className="toolbar-separator" /><button className="inline-tool" onClick={() => { setEditingAsset(undefined); setShowDrawing(true) }}><Sparkles size={15} />Dodaj schemat</button>{currentAssets.map(asset => <button className="inline-tool asset-tool" key={asset.id} onClick={() => { setEditingAsset(asset); setShowDrawing(true) }}><Lightbulb size={14} />{asset.fileName}</button>)}</div>
                 <select className="template-select" defaultValue="" aria-label="Wstaw szablon" onChange={event => { const template = templates.find(item => item.id === event.target.value); if (template) { patchNote(selectedNote.id, { title: template.title, content: template.content, tags: [...new Set([...selectedNote.tags, ...template.tags])] }); setEditorRevision(value => value + 1) } event.target.value = '' }}><option value="" disabled>Szablon</option>{templates.map(template => <option key={template.id} value={template.id}>{template.title}</option>)}</select>
               </div>
-              <Suspense fallback={<div className="editor-loading">Otwieram edytor…</div>}>
-                <MarkdownEditor key={`${selectedNote.id}-${editorRevision}`} noteId={selectedNote.id} markdown={selectedNote.content} assets={currentAssets} revision={editorRevision} onChange={content => patchNote(selectedNote.id, { content })} />
-              </Suspense>
+              {editorMode === 'source' ? <textarea className="markdown-source-editor" aria-label="Surowy tekst Markdown" spellCheck={false} value={selectedNote.content} onChange={event => patchNote(selectedNote.id, { content: event.target.value })} /> : <Suspense fallback={<div className="editor-loading">Otwieram edytor…</div>}><MarkdownEditor key={`${selectedNote.id}-${editorRevision}`} noteId={selectedNote.id} markdown={selectedNote.content} assets={currentAssets} revision={editorRevision} onChange={content => patchNote(selectedNote.id, { content })} /></Suspense>}
               <div className="editor-end-note"><span className="end-line" /><span>Koniec notatki</span><span className="end-line" /></div>
             </div>
             <footer className="editor-footer"><span><Sparkles size={14} />Zapis automatyczny</span><div><button className={`footer-icon ${selectedNote.favorite ? 'favorited' : ''}`} onClick={() => patchNote(selectedNote.id, { favorite: !selectedNote.favorite })} title={selectedNote.favorite ? 'Usuń z ulubionych' : 'Dodaj do ulubionych'}><Star size={17} fill={selectedNote.favorite ? 'currentColor' : 'none'} /></button><button className="footer-icon delete-note" onClick={() => void deleteSelected()} title="Usuń notatkę"><Trash2 size={17} /></button></div></footer>

@@ -1,0 +1,24 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "default",
+  "description": "Dostęp aplikacji do katalogu notatek No-Tie w Dokumentach.",
+  "windows": ["main"],
+  "permissions": [
+    "core:default",
+    "core:path:default",
+    "fs:allow-exists",
+    "fs:allow-mkdir",
+    "fs:allow-read-dir",
+    "fs:allow-read-text-file",
+    "fs:allow-remove",
+    "fs:allow-rename",
+    "fs:allow-write-text-file",
+    {
+      "identifier": "fs:scope",
+      "allow": [
+        { "path": "$DOCUMENT/No-Tie" },
+        { "path": "$DOCUMENT/No-Tie/**/*" }
+      ]
+    }
+  ]
+}

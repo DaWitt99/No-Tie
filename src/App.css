@@ -1,6 +1,7 @@
 .app-shell {
   display: grid;
   grid-template-columns: 248px 314px minmax(0, 1fr);
+  grid-template-rows: minmax(0, 1fr);
   width: 100%;
   height: 100dvh;
   min-height: 520px;
@@ -9,6 +10,7 @@
 }
 .sidebar {
   display: flex;
+  min-height: 0;
   flex-direction: column;
   min-width: 0;
   padding: 22px 14px 16px;
@@ -48,7 +50,7 @@
 .user-row > svg { margin-left: auto; color: #78849e; }
 .avatar { display: grid; place-items: center; width: 30px; height: 30px; border: 1px solid #7182a5; border-radius: 50%; color: #e8eaff; background: #425478; font-size: 12px; font-weight: 700; }
 
-.notes-panel { display: flex; flex-direction: column; min-width: 0; background: #fbfbfd; border-right: 1px solid var(--line); }
+.notes-panel { display: flex; flex-direction: column; min-width: 0; min-height: 0; background: #fbfbfd; border-right: 1px solid var(--line); }
 .notes-panel-heading { display: flex; align-items: center; justify-content: space-between; padding: 26px 21px 19px; }
 .eyebrow { margin: 0 0 6px; color: #9499a8; font-size: 9px; font-weight: 700; letter-spacing: 1.2px; }
 .notes-panel-heading h1 { margin: 0; color: #242c40; font-size: 22px; font-weight: 700; letter-spacing: -.7px; }
@@ -59,7 +61,7 @@
 .list-toolbar { display: flex; align-items: center; justify-content: space-between; padding: 0 20px 10px; }
 .list-toolbar > span { color: #9da2ad; font-size: 9px; }
 .sort-button { display: flex; align-items: center; gap: 4px; padding: 3px; border: 0; color: #9aa0ad; background: transparent; cursor: pointer; }
-.note-list { flex: 1; overflow: auto; padding: 0 11px 18px; }
+.note-list { flex: 1; min-height: 0; overflow: auto; padding: 0 11px 18px; }
 .note-card { display: block; width: 100%; margin: 0 0 7px; padding: 12px 12px 10px; border: 1px solid transparent; border-radius: 9px; background: transparent; text-align: left; cursor: pointer; transition: border-color .16s, background .16s, box-shadow .16s; }
 .note-card:hover { border-color: #e7e8ef; background: #fff; }
 .note-card.selected { border-color: #dce1ff; background: #fff; box-shadow: 0 3px 12px #3f4e8011; }
@@ -77,7 +79,7 @@
 .notes-list-footer button { color: #979cab; }
 .notes-list-footer button:hover { color: #535d7b; background: #f0f1f5; }
 
-.editor-panel { display: flex; flex-direction: column; min-width: 0; height: 100%; background: #fff; }
+.editor-panel { display: flex; flex-direction: column; min-width: 0; min-height: 0; height: 100%; background: #fff; }
 .topbar { display: flex; align-items: center; justify-content: space-between; min-height: 58px; padding: 0 24px; border-bottom: 1px solid #eeeff3; }
 .breadcrumb { display: flex; align-items: center; gap: 10px; color: #8e94a2; font-size: 11px; }
 .breadcrumb span:last-child { color: #4b5367; }
@@ -96,7 +98,7 @@
 .icon-button:hover { color: #39435b; background: #f3f4f8; }
 .mobile-close, .mobile-actions { display: none; }
 .note-editor { display: flex; flex: 1; flex-direction: column; min-height: 0; }
-.editor-scroll { flex: 1; overflow: auto; padding: 43px clamp(24px, 6vw, 94px) 30px; }
+.editor-scroll { flex: 1; min-height: 0; overflow: auto; padding: 43px clamp(24px, 6vw, 94px) 30px; }
 .note-meta-line { display: flex; align-items: center; gap: 8px; margin-bottom: 14px; color: #9a9eaa; font-size: 10px; }
 .meta-dot { width: 6px; height: 6px; border-radius: 50%; background: #c7cce0; }
 .meta-divider { color: #d5d7de; }
@@ -114,14 +116,17 @@
 .tag-add-button { padding: 3px 7px; border: 0; border-radius: 5px; color: #5d70cf; background: #eff1ff; font-size: 9px; cursor: pointer; }
 .editor-tools-row { display: flex; align-items: center; justify-content: space-between; min-height: 42px; margin-bottom: 20px; padding: 0 9px; border: 1px solid #eceef3; border-radius: 8px; background: #fff; box-shadow: 0 2px 7px #1b254008; }
 .editor-tools-left { display: flex; align-items: center; gap: 9px; min-width: 0; overflow: auto; }
-.editor-mode, .inline-tool { display: inline-flex; align-items: center; gap: 6px; color: #81889a; font-size: 10px; white-space: nowrap; }
-.editor-mode svg { color: #7e8bdd; }
+.view-mode-toggle { display: inline-flex; align-items: center; gap: 2px; flex: 0 0 auto; padding: 3px; border-radius: 7px; background: #f3f4f8; }
+.view-mode-button { display: inline-flex; align-items: center; justify-content: center; gap: 5px; min-height: 27px; padding: 0 8px; border: 0; border-radius: 5px; color: #858b9a; background: transparent; font-size: 9px; white-space: nowrap; cursor: pointer; }
+.view-mode-button.active { color: #5468cc; background: #fff; box-shadow: 0 1px 3px #252d440f; }
+.inline-tool { display: inline-flex; align-items: center; gap: 6px; color: #81889a; font-size: 10px; white-space: nowrap; }
 .toolbar-separator { width: 1px; height: 18px; flex: 0 0 1px; background: #e9eaf0; }
 .inline-tool { padding: 5px 6px; border: 0; border-radius: 5px; color: #6675c4; background: transparent; cursor: pointer; }
 .inline-tool:hover { background: #f3f4ff; }
 .inline-tool.asset-tool { max-width: 150px; overflow: hidden; color: #7c8395; text-overflow: ellipsis; }
 .template-select { max-width: 112px; margin-left: 8px; padding: 5px 6px; border: 0; color: #9196a4; background: transparent; font-size: 10px; cursor: pointer; }
 .editor-loading { min-height: 260px; padding: 20px 0; color: #9a9fad; font-size: 11px; }
+.markdown-source-editor { display: block; width: 100%; height: min(60vh, 700px); min-height: 340px; padding: 16px 18px; border: 1px solid #e8e9ef; border-radius: 9px; color: #39445c; background: #fafbfe; font: 12px/1.75 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; tab-size: 2; resize: vertical; overflow: auto; white-space: pre; }
 .markdown-editor { min-height: 330px; color: #4a5368; font-size: 14px; line-height: 1.75; }
 .markdown-editor .milkdown { min-height: 330px; }
 .markdown-editor .milkdown .editor { outline: none; }
@@ -159,6 +164,7 @@
 .empty-state.compact .button { margin-top: 0; }
 .loading-screen { display: grid; place-content: center; justify-items: center; gap: 12px; width: 100%; height: 100%; color: #7e8492; background: #f6f7fa; font-size: 12px; }
 .loading-screen .brand-mark { width: 44px; height: 44px; font-size: 21px; }
+.storage-error { max-width: min(680px, 90vw); overflow-wrap: anywhere; color: #8e6870; text-align: center; }
 
 .modal-backdrop { position: fixed; z-index: 50; inset: 0; display: grid; place-items: center; padding: 24px; background: #151c2b80; backdrop-filter: blur(5px); }
 .drawing-modal { display: flex; flex-direction: column; width: min(900px, 100%); max-height: 94dvh; overflow: hidden; border: 1px solid #e6e7ed; border-radius: 14px; background: #fbfbfd; box-shadow: 0 24px 80px #11182748; }
@@ -220,10 +226,12 @@
   .tags-row { margin: 15px 0 20px; }
   .editor-tools-row { gap: 5px; padding: 0 6px; }
   .editor-tools-left { gap: 4px; }
-  .editor-mode { font-size: 0; }
-  .editor-mode svg { width: 17px; }
+  .view-mode-toggle { gap: 1px; padding: 2px; }
+  .view-mode-button { gap: 3px; min-height: 25px; padding: 0 5px; font-size: 8px; }
+  .view-mode-button svg { width: 12px; height: 12px; }
   .inline-tool { gap: 4px; padding: 5px 4px; font-size: 9px; }
   .template-select { max-width: 83px; font-size: 9px; }
+  .markdown-source-editor { height: 55dvh; min-height: 250px; padding: 13px; font-size: 11px; }
   .markdown-editor, .markdown-editor .milkdown { min-height: 300px; font-size: 13px; }
   .markdown-editor .milkdown h1 { font-size: 23px; }
   .markdown-editor .milkdown h2 { font-size: 17px; }
