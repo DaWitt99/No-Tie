@@ -168,9 +168,12 @@
 
 .modal-backdrop { position: fixed; z-index: 50; inset: 0; display: grid; place-items: center; padding: 24px; background: #151c2b80; backdrop-filter: blur(5px); }
 .drawing-modal { display: flex; flex-direction: column; width: min(900px, 100%); max-height: 94dvh; overflow: hidden; border: 1px solid #e6e7ed; border-radius: 14px; background: #fbfbfd; box-shadow: 0 24px 80px #11182748; }
+.advanced-drawing-modal { width: min(1180px, 100%); }
 .modal-heading { display: flex; align-items: center; justify-content: space-between; padding: 17px 21px 13px; }
 .modal-heading h2 { margin: 0; color: #283147; font-size: 17px; letter-spacing: -.4px; }
 .drawing-toolbar { display: flex; align-items: center; gap: 5px; padding: 8px 13px; border-top: 1px solid #eeeff2; border-bottom: 1px solid #e8e9ef; background: #fff; }
+.advanced-drawing-toolbar { flex: 0 0 auto; justify-content: flex-start; gap: 8px; overflow-x: auto; scrollbar-width: thin; }
+.drawing-tool-group { display: flex; flex: 0 0 auto; align-items: center; gap: 3px; }
 .tool-button { display: grid; place-items: center; width: 32px; height: 32px; padding: 0; border: 0; border-radius: 6px; color: #737b8c; background: transparent; cursor: pointer; }
 .tool-button:hover { color: #5164c7; background: #f2f3ff; }
 .tool-button.selected { color: #5469d2; background: #ebedff; }
@@ -178,13 +181,24 @@
 .toolbar-divider { width: 1px; height: 21px; margin: 0 4px; background: #e8e9ed; }
 .color-control { display: flex; align-items: center; gap: 6px; padding: 4px 6px; color: #757d8e; font-size: 10px; cursor: pointer; }
 .color-control input { width: 19px; height: 19px; padding: 0; border: 0; border-radius: 5px; background: transparent; cursor: pointer; }
-.diagram-text { width: 120px; height: 29px; padding: 0 7px; border: 1px solid #e8e9ef; border-radius: 5px; font-size: 10px; }
+.color-control.option-disabled { opacity: .5; }
+.fill-toggle { display: inline-flex; align-items: center; gap: 4px; flex: 0 0 auto; color: #737b8c; font-size: 10px; white-space: nowrap; cursor: pointer; }
+.fill-toggle input { accent-color: #6378dd; }
+.line-width-control { display: inline-flex; align-items: center; gap: 5px; flex: 0 0 auto; color: #737b8c; font-size: 10px; white-space: nowrap; }
+.line-width-control input { width: 57px; accent-color: #6378dd; }
+.line-width-control output { min-width: 10px; color: #596fd8; font-weight: 700; }
+.font-size-control { display: inline-flex; align-items: center; gap: 4px; flex: 0 0 auto; color: #737b8c; }
+.font-size-control input { width: 44px; height: 27px; padding: 0 3px; border: 1px solid #e7e9f0; border-radius: 5px; color: #596175; font-size: 10px; }
+.selection-count { min-width: 70px; color: #9298a6; font-size: 9px; text-align: center; white-space: nowrap; }
+.delete-tool:hover:not(:disabled) { color: #c65865; background: #fff0f1; }
 .drawing-stage-wrap { flex: 1; min-height: 250px; overflow: auto; padding: 20px; background: #f2f3f7; }
-.drawing-stage { width: 100%; min-height: 260px; aspect-ratio: 800 / 500; overflow: hidden; border: 1px solid #e5e6eb; border-radius: 7px; background: white; box-shadow: 0 5px 18px #222b400c; touch-action: none; }
-.drawing-stage > svg { display: block; width: 100%; height: 100%; }
+.drawing-stage { position: relative; width: 100%; min-height: 260px; aspect-ratio: 800 / 500; overflow: hidden; border: 1px solid #e5e6eb; border-radius: 7px; background: white; box-shadow: 0 5px 18px #222b400c; touch-action: none; }
+.drawing-stage > svg { position: absolute; inset: 0; display: block; width: 100%; height: 100%; outline: none; }
+.canvas-text-input { position: absolute; z-index: 2; min-width: 150px; max-width: 70%; padding: 2px 5px; border: 1px solid #6378dd; border-radius: 3px; outline: 2px solid #6378dd35; background: #ffffffed; line-height: 1.35; box-shadow: 0 2px 8px #1f2a441e; }
 .modal-footer { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 12px 18px; border-top: 1px solid #e8e9ef; background: #fff; }
 .modal-footer p { margin: 0; color: #979caa; font-size: 10px; }
 .modal-footer > div { display: flex; gap: 7px; }
+.advanced-modal-footer p { line-height: 1.5; }
 .drawer-scrim { display: none; }
 
 @media (max-width: 1100px) {
