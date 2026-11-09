@@ -1,6 +1,7 @@
 import { useMemo, useState } from 'react'
 import { ArrowDown, ArrowRight, ArrowUp, Check, GripVertical, Pencil, Search, X } from 'lucide-react'
 import { moveReviewNote } from './reviews'
+import { usePointerReorder } from './usePointerReorder'
 import type { Note, ReviewSession } from './types'
 
 type ReviewSessionDialogProps = {
@@ -14,8 +15,8 @@ export function ReviewSessionDialog({ notes, session, onCancel, onSave }: Review
   const [title, setTitle] = useState(() => session?.title ?? '')
   const [query, setQuery] = useState('')
   const [selectedIds, setSelectedIds] = useState<string[]>(() => session?.noteIds.filter(id => notes.some(note => note.id === id)) ?? [])
-  const [draggingNoteId, setDraggingNoteId] = useState('')
   const selected = useMemo(() => new Set(selectedIds), [selectedIds])
+  const { draggingNoteId, dropTargetNoteId, dropAfter, dragPosition, startDrag } = usePointerReorder(selectedIds, setSelectedIds)
   const availableNotes = useMemo(() => notes
     .filter(note => !selected.has(note.id))
     .filter(note => `${note.title} ${note.folder} ${note.tags.join(' ')}`.toLocaleLowerCase('pl').includes(query.trim().toLocaleLowerCase('pl')))
@@ -32,17 +33,6 @@ export function ReviewSessionDialog({ notes, session, onCancel, onSave }: Review
 
   function moveNote(id: string, index: number) {
     setSelectedIds(current => moveReviewNote(current, id, index))
-  }
-
-  function handleDrop(event: React.DragEvent<HTMLDivElement>, targetIndex: number) {
-    event.preventDefault()
-    const sourceId = event.dataTransfer.getData('text/plain') || draggingNoteId
-    const sourceIndex = selectedIds.indexOf(sourceId)
-    const row = event.currentTarget.getBoundingClientRect()
-    const insertIndex = targetIndex + (event.clientY >= row.top + row.height / 2 ? 1 : 0)
-    const destinationIndex = sourceIndex >= 0 && sourceIndex < insertIndex ? insertIndex - 1 : insertIndex
-    setSelectedIds(current => moveReviewNote(current, sourceId, destinationIndex))
-    setDraggingNoteId('')
   }
 
   function submit(event: React.FormEvent<HTMLFormElement>) {
@@ -77,20 +67,20 @@ export function ReviewSessionDialog({ notes, session, onCancel, onSave }: Review
               <header><strong id="review-selected-title">Wybrane do powtórki</strong><span>{selectedNotes.length}</span></header>
               <div className="review-picker-list selected-list">
                 {selectedNotes.map((note, index) => <div
-                  className={`review-picker-note selected-note ${draggingNoteId === note.id ? 'dragging' : ''}`}
+                  className={`review-picker-note selected-note ${draggingNoteId === note.id ? 'dragging' : ''} ${dropTargetNoteId === note.id ? `drop-target ${dropAfter ? 'drop-after' : 'drop-before'}` : ''}`}
                   key={note.id}
-                  onDragOver={event => event.preventDefault()}
-                  onDrop={event => handleDrop(event, index)}
+                  data-review-reorder-id={note.id}
                 >
                   <span className="review-order">{index + 1}</span>
-                  <span
+                  <button
+                    type="button"
                     className="review-drag-handle"
-                    draggable
+                    onPointerDown={event => startDrag(event, note.id)}
                     title="Przeciągnij, aby zmienić kolejność"
                     aria-label={`Zmień kolejność notatki ${note.title}`}
-                    onDragStart={event => { event.dataTransfer.effectAllowed = 'move'; event.dataTransfer.setData('text/plain', note.id); setDraggingNoteId(note.id) }}
-                    onDragEnd={() => setDraggingNoteId('')}
-                  ><GripVertical size={15} /></span>
+                    draggable={false}
+                    onDragStart={event => event.preventDefault()}
+                  ><GripVertical size={15} /></button>
                   {noteLabel(note)}
                   <div className="review-reorder-actions">
                     <button type="button" disabled={index === 0} onClick={() => moveNote(note.id, index - 1)} title="Przenieś wyżej" aria-label={`Przenieś ${note.title} wyżej`}><ArrowUp size={13} /></button>
@@ -102,6 +92,7 @@ export function ReviewSessionDialog({ notes, session, onCancel, onSave }: Review
               </div>
             </section>
           </div>
+          {draggingNoteId && dragPosition && <div className="review-drag-ghost" style={{ left: dragPosition.x, top: dragPosition.y }} aria-hidden="true"><GripVertical size={14} /><strong>{selectedNotes.find(note => note.id === draggingNoteId)?.title || 'Notatka'}</strong></div>}
           <div className="folder-dialog-actions">
             <button type="button" className="button secondary" onClick={onCancel}>Anuluj</button>
             <button type="submit" className="button primary" disabled={!selectedIds.length}><Check size={15} />{session ? `Zapisz zmiany (${selectedIds.length})` : `Utwórz powtórkę (${selectedIds.length})`}</button>

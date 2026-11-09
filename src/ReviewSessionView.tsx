@@ -1,6 +1,6 @@
-import { useState } from 'react'
 import { ArrowDown, ArrowUp, ArrowUpRight, BookOpen, Check, Clock3, GripVertical, Pause, Pencil, Play, RotateCcw, Square } from 'lucide-react'
 import { formatReviewDuration, moveReviewNote, reviewNoteTime, reviewTotalTime } from './reviews'
+import { usePointerReorder } from './usePointerReorder'
 import type { Note, ReviewSession } from './types'
 
 type ReviewSessionViewProps = {
@@ -25,8 +25,7 @@ function sessionStatusLabel(status: ReviewSession['status']) {
 }
 
 export function ReviewSessionView({ session, notes, now, onStart, onPause, onFinish, onReset, onSetActiveNote, onOpenNote, onEdit, onReorder }: ReviewSessionViewProps) {
-  const [draggingNoteId, setDraggingNoteId] = useState('')
-  const [dropTargetNoteId, setDropTargetNoteId] = useState('')
+  const { draggingNoteId, dropTargetNoteId, dropAfter, dragPosition, startDrag } = usePointerReorder(session.noteIds, onReorder)
   const noteById = new Map(notes.map(note => [note.id, note]))
   const sessionNotes = session.noteIds.map(id => ({ id, note: noteById.get(id) }))
   const activeNote = session.activeNoteId ? noteById.get(session.activeNoteId) : undefined
@@ -34,18 +33,6 @@ export function ReviewSessionView({ session, notes, now, onStart, onPause, onFin
 
   function moveNote(noteId: string, destinationIndex: number) {
     onReorder(moveReviewNote(session.noteIds, noteId, destinationIndex))
-  }
-
-  function handleDrop(event: React.DragEvent<HTMLElement>, targetIndex: number) {
-    event.preventDefault()
-    const sourceId = event.dataTransfer.getData('text/plain') || draggingNoteId
-    const sourceIndex = session.noteIds.indexOf(sourceId)
-    const row = event.currentTarget.getBoundingClientRect()
-    const insertIndex = targetIndex + (event.clientY >= row.top + row.height / 2 ? 1 : 0)
-    const destinationIndex = sourceIndex >= 0 && sourceIndex < insertIndex ? insertIndex - 1 : insertIndex
-    onReorder(moveReviewNote(session.noteIds, sourceId, destinationIndex))
-    setDraggingNoteId('')
-    setDropTargetNoteId('')
   }
 
   return (
@@ -82,20 +69,20 @@ export function ReviewSessionView({ session, notes, now, onStart, onPause, onFin
         <p className="review-session-hint">Wybierz aktywną notatkę, aby przypisać jej czas. Kliknij tytuł, by ją otworzyć; przeciągnij uchwyt lub użyj strzałek, aby zmienić kolejność.</p>
         <div className="review-session-notes">
           {sessionNotes.map(({ id, note }, index) => <article
-            className={`review-session-note ${session.activeNoteId === id ? 'active' : ''} ${draggingNoteId === id ? 'dragging' : ''} ${dropTargetNoteId === id ? 'drop-target' : ''}`}
+            className={`review-session-note ${session.activeNoteId === id ? 'active' : ''} ${draggingNoteId === id ? 'dragging' : ''} ${dropTargetNoteId === id ? `drop-target ${dropAfter ? 'drop-after' : 'drop-before'}` : ''}`}
             key={id}
-            onDragOver={event => { event.preventDefault(); setDropTargetNoteId(id) }}
-            onDrop={event => handleDrop(event, index)}
-            onDragEnd={() => { setDraggingNoteId(''); setDropTargetNoteId('') }}
+            data-review-reorder-id={id}
           >
             <span className="review-note-number">{String(index + 1).padStart(2, '0')}</span>
-            {note && <span
+            {note && <button
+              type="button"
               className="review-drag-handle"
-              draggable
+              onPointerDown={event => startDrag(event, id)}
               title="Przeciągnij, aby zmienić kolejność"
               aria-label={`Zmień kolejność notatki ${note.title}`}
-              onDragStart={event => { event.dataTransfer.effectAllowed = 'move'; event.dataTransfer.setData('text/plain', id); setDraggingNoteId(id) }}
-            ><GripVertical size={15} /></span>}
+              draggable={false}
+              onDragStart={event => event.preventDefault()}
+            ><GripVertical size={15} /></button>}
             {note ? <div className="review-note-details">
               <a className="review-note-link" href={`#note-${encodeURIComponent(note.id)}`} onClick={event => { event.preventDefault(); onSetActiveNote(note.id); onOpenNote(note.id) }}>{note.title || 'Bez tytułu'}<ArrowUpRight size={13} /></a>
               <span>{note.folder || 'Bez folderu'}{note.tags.length ? ` · ${note.tags.join(', ')}` : ''}</span>
@@ -112,6 +99,7 @@ export function ReviewSessionView({ session, notes, now, onStart, onPause, onFin
           {!session.noteIds.length && <p className="review-no-notes">Ta powtórka nie zawiera notatek.</p>}
         </div>
       </section>
+      {draggingNoteId && dragPosition && <div className="review-drag-ghost" style={{ left: dragPosition.x, top: dragPosition.y }} aria-hidden="true"><GripVertical size={14} /><strong>{noteById.get(draggingNoteId)?.title || 'Notatka'}</strong></div>}
     </div>
   )
 }

@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from 'react'
 import {
-  ArrowRight, Circle, ClipboardCopy, ClipboardPaste, Copy, Minus, MousePointer2, RectangleHorizontal,
-  RectangleVertical, Redo2, Trash2, Triangle, Type, Undo2, X,
+  ArrowRight, Check, Circle, ClipboardCopy, ClipboardPaste, Copy, Group, Minus, MousePointer2,
+  RectangleHorizontal, RectangleVertical, Redo2, Trash2, Triangle, Type, Undo2, Ungroup, X,
 } from 'lucide-react'
 import { SVG, type Svg } from '@svgdotjs/svg.js'
 import type { NoteAsset } from './types'
@@ -10,15 +10,19 @@ import { sanitizeSvg } from './content'
 type Tool = 'select' | 'rect' | 'roundRect' | 'ellipse' | 'line' | 'arrow' | 'polygon' | 'text'
 type ArrowMode = 'end' | 'start' | 'both' | 'none'
 type Box = { x: number; y: number; width: number; height: number }
+type ResizeHandle = 'n' | 'ne' | 'e' | 'se' | 's' | 'sw' | 'w' | 'nw'
+type GeometryDraft = { x: string; y: string; width: string; height: string }
 type Snap = { delta: number; target: number } | undefined
 type Interaction =
   | { type: 'draw'; tool: Tool; element: any; id: string; x: number; y: number; keepTool: boolean; startTarget?: string; startAnchor?: string }
   | { type: 'connect'; line: SVGLineElement; id: string; side: 'start' | 'end'; x: number; y: number; moved: boolean }
   | { type: 'move'; ids: string[]; elements: SVGElement[]; others: Box[]; startX: number; startY: number; lastX: number; lastY: number; bounds: Box; moved: boolean }
+  | { type: 'resize'; ids: string[]; targets: { element: SVGElement; source: SVGElement; box: Box }[]; startBounds: Box; handle: ResizeHandle; moved: boolean }
   | { type: 'marquee'; x: number; y: number; additive: boolean; initialIds: string[]; moved: boolean }
 
 type OverlayOptions = {
   marquee?: Box
+  dimensions?: Box
   snapX?: number
   snapY?: number
   movingBounds?: Box
@@ -30,8 +34,26 @@ type Drawing = Svg
 
 const WIDTH = 800
 const HEIGHT = 500
-const SNAP_DISTANCE = 8
+const SNAP_DISTANCE = 4
 const OBJECT_TAGS = new Set(['g', 'rect', 'circle', 'ellipse', 'line', 'polygon', 'polyline', 'path', 'text', 'image', 'use'])
+
+function rounded(value: number): string {
+  return `${Number(value.toFixed(2))}`
+}
+
+function moveElementBy(element: SVGElement, deltaX: number, deltaY: number) {
+  ;(SVG(element) as any).dmove(deltaX, deltaY)
+  for (const name of ['x', 'y', 'x1', 'x2', 'y1', 'y2', 'cx', 'cy']) {
+    const value = element.getAttribute(name)
+    if (value !== null && Number.isFinite(Number(value))) element.setAttribute(name, rounded(Number(value)))
+  }
+  const transform = element.getAttribute('transform')
+  if (transform) element.setAttribute('transform', transform.replace(/-?(?:\d+\.?\d*|\.\d+)(?:e[+-]?\d+)?/gi, value => rounded(Number(value))))
+}
+
+function boxDraft(box: Box): GeometryDraft {
+  return { x: rounded(box.x), y: rounded(box.y), width: rounded(box.width), height: rounded(box.height) }
+}
 
 function snapshotContent(stage: Drawing): string {
   const copy = stage.node.cloneNode(true) as SVGSVGElement
@@ -42,6 +64,23 @@ function snapshotContent(stage: Drawing): string {
 function getBox(element: SVGElement): Box | undefined {
   try {
     const bounds = (element as SVGGraphicsElement).getBBox()
+    const owner = element.ownerSVGElement
+    const elementMatrix = (element as SVGGraphicsElement).getScreenCTM()
+    const ownerMatrix = owner?.getScreenCTM()
+    if (elementMatrix && ownerMatrix) {
+      const matrix = ownerMatrix.inverse().multiply(elementMatrix)
+      const corners = [
+        new DOMPoint(bounds.x, bounds.y).matrixTransform(matrix),
+        new DOMPoint(bounds.x + bounds.width, bounds.y).matrixTransform(matrix),
+        new DOMPoint(bounds.x, bounds.y + bounds.height).matrixTransform(matrix),
+        new DOMPoint(bounds.x + bounds.width, bounds.y + bounds.height).matrixTransform(matrix),
+      ]
+      const x = Math.min(...corners.map(point => point.x))
+      const y = Math.min(...corners.map(point => point.y))
+      const right = Math.max(...corners.map(point => point.x))
+      const bottom = Math.max(...corners.map(point => point.y))
+      return { x, y, width: right - x, height: bottom - y }
+    }
     return { x: bounds.x, y: bounds.y, width: bounds.width, height: bounds.height }
   } catch {
     return undefined
@@ -72,12 +111,24 @@ function directObjects(stage: SVGSVGElement): SVGElement[] {
 function ensureObjectIds(stage: SVGSVGElement) {
   directObjects(stage).forEach(element => {
     if (!element.hasAttribute('data-object-id')) element.setAttribute('data-object-id', crypto.randomUUID())
+    element.setAttribute('pointer-events', 'all')
   })
 }
 
 function elementsForIds(stage: SVGSVGElement, ids: string[]): SVGElement[] {
   const wanted = new Set(ids)
   return directObjects(stage).filter(element => wanted.has(element.getAttribute('data-object-id') ?? ''))
+}
+
+function expandGroupSelection(stage: SVGSVGElement, ids: string[]): string[] {
+  const selected = new Set(ids)
+  const groups = new Set(elementsForIds(stage, ids).map(element => element.getAttribute('data-group-id')).filter((id): id is string => Boolean(id)))
+  directObjects(stage).forEach(element => {
+    const id = element.getAttribute('data-object-id')
+    const groupId = element.getAttribute('data-group-id')
+    if (id && groupId && groups.has(groupId)) selected.add(id)
+  })
+  return [...selected]
 }
 
 function anchorNames(): string[] {
@@ -126,9 +177,15 @@ function findConnectorHandle(target: EventTarget | null): { id: string; side: 's
   return id && (side === 'start' || side === 'end') ? { id, side } : undefined
 }
 
+function findResizeHandle(target: EventTarget | null): ResizeHandle | undefined {
+  const element = target instanceof Element ? target.closest('[data-resize-handle]') : null
+  const handle = element?.getAttribute('data-resize-handle')
+  return handle && ['n', 'ne', 'e', 'se', 's', 'sw', 'w', 'nw'].includes(handle) ? handle as ResizeHandle : undefined
+}
+
 function setLineEndpoint(line: SVGLineElement, side: 'start' | 'end', point: { x: number; y: number }) {
-  line.setAttribute(side === 'start' ? 'x1' : 'x2', `${point.x}`)
-  line.setAttribute(side === 'start' ? 'y1' : 'y2', `${point.y}`)
+  line.setAttribute(side === 'start' ? 'x1' : 'x2', rounded(point.x))
+  line.setAttribute(side === 'start' ? 'y1' : 'y2', rounded(point.y))
 }
 
 function updateConnectors(stage: SVGSVGElement) {
@@ -139,16 +196,18 @@ function updateConnectors(stage: SVGSVGElement) {
     const endAnchor = line.getAttribute('data-end-anchor')
     const startShape = startTarget ? elementsForIds(stage, [startTarget])[0] : undefined
     const endShape = endTarget ? elementsForIds(stage, [endTarget])[0] : undefined
-    const start = startShape && startAnchor ? anchorPosition(startShape, startAnchor) : undefined
-    const end = endShape && endAnchor ? anchorPosition(endShape, endAnchor) : undefined
-    if (start) {
-      line.setAttribute('x1', `${start.x}`)
-      line.setAttribute('y1', `${start.y}`)
+    let start = startShape && startAnchor ? anchorPosition(startShape, startAnchor) : undefined
+    let end = endShape && endAnchor ? anchorPosition(endShape, endAnchor) : undefined
+    const currentStart = start ?? { x: Number(line.getAttribute('x1')), y: Number(line.getAttribute('y1')) }
+    const currentEnd = end ?? { x: Number(line.getAttribute('x2')), y: Number(line.getAttribute('y2')) }
+    const length = Math.hypot(currentEnd.x - currentStart.x, currentEnd.y - currentStart.y)
+    if (length > 0) {
+      const gap = Math.min(9, length / 3)
+      if (start && line.hasAttribute('marker-start')) start = { x: start.x + (currentEnd.x - currentStart.x) * gap / length, y: start.y + (currentEnd.y - currentStart.y) * gap / length }
+      if (end && line.hasAttribute('marker-end')) end = { x: end.x - (currentEnd.x - currentStart.x) * gap / length, y: end.y - (currentEnd.y - currentStart.y) * gap / length }
     }
-    if (end) {
-      line.setAttribute('x2', `${end.x}`)
-      line.setAttribute('y2', `${end.y}`)
-    }
+    if (start) setLineEndpoint(line, 'start', start)
+    if (end) setLineEndpoint(line, 'end', end)
   })
 }
 
@@ -248,6 +307,17 @@ function nearestGap(moving: Box, others: Box[], axis: 'x' | 'y') {
 function renderOverlay(stage: Drawing, ids: string[], options: OverlayOptions = {}) {
   stage.node.querySelectorAll('[data-editor-ui]').forEach(element => element.remove())
   const layer = stage.group().attr({ 'data-editor-ui': 'true', 'pointer-events': 'none' })
+  for (const element of directObjects(stage.node).filter(item => item.tagName.toLowerCase() === 'line')) {
+    const id = element.getAttribute('data-object-id')
+    if (!id) continue
+    const x1 = Number(element.getAttribute('x1'))
+    const y1 = Number(element.getAttribute('y1'))
+    const x2 = Number(element.getAttribute('x2'))
+    const y2 = Number(element.getAttribute('y2'))
+    const width = Math.max(14, Number(element.getAttribute('stroke-width')) + 10 || 14)
+    layer.line(x1, y1, x2, y2).stroke({ color: '#000', width, linecap: 'round' })
+      .attr({ 'data-object-hit': id, 'stroke-opacity': 0, 'pointer-events': 'stroke', cursor: 'pointer' })
+  }
   for (const element of elementsForIds(stage.node, ids)) {
     const box = getBox(element)
     if (!box) continue
@@ -255,6 +325,21 @@ function renderOverlay(stage: Drawing, ids: string[], options: OverlayOptions = 
       .move(box.x - 4, box.y - 4)
       .fill('none')
       .stroke({ color: '#5d73d8', width: 2, dasharray: '7 4' })
+  }
+  const selectionBounds = unionBoxes(elementsForIds(stage.node, ids).map(getBox))
+  if (selectionBounds && ids.length) {
+    const { x, y, width, height } = selectionBounds
+    const points: Record<ResizeHandle, [number, number]> = {
+      n: [x + width / 2, y - 6], ne: [x + width + 6, y - 6], e: [x + width + 6, y + height / 2], se: [x + width + 6, y + height + 6],
+      s: [x + width / 2, y + height + 6], sw: [x - 6, y + height + 6], w: [x - 6, y + height / 2], nw: [x - 6, y - 6],
+    }
+    for (const [handle, [cx, cy]] of Object.entries(points) as [ResizeHandle, [number, number]][]) {
+      const cursor = handle === 'n' || handle === 's' ? 'ns-resize'
+        : handle === 'e' || handle === 'w' ? 'ew-resize'
+          : handle === 'ne' || handle === 'sw' ? 'nesw-resize' : 'nwse-resize'
+      layer.rect(9, 9).center(cx, cy).fill('#fff').stroke({ color: '#5066d2', width: 1.6 })
+        .attr({ 'data-resize-handle': handle, 'pointer-events': 'all', cursor })
+    }
   }
   const activeTool = stage.node.getAttribute('data-active-tool')
   const selectedLines = elementsForIds(stage.node, ids).filter(element => element.tagName.toLowerCase() === 'line')
@@ -287,6 +372,15 @@ function renderOverlay(stage: Drawing, ids: string[], options: OverlayOptions = 
     const box = options.marquee
     layer.rect(box.width, box.height).move(box.x, box.y).fill('#7587e51c').stroke({ color: '#6378dd', width: 1.5, dasharray: '6 4' })
   }
+  if (options.dimensions) {
+    const { x, y, width, height } = options.dimensions
+    const label = `${rounded(width)} × ${rounded(height)} px`
+    const labelWidth = Math.max(76, label.length * 6.5 + 16)
+    const centerX = x + width / 2
+    const centerY = y + height / 2
+    layer.rect(labelWidth, 23).radius(5).center(centerX, centerY).fill('#fff').stroke({ color: '#d8deef', width: 1 })
+    layer.text(label).font({ family: 'sans-serif', size: 11, weight: 650 }).fill('#53618b').center(centerX, centerY)
+  }
   if (options.snapX !== undefined) layer.line(options.snapX, 0, options.snapX, HEIGHT).stroke({ color: '#e25b91', width: 1.5, dasharray: '5 5' })
   if (options.snapY !== undefined) layer.line(0, options.snapY, WIDTH, options.snapY).stroke({ color: '#e25b91', width: 1.5, dasharray: '5 5' })
   if (options.movingBounds && options.otherBounds) {
@@ -298,12 +392,106 @@ function renderOverlay(stage: Drawing, ids: string[], options: OverlayOptions = 
 }
 
 function findObjectTarget(stage: SVGSVGElement, target: EventTarget | null): SVGElement | undefined {
+  const hit = target instanceof Element ? target.closest('[data-object-hit]') : null
+  const hitId = hit?.getAttribute('data-object-hit')
+  if (hitId) return elementsForIds(stage, [hitId])[0]
   let element = target instanceof SVGElement ? target : undefined
   while (element && element !== stage) {
     if (element.parentNode === stage && OBJECT_TAGS.has(element.tagName.toLowerCase()) && !element.hasAttribute('data-background')) return element
     element = element.parentElement instanceof SVGElement ? element.parentElement : undefined
   }
   return undefined
+}
+
+function resizedBounds(start: Box, handle: ResizeHandle, point: { x: number; y: number }, keepSquare = false): Box {
+  if (keepSquare) {
+    const centerX = start.x + start.width / 2
+    const centerY = start.y + start.height / 2
+    if (handle.includes('w') || handle.includes('e')) {
+      if (handle.includes('n') || handle.includes('s')) {
+        const anchorX = handle.includes('w') ? start.x + start.width : start.x
+        const anchorY = handle.includes('n') ? start.y + start.height : start.y
+        const size = Math.max(.1, Math.max(Math.abs(point.x - anchorX), Math.abs(point.y - anchorY)))
+        const x = handle.includes('w') ? anchorX - size : anchorX
+        const y = handle.includes('n') ? anchorY - size : anchorY
+        return { x, y, width: size, height: size }
+      }
+      const size = Math.max(.1, handle.includes('w') ? start.x + start.width - point.x : point.x - start.x)
+      return { x: handle.includes('w') ? start.x + start.width - size : start.x, y: centerY - size / 2, width: size, height: size }
+    }
+    const size = Math.max(.1, handle.includes('n') ? start.y + start.height - point.y : point.y - start.y)
+    return { x: centerX - size / 2, y: handle.includes('n') ? start.y + start.height - size : start.y, width: size, height: size }
+  }
+  let left = start.x
+  let top = start.y
+  let right = start.x + start.width
+  let bottom = start.y + start.height
+  if (handle.includes('w')) left = Math.min(point.x, right - 0.1)
+  if (handle.includes('e')) right = Math.max(point.x, left + 0.1)
+  if (handle.includes('n')) top = Math.min(point.y, bottom - 0.1)
+  if (handle.includes('s')) bottom = Math.max(point.y, top + 0.1)
+  return { x: left, y: top, width: right - left, height: bottom - top }
+}
+
+function mappedCoordinate(value: number, start: number, size: number, target: number, nextSize: number): number {
+  return target + (size > 0 ? (value - start) * nextSize / size : 0)
+}
+
+function resizeElementFromSource(source: SVGElement, target: SVGElement, from: Box, to: Box) {
+  const tag = target.tagName.toLowerCase()
+  const scaleX = from.width > 0 ? to.width / from.width : 1
+  const scaleY = from.height > 0 ? to.height / from.height : 1
+  const set = (name: string, value: number) => target.setAttribute(name, rounded(value))
+  const sourceNumber = (name: string, fallback = 0) => Number(source.getAttribute(name)) || fallback
+  if (tag === 'rect' || tag === 'image' || tag === 'use') {
+    set('x', to.x)
+    set('y', to.y)
+    set('width', to.width)
+    set('height', to.height)
+    if (source.hasAttribute('rx')) set('rx', sourceNumber('rx') * scaleX)
+    if (source.hasAttribute('ry')) set('ry', sourceNumber('ry') * scaleY)
+  } else if (tag === 'ellipse') {
+    set('cx', to.x + to.width / 2)
+    set('cy', to.y + to.height / 2)
+    set('rx', to.width / 2)
+    set('ry', to.height / 2)
+  } else if (tag === 'circle') {
+    set('cx', to.x + to.width / 2)
+    set('cy', to.y + to.height / 2)
+    set('r', Math.min(to.width, to.height) / 2)
+  } else if (tag === 'line') {
+    for (const axis of ['x', 'y'] as const) {
+      const size = axis === 'x' ? from.width : from.height
+      const start = axis === 'x' ? from.x : from.y
+      const targetStart = axis === 'x' ? to.x : to.y
+      const targetSize = axis === 'x' ? to.width : to.height
+      for (const side of ['1', '2'] as const) {
+        const attribute = `${axis}${side}`
+        const fallbackPoint = axis === 'x'
+          ? (side === '1' ? to.x : to.x + to.width)
+          : (side === '1' ? to.y : to.y + to.height)
+        set(attribute, size > 0
+          ? mappedCoordinate(sourceNumber(attribute), start, size, targetStart, targetSize)
+          : fallbackPoint)
+      }
+    }
+  } else if (tag === 'polygon' || tag === 'polyline') {
+    const values = (source.getAttribute('points') ?? '').trim().split(/[\s,]+/).map(Number)
+    const points: string[] = []
+    for (let index = 0; index + 1 < values.length; index += 2) {
+      points.push(`${rounded(mappedCoordinate(values[index], from.x, from.width, to.x, to.width))},${rounded(mappedCoordinate(values[index + 1], from.y, from.height, to.y, to.height))}`)
+    }
+    target.setAttribute('points', points.join(' '))
+  } else if (tag === 'text') {
+    set('x', mappedCoordinate(sourceNumber('x', from.x), from.x, from.width, to.x, to.width))
+    set('y', mappedCoordinate(sourceNumber('y', from.y), from.y, from.height, to.y, to.height))
+    set('font-size', sourceNumber('font-size', 24) * Math.sqrt(Math.max(.0001, scaleX * scaleY)))
+  } else {
+    const tx = to.x - from.x * scaleX
+    const ty = to.y - from.y * scaleY
+    const oldTransform = source.getAttribute('transform')
+    target.setAttribute('transform', `matrix(${rounded(scaleX)} 0 0 ${rounded(scaleY)} ${rounded(tx)} ${rounded(ty)})${oldTransform ? ` ${oldTransform}` : ''}`)
+  }
 }
 
 function updateMarkerColor(stage: SVGSVGElement, element: SVGElement, color: string) {
@@ -336,6 +524,9 @@ export function VectorEditor({
   const duplicateAction = useRef<() => void>(() => {})
   const copyAction = useRef<() => void>(() => {})
   const pasteAction = useRef<() => void>(() => {})
+  const moveSelectionAction = useRef<(deltaX: number, deltaY: number) => void>(() => {})
+  const groupAction = useRef<() => void>(() => {})
+  const ungroupAction = useRef<() => void>(() => {})
   const clipboard = useRef<SVGElement[]>([])
   const toolRef = useRef<Tool>('select')
   const strokeColorRef = useRef('#596fd8')
@@ -355,6 +546,9 @@ export function VectorEditor({
   const [arrowMode, setArrowMode] = useState<ArrowMode>('end')
   const [fitToContent, setFitToContent] = useState(false)
   const [selectedIds, setSelectedIds] = useState<string[]>([])
+  const [selectionBounds, setSelectionBounds] = useState<Box | null>(null)
+  const [geometryDraft, setGeometryDraft] = useState<GeometryDraft | null>(null)
+  const [hasSelectedGroup, setHasSelectedGroup] = useState(false)
   const [canUndo, setCanUndo] = useState(false)
   const [canRedo, setCanRedo] = useState(false)
   const [hasClipboard, setHasClipboard] = useState(false)
@@ -378,11 +572,21 @@ export function VectorEditor({
   }
 
   const select = (ids: string[]) => {
-    const unique = [...new Set(ids)]
+    const stage = drawing.current
+    const unique = [...new Set(stage ? expandGroupSelection(stage.node, ids) : ids)]
     selectedIdsRef.current = unique
     setSelectedIds(unique)
-    const stage = drawing.current
-    if (stage) renderOverlay(stage, unique)
+    if (stage) {
+      setHasSelectedGroup(elementsForIds(stage.node, unique).some(element => element.hasAttribute('data-group-id')))
+      const bounds = unionBoxes(elementsForIds(stage.node, unique).map(getBox))
+      setSelectionBounds(bounds ?? null)
+      setGeometryDraft(bounds ? boxDraft(bounds) : null)
+      renderOverlay(stage, unique)
+    } else {
+      setHasSelectedGroup(false)
+      setSelectionBounds(null)
+      setGeometryDraft(null)
+    }
   }
 
   const recordHistory = (stage: Drawing) => {
@@ -418,8 +622,8 @@ export function VectorEditor({
     const point = (event: PointerEvent) => {
       const bounds = stage.node.getBoundingClientRect()
       return {
-        x: Math.max(0, Math.min(WIDTH, (event.clientX - bounds.left) * WIDTH / bounds.width)),
-        y: Math.max(0, Math.min(HEIGHT, (event.clientY - bounds.top) * HEIGHT / bounds.height)),
+        x: Number(Math.max(0, Math.min(WIDTH, (event.clientX - bounds.left) * WIDTH / bounds.width)).toFixed(1)),
+        y: Number(Math.max(0, Math.min(HEIGHT, (event.clientY - bounds.top) * HEIGHT / bounds.height)).toFixed(1)),
       }
     }
 
@@ -460,7 +664,7 @@ export function VectorEditor({
         } else if (value) {
           const created = stage.text(value).move(editing.x, editing.y).font({ family: 'Inter, sans-serif', size: editing.fontSize, weight: 600 }).fill(strokeColorRef.current)
           const id = crypto.randomUUID()
-          created.attr('data-object-id', id)
+          created.attr({ 'data-object-id': id, 'pointer-events': 'all' })
           select([id])
           if (!editing.keepTool) chooseTool('select')
         }
@@ -494,7 +698,10 @@ export function VectorEditor({
       } else if (currentTool === 'line' || currentTool === 'arrow') {
         element = stage.line(location.x, location.y, location.x, location.y)
         if (currentTool === 'arrow' && arrowModeRef.current !== 'none') {
-          const addMarker = (side: 'start' | 'end') => element.marker(side, 14, 14, (marker: any) => marker.path('M 0 0 L 14 7 L 0 14 z').fill(color).attr({ orient: 'auto-start-reverse' }))
+          const addMarker = (side: 'start' | 'end') => element.marker(side, 14, 14, (marker: any) => {
+            marker.attr({ refX: 14, refY: 7, orient: 'auto-start-reverse', markerUnits: 'userSpaceOnUse' })
+            marker.path('M 0 0 L 14 7 L 0 14 z').fill(color)
+          })
           if (arrowModeRef.current === 'start' || arrowModeRef.current === 'both') addMarker('start')
           if (arrowModeRef.current === 'end' || arrowModeRef.current === 'both') addMarker('end')
         }
@@ -505,16 +712,20 @@ export function VectorEditor({
       element.stroke({ color, width: size, linecap: 'round', linejoin: 'round' })
       element.fill(fillEnabledRef.current && !['line', 'arrow'].includes(currentTool) ? fillColorRef.current : 'none')
       const id = crypto.randomUUID()
-      element.attr('data-object-id', id)
+      element.attr({ 'data-object-id': id, 'pointer-events': 'all' })
       select([id])
       return { element, id }
     }
 
     const start = (event: PointerEvent) => {
-      event.preventDefault()
+      const currentTool = toolRef.current
+      const clickedObject = findObjectTarget(stage.node, event.target)
+      const allowTextDoubleClick = currentTool === 'select'
+        && event.pointerType === 'mouse'
+        && clickedObject?.tagName.toLowerCase() === 'text'
+      if (!allowTextDoubleClick) event.preventDefault()
       stage.node.focus({ preventScroll: true })
       const location = point(event)
-      const currentTool = toolRef.current
       if (currentTool === 'text') {
         if (event.detail <= 1) beginTextEdit(location, undefined, event.ctrlKey)
         return
@@ -553,6 +764,24 @@ export function VectorEditor({
         return
       }
 
+      const resizeHandle = findResizeHandle(event.target)
+      if (resizeHandle && selectedIdsRef.current.length) {
+        const ids = selectedIdsRef.current
+        const elements = elementsForIds(stage.node, ids)
+        const startBounds = unionBoxes(elements.map(getBox))
+        if (!startBounds) return
+        interaction.current = {
+          type: 'resize',
+          ids,
+          startBounds,
+          handle: resizeHandle,
+          moved: false,
+          targets: elements.map(element => ({ element, source: element.cloneNode(true) as SVGElement, box: getBox(element) }))
+            .filter((item): item is { element: SVGElement; source: SVGElement; box: Box } => Boolean(item.box)),
+        }
+        return
+      }
+
       const anchorHit = findAnchorHit(event.target)
       const target = anchorHit ? elementsForIds(stage.node, [anchorHit.id])[0] : findObjectTarget(stage.node, event.target)
       if (!target) {
@@ -565,11 +794,13 @@ export function VectorEditor({
       if (!id) return
       let ids = selectedIdsRef.current
       if (event.shiftKey) {
-        ids = ids.includes(id) ? ids.filter(item => item !== id) : [...ids, id]
+        const groupedIds = expandGroupSelection(stage.node, [id])
+        const removeGroup = groupedIds.every(groupId => ids.includes(groupId))
+        ids = removeGroup ? ids.filter(item => !groupedIds.includes(item)) : [...new Set([...ids, ...groupedIds])]
         select(ids)
-        if (!ids.includes(id)) return
+        if (removeGroup) return
       } else if (!ids.includes(id)) {
-        ids = [id]
+        ids = expandGroupSelection(stage.node, [id])
         select(ids)
       }
       const elements = elementsForIds(stage.node, ids)
@@ -587,10 +818,10 @@ export function VectorEditor({
         current.keepTool = current.keepTool || event.ctrlKey
         const x = Math.min(current.x, location.x)
         const y = Math.min(current.y, location.y)
-        const width = Math.max(12, Math.abs(location.x - current.x))
-        const height = Math.max(12, Math.abs(location.y - current.y))
-        if (current.tool === 'rect' || current.tool === 'roundRect') current.element.move(x, y).size(width, height)
-        else if (current.tool === 'ellipse') current.element.move(x, y).size(width, height)
+        const width = Math.max(0.1, Math.abs(location.x - current.x))
+        const height = Math.max(0.1, Math.abs(location.y - current.y))
+        if (current.tool === 'rect' || current.tool === 'roundRect') current.element.attr({ x: rounded(x), y: rounded(y), width: rounded(width), height: rounded(height) })
+        else if (current.tool === 'ellipse') current.element.attr({ cx: rounded(x + width / 2), cy: rounded(y + height / 2), rx: rounded(width / 2), ry: rounded(height / 2) })
         else if (current.tool === 'line' || current.tool === 'arrow') {
           const hovered = document.elementFromPoint(event.clientX, event.clientY)
           const hit = findAnchorHit(hovered)
@@ -610,12 +841,12 @@ export function VectorEditor({
           const cy = y + height / 2
           const points = Array.from({ length: sides }, (_, index) => {
             const angle = -Math.PI / 2 + index * Math.PI * 2 / sides
-            return `${cx + Math.cos(angle) * width / 2},${cy + Math.sin(angle) * height / 2}`
+            return `${rounded(cx + Math.cos(angle) * width / 2)},${rounded(cy + Math.sin(angle) * height / 2)}`
           }).join(' ')
           current.element.plot(points)
         }
         updateConnectors(stage.node)
-        renderOverlay(stage, [current.id])
+        renderOverlay(stage, [current.id], { dimensions: { x, y, width, height } })
       } else if (current.type === 'connect') {
         if (!current.moved && Math.hypot(location.x - current.x, location.y - current.y) < 2) return
         current.moved = true
@@ -636,6 +867,20 @@ export function VectorEditor({
         }
         updateConnectors(stage.node)
         renderOverlay(stage, [current.id])
+      } else if (current.type === 'resize') {
+        const keepSquare = current.targets.length === 1 && current.targets[0].element.tagName.toLowerCase() === 'circle'
+        const bounds = resizedBounds(current.startBounds, current.handle, location, keepSquare)
+        current.moved = current.moved || Math.abs(bounds.width - current.startBounds.width) + Math.abs(bounds.height - current.startBounds.height) + Math.abs(bounds.x - current.startBounds.x) + Math.abs(bounds.y - current.startBounds.y) > .1
+        const scaleX = current.startBounds.width > 0 ? bounds.width / current.startBounds.width : 1
+        const scaleY = current.startBounds.height > 0 ? bounds.height / current.startBounds.height : 1
+        current.targets.forEach(({ element, source, box }) => resizeElementFromSource(source, element, box, {
+          x: bounds.x + (box.x - current.startBounds.x) * scaleX,
+          y: bounds.y + (box.y - current.startBounds.y) * scaleY,
+          width: current.startBounds.width === 0 ? bounds.width : box.width * scaleX,
+          height: current.startBounds.height === 0 ? bounds.height : box.height * scaleY,
+        }))
+        updateConnectors(stage.node)
+        renderOverlay(stage, current.ids)
       } else if (current.type === 'move') {
         const rawX = location.x - current.startX
         const rawY = location.y - current.startY
@@ -643,12 +888,12 @@ export function VectorEditor({
         const yBounds = { ...current.bounds, y: current.bounds.y + rawY }
         const snapX = getSnap(xBounds, current.others, 'x')
         const snapY = getSnap(yBounds, current.others, 'y')
-        const totalX = rawX + (snapX?.delta ?? 0)
-        const totalY = rawY + (snapY?.delta ?? 0)
+        const totalX = Number((rawX + (snapX?.delta ?? 0)).toFixed(1))
+        const totalY = Number((rawY + (snapY?.delta ?? 0)).toFixed(1))
         const deltaX = totalX - current.lastX
         const deltaY = totalY - current.lastY
         if (Math.abs(deltaX) + Math.abs(deltaY) > 0.1) current.moved = true
-        current.elements.forEach(element => (SVG(element) as any).dmove(deltaX, deltaY))
+        current.elements.forEach(element => moveElementBy(element, deltaX, deltaY))
         updateConnectors(stage.node)
         current.lastX = totalX
         current.lastY = totalY
@@ -688,15 +933,18 @@ export function VectorEditor({
           updateConnectors(stage.node)
         }
         recordHistory(stage)
-        renderOverlay(stage, [current.id])
+        select([current.id])
         if (!current.keepTool) chooseTool('select')
       } else if (current.type === 'connect') {
         stage.node.removeAttribute('data-connector-dragging')
         if (current.moved) recordHistory(stage)
         renderOverlay(stage, [current.id])
+      } else if (current.type === 'resize') {
+        if (current.moved) recordHistory(stage)
+        select(current.ids)
       } else if (current.type === 'move') {
         if (current.moved) recordHistory(stage)
-        renderOverlay(stage, current.ids)
+        select(current.ids)
       } else {
         if (current.moved) {
           const location = point(event)
@@ -712,7 +960,11 @@ export function VectorEditor({
 
     const keydown = (event: KeyboardEvent) => {
       if (event.target !== stage.node) return
-      if ((event.key === 'Delete' || event.key === 'Backspace') && selectedIdsRef.current.length) {
+      if (['ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight'].includes(event.key) && selectedIdsRef.current.length) {
+        event.preventDefault()
+        const step = event.altKey ? .1 : event.shiftKey ? 10 : 1
+        moveSelectionAction.current(event.key === 'ArrowLeft' ? -step : event.key === 'ArrowRight' ? step : 0, event.key === 'ArrowUp' ? -step : event.key === 'ArrowDown' ? step : 0)
+      } else if ((event.key === 'Delete' || event.key === 'Backspace') && selectedIdsRef.current.length) {
         event.preventDefault()
         const ids = new Set(selectedIdsRef.current)
         detachConnectors(stage.node, [...ids])
@@ -731,6 +983,13 @@ export function VectorEditor({
       if (!(event.metaKey || event.ctrlKey)) return
       const key = event.key.toLowerCase()
       const editingText = event.target instanceof Element && Boolean(event.target.closest('input, textarea, select, [contenteditable="true"]'))
+      if (key === 'g' && !editingText && selectedIdsRef.current.length) {
+        event.preventDefault()
+        event.stopPropagation()
+        if (event.shiftKey) ungroupAction.current()
+        else groupAction.current()
+        return
+      }
       if (key === 'c' && !editingText && selectedIdsRef.current.length) {
         event.preventDefault()
         event.stopPropagation()
@@ -756,6 +1015,7 @@ export function VectorEditor({
 
     const doubleClick = (event: MouseEvent) => {
       const target = findObjectTarget(stage.node, event.target)
+        ?? findObjectTarget(stage.node, document.elementFromPoint(event.clientX, event.clientY))
       if (target?.tagName.toLowerCase() === 'text') {
         event.preventDefault()
         const bounds = getBox(target)
@@ -798,8 +1058,7 @@ export function VectorEditor({
     stage.svg(history.current.at(-1) ?? '')
     ensureObjectIds(stage.node)
     updateConnectors(stage.node)
-    selectedIdsRef.current = []
-    setSelectedIds([])
+    select([])
     setCanUndo(history.current.length > 1)
     setCanRedo(redoHistory.current.length > 0)
     renderOverlay(stage, [])
@@ -814,8 +1073,7 @@ export function VectorEditor({
     stage.svg(next)
     ensureObjectIds(stage.node)
     updateConnectors(stage.node)
-    selectedIdsRef.current = []
-    setSelectedIds([])
+    select([])
     setCanUndo(history.current.length > 1)
     setCanRedo(redoHistory.current.length > 0)
     renderOverlay(stage, [])
@@ -831,14 +1089,20 @@ export function VectorEditor({
     const stage = drawing.current
     if (!stage || !clipboard.current.length) return
     const idMap = new Map<string, string>()
+    const groupIdMap = new Map<string, string>()
     const cloned = clipboard.current.map(element => {
       const copy = element.cloneNode(true) as SVGElement
       const id = crypto.randomUUID()
       const originalId = element.getAttribute('data-object-id')
       if (originalId) idMap.set(originalId, id)
       copy.setAttribute('data-object-id', id)
+      const groupId = element.getAttribute('data-group-id')
+      if (groupId) {
+        if (!groupIdMap.has(groupId)) groupIdMap.set(groupId, crypto.randomUUID())
+        copy.setAttribute('data-group-id', groupIdMap.get(groupId)!)
+      }
       stage.node.append(copy)
-      ;(SVG(copy) as any).dmove(20, 20)
+      moveElementBy(copy, 20, 20)
       return { copy, id }
     })
     cloned.forEach(({ copy }) => {
@@ -856,8 +1120,7 @@ export function VectorEditor({
     })
     updateConnectors(stage.node)
     const copies = cloned.map(({ id }) => id)
-    selectedIdsRef.current = copies
-    setSelectedIds(copies)
+    select(copies)
     recordHistory(stage)
     renderOverlay(stage, copies)
     stage.node.focus({ preventScroll: true })
@@ -868,24 +1131,103 @@ export function VectorEditor({
     pasteCopied()
   }
 
-  useEffect(() => {
-    undoAction.current = undo
-    redoAction.current = redo
-    duplicateAction.current = duplicateSelected
-    copyAction.current = copySelected
-    pasteAction.current = pasteCopied
-  })
+  function groupSelected() {
+    const stage = drawing.current
+    if (!stage || selectedIdsRef.current.length < 2) return
+    const groupId = crypto.randomUUID()
+    elementsForIds(stage.node, selectedIdsRef.current).forEach(element => element.setAttribute('data-group-id', groupId))
+    recordHistory(stage)
+    select(selectedIdsRef.current)
+  }
+
+  function ungroupSelected() {
+    const stage = drawing.current
+    if (!stage || !selectedIdsRef.current.length) return
+    const groups = new Set(elementsForIds(stage.node, selectedIdsRef.current).map(element => element.getAttribute('data-group-id')).filter((id): id is string => Boolean(id)))
+    if (!groups.size) return
+    directObjects(stage.node).filter(element => groups.has(element.getAttribute('data-group-id') ?? '')).forEach(element => element.removeAttribute('data-group-id'))
+    recordHistory(stage)
+    select(selectedIdsRef.current)
+  }
 
   function deleteSelected() {
     const stage = drawing.current
     if (!stage || !selectedIdsRef.current.length) return
     detachConnectors(stage.node, selectedIdsRef.current)
     elementsForIds(stage.node, selectedIdsRef.current).forEach(element => element.remove())
-    selectedIdsRef.current = []
-    setSelectedIds([])
+    select([])
     recordHistory(stage)
     renderOverlay(stage, [])
     stage.node.focus({ preventScroll: true })
+  }
+
+  function moveSelectionBy(deltaX: number, deltaY: number) {
+    const stage = drawing.current
+    const ids = selectedIdsRef.current
+    if (!stage || !ids.length) return
+    elementsForIds(stage.node, ids).forEach(element => moveElementBy(element, deltaX, deltaY))
+    updateConnectors(stage.node)
+    select(ids)
+    recordHistory(stage)
+  }
+
+  useEffect(() => {
+    undoAction.current = undo
+    redoAction.current = redo
+    duplicateAction.current = duplicateSelected
+    copyAction.current = copySelected
+    pasteAction.current = pasteCopied
+    moveSelectionAction.current = moveSelectionBy
+    groupAction.current = groupSelected
+    ungroupAction.current = ungroupSelected
+  })
+
+  function applyGeometry(next: Box) {
+    const stage = drawing.current
+    const ids = selectedIdsRef.current
+    if (!stage || !ids.length) return
+    const selectedElements = elementsForIds(stage.node, ids)
+    if (selectedElements.length === 1 && selectedElements[0].tagName.toLowerCase() === 'circle') {
+      const size = Math.max(next.width, next.height)
+      next = { ...next, width: size, height: size }
+    }
+    const from = unionBoxes(selectedElements.map(getBox))
+    if (!from) return
+    const targets = elementsForIds(stage.node, ids).map(element => ({ element, source: element.cloneNode(true) as SVGElement, box: getBox(element) })).filter((item): item is { element: SVGElement; source: SVGElement; box: Box } => Boolean(item.box))
+    targets.forEach(({ element, source, box }) => {
+      const targetBox = {
+        x: next.x + (box.x - from.x) * (from.width > 0 ? next.width / from.width : 1),
+        y: next.y + (box.y - from.y) * (from.height > 0 ? next.height / from.height : 1),
+        width: from.width === 0 ? next.width : box.width * next.width / from.width,
+        height: from.height === 0 ? next.height : box.height * next.height / from.height,
+      }
+      resizeElementFromSource(source, element, box, targetBox)
+    })
+    updateConnectors(stage.node)
+    select(ids)
+    recordHistory(stage)
+  }
+
+  function applyGeometryDraft() {
+    if (!selectionBounds || !geometryDraft) return
+    const value = (input: string, fallback: number) => Number.isFinite(Number(input)) ? Number(input) : fallback
+    const stage = drawing.current
+    const selectedElements = stage ? elementsForIds(stage.node, selectedIdsRef.current) : []
+    let width = Math.max(0.1, value(geometryDraft.width, selectionBounds.width))
+    let height = Math.max(0.1, value(geometryDraft.height, selectionBounds.height))
+    if (selectedElements.length === 1 && selectedElements[0].tagName.toLowerCase() === 'circle') {
+      const widthChanged = Math.abs(width - selectionBounds.width) > .01
+      const heightChanged = Math.abs(height - selectionBounds.height) > .01
+      if (widthChanged && !heightChanged) height = width
+      else if (heightChanged && !widthChanged) width = height
+      else width = height = Math.max(width, height)
+    }
+    applyGeometry({
+      x: value(geometryDraft.x, selectionBounds.x),
+      y: value(geometryDraft.y, selectionBounds.y),
+      width,
+      height,
+    })
   }
 
   function applyStrokeColor(value: string) {
@@ -986,39 +1328,50 @@ export function VectorEditor({
           <div><p className="eyebrow">EDYTOR SVG</p><h2 id="drawing-title">{asset ? 'Edytuj schemat' : 'Nowy schemat'}</h2></div>
           <button className="icon-button" onClick={onClose} aria-label="Zamknij"><X size={19} /></button>
         </header>
-        <div className="drawing-toolbar advanced-drawing-toolbar">
-          <div className="drawing-tool-group" role="group" aria-label="Narzędzia rysowania">
-            {tools.map(item => {
-              const Icon = item.icon
-              return <button key={item.id} className={`tool-button ${tool === item.id ? 'selected' : ''}`} onClick={() => chooseTool(item.id)} title={item.label} aria-label={item.label} aria-pressed={tool === item.id}><Icon size={17} /></button>
-            })}
+        <div className="vector-editor-controls">
+          <div className="drawing-toolbar-row drawing-toolbar-tools">
+            <div className="drawing-tool-group" role="group" aria-label="Narzędzia rysowania">
+              {tools.map(item => {
+                const Icon = item.icon
+                return <button key={item.id} className={`tool-button ${tool === item.id ? 'selected' : ''}`} onClick={() => chooseTool(item.id)} title={item.label} aria-label={item.label} aria-pressed={tool === item.id}><Icon size={17} /></button>
+              })}
+            </div>
+            <span className="toolbar-divider" />
+            <div className="drawing-selection-actions" role="group" aria-label="Operacje na zaznaczeniu">
+              <span className="selection-count">{selectedIds.length ? `${selectedIds.length} zazn.` : 'Brak zaznaczenia'}</span>
+              <button className="tool-button" onClick={groupSelected} disabled={selectedIds.length < 2} title="Grupuj (Ctrl+G)" aria-label="Grupuj figury"><Group size={16} /></button>
+              <button className="tool-button" onClick={ungroupSelected} disabled={!hasSelectedGroup} title="Rozgrupuj (Ctrl+Shift+G)" aria-label="Rozgrupuj figury"><Ungroup size={16} /></button>
+              <button className="tool-button" onClick={copySelected} disabled={!selectedIds.length} title="Kopiuj zaznaczenie (Ctrl+C)" aria-label="Kopiuj zaznaczenie"><ClipboardCopy size={16} /></button>
+              <button className="tool-button" onClick={pasteCopied} disabled={!hasClipboard} title="Wklej zaznaczenie (Ctrl+V)" aria-label="Wklej zaznaczenie"><ClipboardPaste size={16} /></button>
+              <button className="tool-button" onClick={duplicateSelected} disabled={!selectedIds.length} title="Duplikuj zaznaczenie (Ctrl+D)" aria-label="Duplikuj zaznaczenie"><Copy size={16} /></button>
+              <button className="tool-button delete-tool" onClick={deleteSelected} disabled={!selectedIds.length} title="Usuń zaznaczenie (Delete)" aria-label="Usuń zaznaczenie"><Trash2 size={16} /></button>
+              <button className="tool-button" onClick={undo} disabled={!canUndo} title="Cofnij (Ctrl+Z)" aria-label="Cofnij"><Undo2 size={17} /></button>
+              <button className="tool-button" onClick={redo} disabled={!canRedo} title="Ponów (Ctrl+Y)" aria-label="Ponów"><Redo2 size={17} /></button>
+            </div>
           </div>
-          {tool === 'arrow' && <label className="drawing-select-control"><span>Strzałka</span><select value={arrowMode} onChange={event => setArrowMode(event.target.value as ArrowMode)} aria-label="Rodzaj strzałki"><option value="end">Grot na końcu</option><option value="start">Grot na początku</option><option value="both">Groty po obu stronach</option><option value="none">Bez grotu</option></select></label>}
-          {tool === 'polygon' && <label className="drawing-select-control"><span>Wielokąt</span><select value={polygonSides} onChange={event => setPolygonSides(Number(event.target.value))} aria-label="Typ wielokąta"><option value="3">Trójkąt</option><option value="4">Romb</option><option value="5">Pięciokąt</option><option value="6">Sześciokąt</option><option value="8">Ośmiokąt</option></select></label>}
-          <span className="toolbar-divider" />
-          <label className="color-control" title="Kolor konturu">
-            <input type="color" value={strokeColor} onChange={event => applyStrokeColor(event.target.value)} aria-label="Kolor konturu" />
-            <span>Kontur</span>
-          </label>
-          <label className={`color-control ${!fillEnabled ? 'option-disabled' : ''}`} title="Kolor wypełnienia">
-            <input type="color" value={fillColor} onChange={event => applyFillColor(event.target.value)} aria-label="Kolor wypełnienia" disabled={!fillEnabled} />
-            <span>Wypełnienie</span>
-          </label>
-          <label className="fill-toggle"><input type="checkbox" checked={fillEnabled} onChange={event => applyFillEnabled(event.target.checked)} aria-label="Włącz wypełnienie" />Wypełnij</label>
-          <label className="line-width-control" title="Grubość konturu"><span>Linia</span><input type="range" min="1" max="8" value={strokeWidth} onChange={event => applyStrokeWidth(Number(event.target.value))} aria-label="Grubość konturu" /><output>{strokeWidth}</output></label>
-          <label className="font-size-control" title="Rozmiar tekstu"><Type size={14} /><input type="number" min="8" max="96" value={fontSize} onChange={event => applyFontSize(Number(event.target.value))} aria-label="Rozmiar tekstu" /></label>
-          <label className="fill-toggle fit-content-toggle" title="Dopasuj rozmiar SVG do rysunku"><input type="checkbox" checked={fitToContent} onChange={event => setFitToContent(event.target.checked)} aria-label="Dopasuj obszar SVG do treści" />Przytnij SVG</label>
-          <span className="toolbar-divider" />
-          <span className="selection-count">{selectedIds.length ? `${selectedIds.length} zazn.` : 'Brak zaznaczenia'}</span>
-          <button className="tool-button" onClick={copySelected} disabled={!selectedIds.length} title="Kopiuj zaznaczenie (Ctrl+C)" aria-label="Kopiuj zaznaczenie"><ClipboardCopy size={16} /></button>
-          <button className="tool-button" onClick={pasteCopied} disabled={!hasClipboard} title="Wklej zaznaczenie (Ctrl+V)" aria-label="Wklej zaznaczenie"><ClipboardPaste size={16} /></button>
-          <button className="tool-button" onClick={duplicateSelected} disabled={!selectedIds.length} title="Duplikuj zaznaczenie (Ctrl+D)" aria-label="Duplikuj zaznaczenie"><Copy size={16} /></button>
-          <button className="tool-button delete-tool" onClick={deleteSelected} disabled={!selectedIds.length} title="Usuń zaznaczenie (Delete)" aria-label="Usuń zaznaczenie"><Trash2 size={16} /></button>
-          <button className="tool-button" onClick={undo} disabled={!canUndo} title="Cofnij (Ctrl+Z)" aria-label="Cofnij"><Undo2 size={17} /></button>
-          <button className="tool-button" onClick={redo} disabled={!canRedo} title="Ponów (Ctrl+Y)" aria-label="Ponów"><Redo2 size={17} /></button>
+          <div className="drawing-toolbar-row drawing-toolbar-properties">
+            {(tool === 'arrow' || tool === 'polygon') && <label className="drawing-select-control"><span>{tool === 'arrow' ? 'Strzałka' : 'Wielokąt'}</span>{tool === 'arrow'
+              ? <select value={arrowMode} onChange={event => setArrowMode(event.target.value as ArrowMode)} aria-label="Rodzaj strzałki"><option value="end">Grot na końcu</option><option value="start">Grot na początku</option><option value="both">Groty po obu stronach</option><option value="none">Bez grotu</option></select>
+              : <select value={polygonSides} onChange={event => setPolygonSides(Number(event.target.value))} aria-label="Typ wielokąta"><option value="3">Trójkąt</option><option value="4">Romb</option><option value="5">Pięciokąt</option><option value="6">Sześciokąt</option><option value="8">Ośmiokąt</option></select>}</label>}
+            <div className="drawing-style-controls" role="group" aria-label="Styl figury">
+              <label className="color-control" title="Kolor konturu"><input type="color" value={strokeColor} onChange={event => applyStrokeColor(event.target.value)} aria-label="Kolor konturu" /><span>Kontur</span></label>
+              <label className={`color-control ${!fillEnabled ? 'option-disabled' : ''}`} title="Kolor wypełnienia"><input type="color" value={fillColor} onChange={event => applyFillColor(event.target.value)} aria-label="Kolor wypełnienia" disabled={!fillEnabled} /><span>Wypełnienie</span></label>
+              <label className="fill-toggle"><input type="checkbox" checked={fillEnabled} onChange={event => applyFillEnabled(event.target.checked)} aria-label="Włącz wypełnienie" />Wypełnij</label>
+              <label className="line-width-control" title="Grubość konturu"><span>Linia</span><input type="range" min="1" max="8" step="0.25" value={strokeWidth} onChange={event => applyStrokeWidth(Number(event.target.value))} aria-label="Grubość konturu" /><output>{rounded(strokeWidth)}</output></label>
+              <label className="font-size-control" title="Rozmiar tekstu"><Type size={14} /><input type="number" min="8" max="160" step="0.5" value={fontSize} onChange={event => applyFontSize(Number(event.target.value))} aria-label="Rozmiar tekstu" /></label>
+            </div>
+            <div className="drawing-geometry-controls" role="group" aria-label="Pozycja i rozmiar zaznaczenia">
+              {([['x', 'X'], ['y', 'Y'], ['width', 'Szerokość'], ['height', 'Wysokość']] as const).map(([key, label]) => <label className="geometry-control" key={key}>
+                <span>{label}</span>
+                <input type="number" step="0.1" value={geometryDraft?.[key] ?? ''} disabled={!selectedIds.length} onChange={event => setGeometryDraft(current => current ? { ...current, [key]: event.target.value } : current)} onKeyDown={event => { if (event.key === 'Enter') { event.preventDefault(); applyGeometryDraft() } }} aria-label={label === 'X' || label === 'Y' ? `Pozycja ${label}` : label} />
+              </label>)}
+              <button className="button secondary geometry-apply-button" onClick={applyGeometryDraft} disabled={!selectedIds.length} title="Zastosuj dokładną pozycję i rozmiar"><Check size={14} />Ustaw</button>
+            </div>
+            <label className="fill-toggle fit-content-toggle" title="Dopasuj rozmiar SVG do rysunku"><input type="checkbox" checked={fitToContent} onChange={event => setFitToContent(event.target.checked)} aria-label="Dopasuj obszar SVG do treści" />Przytnij SVG</label>
+          </div>
         </div>
         <div className="drawing-stage-wrap"><div ref={mount} className="drawing-stage" /></div>
-        <footer className="modal-footer advanced-modal-footer"><p>Przeciągnij po pustym miejscu, aby zaznaczyć · Shift+dodaj · przeciągnij uchwyt linii na punkt figury · Ctrl+Z cofnij · Ctrl+Y ponów · Ctrl+D duplikuj</p><div><button className="button secondary" onClick={onClose}>Anuluj</button><button className="button primary" onClick={save}>Zapisz grafikę</button></div></footer>
+        <footer className="modal-footer advanced-modal-footer"><p>Przeciągnij pusty obszar, aby zaznaczać · uchwyty narożne zmieniają rozmiar · strzałki klawiatury przesuwają o 1 px (Alt: 0,1 px, Shift: 10 px) · Ctrl+G grupuje · Ctrl+Shift+G rozgrupowuje</p><div><button className="button secondary" onClick={onClose}>Anuluj</button><button className="button primary" onClick={save}>Zapisz grafikę</button></div></footer>
       </section>
     </div>
   )
