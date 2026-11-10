@@ -453,6 +453,8 @@
 .font-size-control input { width: 44px; height: 27px; padding: 0 3px; border: 1px solid #e7e9f0; border-radius: 5px; color: #596175; font-size: 10px; }
 .drawing-select-control { display: inline-flex; flex: 0 0 auto; align-items: center; gap: 5px; color: #737b8c; font-size: 10px; white-space: nowrap; }
 .drawing-select-control select { max-width: 142px; height: 29px; padding: 0 6px; border: 1px solid #e7e9f0; border-radius: 6px; color: #626b7e; background: #fff; font-size: 10px; }
+.drawing-select-control.shape-picker select { width: min(235px, 42vw); max-width: 235px; }
+.smart-drawing-toggle { min-height: 29px; padding: 0 7px; border: 1px solid #e5e8f2; border-radius: 6px; background: #fafbff; }
 .fit-content-toggle { padding-left: 3px; }
 .selection-count { min-width: 70px; color: #9298a6; font-size: 9px; text-align: center; white-space: nowrap; }
 .delete-tool:hover:not(:disabled) { color: #c65865; background: #fff0f1; }
@@ -558,6 +560,8 @@
   .diagram-text { width: 76px; }
   .tool-button { width: 29px; }
   .color-control span { display: none; }
+  .drawing-select-control.shape-picker select { width: min(205px, 55vw); }
+  .advanced-modal-footer p { max-width: 100%; }
 }
 
 @media (max-height: 600px) and (min-width: 701px) {

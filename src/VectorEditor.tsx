@@ -1,20 +1,23 @@
 import { useEffect, useRef, useState } from 'react'
 import {
   ArrowRight, Check, Circle, ClipboardCopy, ClipboardPaste, Copy, Group, Minus, MousePointer2,
-  RectangleHorizontal, RectangleVertical, Redo2, Trash2, Triangle, Type, Undo2, Ungroup, X,
+  Pencil, RectangleHorizontal, RectangleVertical, Redo2, Shapes, Trash2, Triangle, Type, Undo2, Ungroup, X,
 } from 'lucide-react'
 import { SVG, type Svg } from '@svgdotjs/svg.js'
 import type { NoteAsset } from './types'
 import { sanitizeSvg } from './content'
+import { shapeById, shapeCategories, shapeLibrary } from './shapeLibrary'
 
-type Tool = 'select' | 'rect' | 'roundRect' | 'ellipse' | 'line' | 'arrow' | 'polygon' | 'text'
+type Tool = 'select' | 'rect' | 'roundRect' | 'ellipse' | 'line' | 'arrow' | 'polygon' | 'shape' | 'freehand' | 'text'
 type ArrowMode = 'end' | 'start' | 'both' | 'none'
 type Box = { x: number; y: number; width: number; height: number }
+type Point = { x: number; y: number }
 type ResizeHandle = 'n' | 'ne' | 'e' | 'se' | 's' | 'sw' | 'w' | 'nw'
 type GeometryDraft = { x: string; y: string; width: string; height: string }
 type Snap = { delta: number; target: number } | undefined
 type Interaction =
   | { type: 'draw'; tool: Tool; element: any; id: string; x: number; y: number; keepTool: boolean; startTarget?: string; startAnchor?: string }
+  | { type: 'freehand'; element: any; id: string; points: Point[]; keepTool: boolean }
   | { type: 'connect'; line: SVGLineElement; id: string; side: 'start' | 'end'; x: number; y: number; moved: boolean }
   | { type: 'move'; ids: string[]; elements: SVGElement[]; others: Box[]; startX: number; startY: number; lastX: number; lastY: number; bounds: Box; moved: boolean }
   | { type: 'resize'; ids: string[]; targets: { element: SVGElement; source: SVGElement; box: Box }[]; startBounds: Box; handle: ResizeHandle; moved: boolean }
@@ -36,6 +39,182 @@ const WIDTH = 800
 const HEIGHT = 500
 const SNAP_DISTANCE = 4
 const OBJECT_TAGS = new Set(['g', 'rect', 'circle', 'ellipse', 'line', 'polygon', 'polyline', 'path', 'text', 'image', 'use'])
+const SVG_NS = 'http://www.w3.org/2000/svg'
+
+function shapeTransform(box: Box): string {
+  return `translate(${rounded(box.x)} ${rounded(box.y)}) scale(${rounded(box.width / 100)} ${rounded(box.height / 100)})`
+}
+
+function pointsBounds(points: Point[]): Box {
+  const x = Math.min(...points.map(point => point.x))
+  const y = Math.min(...points.map(point => point.y))
+  return { x, y, width: Math.max(0.1, Math.max(...points.map(point => point.x)) - x), height: Math.max(0.1, Math.max(...points.map(point => point.y)) - y) }
+}
+
+function smoothStroke(points: Point[]): string {
+  if (!points.length) return ''
+  if (points.length === 1) return `M ${rounded(points[0].x)} ${rounded(points[0].y)} l 0.1 0`
+  let path = `M ${rounded(points[0].x)} ${rounded(points[0].y)}`
+  for (let index = 0; index < points.length - 1; index++) {
+    const previous = points[Math.max(0, index - 1)]
+    const start = points[index]
+    const end = points[index + 1]
+    const next = points[Math.min(points.length - 1, index + 2)]
+    const control1 = { x: start.x + (end.x - previous.x) / 6, y: start.y + (end.y - previous.y) / 6 }
+    const control2 = { x: end.x - (next.x - start.x) / 6, y: end.y - (next.y - start.y) / 6 }
+    path += ` C ${rounded(control1.x)} ${rounded(control1.y)} ${rounded(control2.x)} ${rounded(control2.y)} ${rounded(end.x)} ${rounded(end.y)}`
+  }
+  return path
+}
+
+function simplifyStroke(points: Point[], tolerance: number): Point[] {
+  if (points.length < 3) return points
+  const first = points[0]
+  const last = points[points.length - 1]
+  let farthest = -1
+  let farthestDistance = 0
+  for (let index = 1; index < points.length - 1; index++) {
+    const distance = Math.hypot(points[index].x - first.x, points[index].y - first.y)
+    if (distance > farthestDistance) {
+      farthest = index
+      farthestDistance = distance
+    }
+  }
+  const closed = Math.hypot(first.x - last.x, first.y - last.y) <= Math.max(8, farthestDistance * 0.18)
+  const simplifyOpen = (segment: Point[]): Point[] => {
+    if (segment.length < 3) return segment
+    const start = segment[0]
+    const end = segment[segment.length - 1]
+    const dx = end.x - start.x
+    const dy = end.y - start.y
+    const length = Math.hypot(dx, dy) || 1
+    let maxDistance = 0
+    let maxIndex = 0
+    for (let index = 1; index < segment.length - 1; index++) {
+      const point = segment[index]
+      const distance = Math.abs(dy * point.x - dx * point.y + end.x * start.y - end.y * start.x) / length
+      if (distance > maxDistance) { maxDistance = distance; maxIndex = index }
+    }
+    if (maxDistance <= tolerance) return [start, end]
+    return [...simplifyOpen(segment.slice(0, maxIndex + 1)).slice(0, -1), ...simplifyOpen(segment.slice(maxIndex))]
+  }
+  if (!closed || farthest <= 0) return simplifyOpen(points)
+  const loop = points.slice(0, -1)
+  const left = simplifyOpen(loop.slice(0, farthest + 1))
+  const right = simplifyOpen([...loop.slice(farthest), loop[0]])
+  const result = [...left.slice(0, -1), ...right.slice(0, -1)]
+  return result.length >= 3 ? result : loop
+}
+
+type SketchRecognition =
+  | { type: 'line'; start: Point; end: Point }
+  | { type: 'rect'; box: Box }
+  | { type: 'ellipse'; box: Box; circle: boolean }
+  | { type: 'polygon'; points: Point[] }
+
+function recognizeSketch(points: Point[]): SketchRecognition | undefined {
+  if (points.length < 3) return undefined
+  const box = pointsBounds(points)
+  const diagonal = Math.hypot(box.width, box.height)
+  const closed = Math.hypot(points[0].x - points.at(-1)!.x, points[0].y - points.at(-1)!.y) <= Math.max(10, diagonal * 0.2)
+  if (!closed) {
+    const simplified = simplifyStroke(points, Math.max(2.5, diagonal * 0.035))
+    if (simplified.length === 2) {
+      const start = simplified[0]
+      const end = simplified[1]
+      const length = Math.hypot(end.x - start.x, end.y - start.y)
+      const maxDistance = Math.max(...points.map(point => Math.abs((end.y - start.y) * point.x - (end.x - start.x) * point.y + end.x * start.y - end.y * start.x))) / Math.max(length, 1)
+      if (maxDistance <= Math.max(3, diagonal * 0.06)) return { type: 'line', start, end }
+    }
+    return undefined
+  }
+
+  const corners = simplifyStroke(points, Math.max(2, diagonal * 0.045))
+  if (corners.length === 4) {
+    const rightAngles = corners.every((point, index) => {
+      const before = corners[(index + corners.length - 1) % corners.length]
+      const after = corners[(index + 1) % corners.length]
+      const a = { x: before.x - point.x, y: before.y - point.y }
+      const b = { x: after.x - point.x, y: after.y - point.y }
+      return Math.abs((a.x * b.x + a.y * b.y) / (Math.hypot(a.x, a.y) * Math.hypot(b.x, b.y) || 1)) < 0.4
+    })
+    if (rightAngles) {
+      let cleanBox = box
+      if (Math.abs(box.width - box.height) / Math.max(box.width, box.height) < 0.18) {
+        const side = (box.width + box.height) / 2
+        cleanBox = { x: box.x + (box.width - side) / 2, y: box.y + (box.height - side) / 2, width: side, height: side }
+      }
+      return { type: 'rect', box: cleanBox }
+    }
+  }
+  const meanRadius = points.reduce((sum, point) => sum + Math.hypot(point.x - (box.x + box.width / 2), point.y - (box.y + box.height / 2)), 0) / points.length
+  const radialDeviation = points.reduce((sum, point) => sum + Math.abs(Math.hypot(point.x - (box.x + box.width / 2), point.y - (box.y + box.height / 2)) - meanRadius), 0) / points.length / Math.max(meanRadius, 1)
+  let smoothTurns = 0
+  let measuredTurns = 0
+  for (let index = 2; index < points.length - 2; index++) {
+    const before = { x: points[index].x - points[index - 2].x, y: points[index].y - points[index - 2].y }
+    const after = { x: points[index + 2].x - points[index].x, y: points[index + 2].y - points[index].y }
+    const angle = Math.abs(Math.atan2(before.x * after.y - before.y * after.x, before.x * after.x + before.y * after.y))
+    measuredTurns++
+    if (angle > 0.08) smoothTurns++
+  }
+  const curveRatio = smoothTurns / Math.max(measuredTurns, 1)
+  if (corners.length >= 6 && points.length >= 12 && radialDeviation < 0.2 && curveRatio > 0.26) {
+    return { type: 'ellipse', box, circle: Math.abs(box.width - box.height) / Math.max(box.width, box.height) < 0.16 }
+  }
+  if (corners.length >= 3 && corners.length <= 8) return { type: 'polygon', points: corners }
+  return undefined
+}
+
+function createLibraryShapeNode(shapeId: string, box: Box, base?: SVGElement, objectId: string = crypto.randomUUID()): SVGGElement {
+  const group = document.createElementNS(SVG_NS, 'g')
+  group.setAttribute('data-object-id', objectId)
+  group.setAttribute('data-shape-key', shapeId)
+  group.setAttribute('pointer-events', 'all')
+  group.setAttribute('transform', shapeTransform(box))
+  if (base) {
+    for (const attribute of ['stroke', 'stroke-width', 'stroke-linecap', 'stroke-linejoin', 'fill']) {
+      const value = base.getAttribute(attribute)
+      if (value !== null) group.setAttribute(attribute, value)
+    }
+  }
+  shapeById(shapeId).paths.forEach(item => {
+    const path = document.createElementNS(SVG_NS, 'path')
+    path.setAttribute('d', item.d)
+    if (item.fill) path.setAttribute('fill', item.fill)
+    group.append(path)
+  })
+  return group
+}
+
+function replacePathWithRecognition(path: SVGElement, recognition: SketchRecognition) {
+  const common = ['data-object-id', 'pointer-events', 'stroke', 'stroke-width', 'stroke-linecap', 'stroke-linejoin', 'fill']
+  const tag = recognition.type === 'line' ? 'line' : recognition.type === 'ellipse' ? recognition.circle ? 'circle' : 'ellipse' : recognition.type === 'polygon' ? 'polygon' : 'rect'
+  const replacement = document.createElementNS(SVG_NS, tag)
+  common.forEach(name => {
+    const value = path.getAttribute(name)
+    if (value !== null) replacement.setAttribute(name, value)
+  })
+  if (recognition.type === 'line') {
+    replacement.setAttribute('x1', rounded(recognition.start.x)); replacement.setAttribute('y1', rounded(recognition.start.y))
+    replacement.setAttribute('x2', rounded(recognition.end.x)); replacement.setAttribute('y2', rounded(recognition.end.y))
+  } else if (recognition.type === 'ellipse') {
+    const { x, y, width, height } = recognition.box
+    if (recognition.circle) {
+      replacement.setAttribute('cx', rounded(x + width / 2)); replacement.setAttribute('cy', rounded(y + height / 2))
+      replacement.setAttribute('r', rounded(Math.max(width, height) / 2))
+    } else {
+      replacement.setAttribute('cx', rounded(x + width / 2)); replacement.setAttribute('cy', rounded(y + height / 2))
+      replacement.setAttribute('rx', rounded(width / 2)); replacement.setAttribute('ry', rounded(height / 2))
+    }
+  } else if (recognition.type === 'rect') {
+    Object.entries(recognition.box).forEach(([name, value]) => replacement.setAttribute(name, rounded(value)))
+  } else {
+    replacement.setAttribute('points', recognition.points.map(point => `${rounded(point.x)},${rounded(point.y)}`).join(' '))
+  }
+  path.replaceWith(replacement)
+  return replacement
+}
 
 function rounded(value: number): string {
   return `${Number(value.toFixed(2))}`
@@ -486,6 +665,8 @@ function resizeElementFromSource(source: SVGElement, target: SVGElement, from: B
     set('x', mappedCoordinate(sourceNumber('x', from.x), from.x, from.width, to.x, to.width))
     set('y', mappedCoordinate(sourceNumber('y', from.y), from.y, from.height, to.y, to.height))
     set('font-size', sourceNumber('font-size', 24) * Math.sqrt(Math.max(.0001, scaleX * scaleY)))
+  } else if (tag === 'g' && source.hasAttribute('data-shape-key')) {
+    target.setAttribute('transform', shapeTransform(to))
   } else {
     const tx = to.x - from.x * scaleX
     const ty = to.y - from.y * scaleY
@@ -529,6 +710,9 @@ export function VectorEditor({
   const ungroupAction = useRef<() => void>(() => {})
   const clipboard = useRef<SVGElement[]>([])
   const toolRef = useRef<Tool>('select')
+  const shapeIdRef = useRef('flow-process')
+  const smartShapeIdRef = useRef('auto')
+  const smartDrawingRef = useRef(true)
   const strokeColorRef = useRef('#596fd8')
   const fillColorRef = useRef('#dfe4ff')
   const fillEnabledRef = useRef(true)
@@ -537,6 +721,9 @@ export function VectorEditor({
   const polygonSidesRef = useRef(6)
   const arrowModeRef = useRef<ArrowMode>('end')
   const [tool, setTool] = useState<Tool>('select')
+  const [shapeId, setShapeId] = useState('flow-process')
+  const [smartShapeId, setSmartShapeId] = useState('auto')
+  const [smartDrawing, setSmartDrawing] = useState(true)
   const [strokeColor, setStrokeColor] = useState('#596fd8')
   const [fillColor, setFillColor] = useState('#dfe4ff')
   const [fillEnabled, setFillEnabled] = useState(true)
@@ -554,6 +741,9 @@ export function VectorEditor({
   const [hasClipboard, setHasClipboard] = useState(false)
 
   useEffect(() => { toolRef.current = tool }, [tool])
+  useEffect(() => { shapeIdRef.current = shapeId }, [shapeId])
+  useEffect(() => { smartShapeIdRef.current = smartShapeId }, [smartShapeId])
+  useEffect(() => { smartDrawingRef.current = smartDrawing }, [smartDrawing])
   useEffect(() => { strokeColorRef.current = strokeColor }, [strokeColor])
   useEffect(() => { fillColorRef.current = fillColor }, [fillColor])
   useEffect(() => { fillEnabledRef.current = fillEnabled }, [fillEnabled])
@@ -707,10 +897,20 @@ export function VectorEditor({
         }
       } else if (currentTool === 'polygon') {
         element = stage.polygon(`${location.x},${location.y} ${location.x},${location.y} ${location.x},${location.y}`)
+      } else if (currentTool === 'shape') {
+        const definition = shapeById(shapeIdRef.current)
+        element = stage.group()
+        definition.paths.forEach(item => {
+          const child = element.path(item.d)
+          if (item.fill) child.attr('fill', item.fill)
+        })
+        element.attr({ 'data-shape-key': definition.id, transform: shapeTransform({ x: location.x, y: location.y, width: 0.1, height: 0.1 }) })
+      } else if (currentTool === 'freehand') {
+        element = stage.path(`M ${rounded(location.x)} ${rounded(location.y)} l 0.1 0`)
       }
       if (!element) return
       element.stroke({ color, width: size, linecap: 'round', linejoin: 'round' })
-      element.fill(fillEnabledRef.current && !['line', 'arrow'].includes(currentTool) ? fillColorRef.current : 'none')
+      element.fill(fillEnabledRef.current && !['line', 'arrow', 'freehand'].includes(currentTool) ? fillColorRef.current : 'none')
       const id = crypto.randomUUID()
       element.attr({ 'data-object-id': id, 'pointer-events': 'all' })
       select([id])
@@ -738,8 +938,12 @@ export function VectorEditor({
         const startPoint = anchorPoint ?? location
         const created = startShape(currentTool, startPoint)
         if (created) {
-          if (anchor && anchorPoint) created.element.attr({ 'data-start-target': anchor.id, 'data-start-anchor': anchor.anchor })
-          interaction.current = { type: 'draw', tool: currentTool, element: created.element, id: created.id, x: startPoint.x, y: startPoint.y, keepTool: event.ctrlKey, startTarget: anchor?.id, startAnchor: anchor?.anchor }
+          if (currentTool === 'freehand') {
+            interaction.current = { type: 'freehand', element: created.element, id: created.id, points: [startPoint], keepTool: event.ctrlKey }
+          } else {
+            if (anchor && anchorPoint) created.element.attr({ 'data-start-target': anchor.id, 'data-start-anchor': anchor.anchor })
+            interaction.current = { type: 'draw', tool: currentTool, element: created.element, id: created.id, x: startPoint.x, y: startPoint.y, keepTool: event.ctrlKey, startTarget: anchor?.id, startAnchor: anchor?.anchor }
+          }
         }
         return
       }
@@ -814,7 +1018,18 @@ export function VectorEditor({
       const current = interaction.current
       if (!current) return
       const location = point(event)
-      if (current.type === 'draw') {
+      if (current.type === 'freehand') {
+        current.keepTool = current.keepTool || event.ctrlKey
+        const samples = typeof event.getCoalescedEvents === 'function' ? event.getCoalescedEvents() : [event]
+        samples.forEach(sample => {
+          const samplePoint = point(sample)
+          const last = current.points.at(-1)!
+          if (Math.hypot(samplePoint.x - last.x, samplePoint.y - last.y) >= 1.2 && current.points.length < 1600) current.points.push(samplePoint)
+        })
+        current.element.attr('d', smoothStroke(current.points))
+        const bounds = pointsBounds(current.points)
+        renderOverlay(stage, [current.id], { dimensions: bounds })
+      } else if (current.type === 'draw') {
         current.keepTool = current.keepTool || event.ctrlKey
         const x = Math.min(current.x, location.x)
         const y = Math.min(current.y, location.y)
@@ -822,6 +1037,7 @@ export function VectorEditor({
         const height = Math.max(0.1, Math.abs(location.y - current.y))
         if (current.tool === 'rect' || current.tool === 'roundRect') current.element.attr({ x: rounded(x), y: rounded(y), width: rounded(width), height: rounded(height) })
         else if (current.tool === 'ellipse') current.element.attr({ cx: rounded(x + width / 2), cy: rounded(y + height / 2), rx: rounded(width / 2), ry: rounded(height / 2) })
+        else if (current.tool === 'shape') current.element.attr('transform', shapeTransform({ x, y, width, height }))
         else if (current.tool === 'line' || current.tool === 'arrow') {
           const hovered = document.elementFromPoint(event.clientX, event.clientY)
           const hit = findAnchorHit(hovered)
@@ -920,7 +1136,31 @@ export function VectorEditor({
       const current = interaction.current
       if (!current) return
       interaction.current = null
-      if (current.type === 'draw') {
+      if (current.type === 'freehand') {
+        current.keepTool = current.keepTool || event.ctrlKey
+        const location = point(event)
+        const last = current.points.at(-1)!
+        if (Math.hypot(location.x - last.x, location.y - last.y) >= 0.5 && current.points.length < 1600) current.points.push(location)
+        current.element.attr('d', smoothStroke(current.points))
+        const bounds = pointsBounds(current.points)
+        if (smartDrawingRef.current) {
+          if (smartShapeIdRef.current !== 'auto') {
+            const replacement = createLibraryShapeNode(smartShapeIdRef.current, bounds, current.element.node, current.id)
+            replacement.setAttribute('fill', fillEnabledRef.current ? fillColorRef.current : 'none')
+            current.element.node.replaceWith(replacement)
+          } else {
+            const recognition = recognizeSketch(current.points)
+            if (recognition) {
+              const replacement = replacePathWithRecognition(current.element.node, recognition)
+              replacement.setAttribute('fill', recognition.type !== 'line' && fillEnabledRef.current ? fillColorRef.current : 'none')
+            }
+          }
+        }
+        updateConnectors(stage.node)
+        recordHistory(stage)
+        select([current.id])
+        if (!current.keepTool) chooseTool('select')
+      } else if (current.type === 'draw') {
         current.keepTool = current.keepTool || event.ctrlKey
         if (current.tool === 'line' || current.tool === 'arrow') {
           const hit = findAnchorHit(document.elementFromPoint(event.clientX, event.clientY))
@@ -1318,6 +1558,8 @@ export function VectorEditor({
     { id: 'line', label: 'Linia', icon: Minus },
     { id: 'arrow', label: 'Strzałka', icon: ArrowRight },
     { id: 'polygon', label: 'Wielokąt', icon: Triangle },
+    { id: 'shape', label: 'Kształty biblioteczne', icon: Shapes },
+    { id: 'freehand', label: 'Pędzel odręczny', icon: Pencil },
     { id: 'text', label: 'Tekst na planszy', icon: Type },
   ]
 
@@ -1350,6 +1592,11 @@ export function VectorEditor({
             </div>
           </div>
           <div className="drawing-toolbar-row drawing-toolbar-properties">
+            {tool === 'shape' && <label className="drawing-select-control shape-picker"><span>Kształt</span><select value={shapeId} onChange={event => setShapeId(event.target.value)} aria-label="Wybierz kształt z biblioteki">{shapeCategories.map(category => <optgroup key={category} label={category}>{shapeLibrary.filter(shape => shape.category === category).map(shape => <option key={shape.id} value={shape.id}>{shape.label}</option>)}</optgroup>)}</select></label>}
+            {tool === 'freehand' && <>
+              <label className="fill-toggle smart-drawing-toggle"><input type="checkbox" checked={smartDrawing} onChange={event => setSmartDrawing(event.target.checked)} aria-label="Włącz inteligentną korektę rysunku" />Inteligentny rysunek</label>
+              <label className="drawing-select-control shape-picker"><span>Koryguj do</span><select value={smartShapeId} disabled={!smartDrawing} onChange={event => setSmartShapeId(event.target.value)} aria-label="Figura do inteligentnej korekty"><option value="auto">Automatycznie rozpoznaj</option>{shapeCategories.map(category => <optgroup key={category} label={category}>{shapeLibrary.filter(shape => shape.category === category).map(shape => <option key={shape.id} value={shape.id}>{shape.label}</option>)}</optgroup>)}</select></label>
+            </>}
             {(tool === 'arrow' || tool === 'polygon') && <label className="drawing-select-control"><span>{tool === 'arrow' ? 'Strzałka' : 'Wielokąt'}</span>{tool === 'arrow'
               ? <select value={arrowMode} onChange={event => setArrowMode(event.target.value as ArrowMode)} aria-label="Rodzaj strzałki"><option value="end">Grot na końcu</option><option value="start">Grot na początku</option><option value="both">Groty po obu stronach</option><option value="none">Bez grotu</option></select>
               : <select value={polygonSides} onChange={event => setPolygonSides(Number(event.target.value))} aria-label="Typ wielokąta"><option value="3">Trójkąt</option><option value="4">Romb</option><option value="5">Pięciokąt</option><option value="6">Sześciokąt</option><option value="8">Ośmiokąt</option></select>}</label>}
@@ -1357,7 +1604,7 @@ export function VectorEditor({
               <label className="color-control" title="Kolor konturu"><input type="color" value={strokeColor} onChange={event => applyStrokeColor(event.target.value)} aria-label="Kolor konturu" /><span>Kontur</span></label>
               <label className={`color-control ${!fillEnabled ? 'option-disabled' : ''}`} title="Kolor wypełnienia"><input type="color" value={fillColor} onChange={event => applyFillColor(event.target.value)} aria-label="Kolor wypełnienia" disabled={!fillEnabled} /><span>Wypełnienie</span></label>
               <label className="fill-toggle"><input type="checkbox" checked={fillEnabled} onChange={event => applyFillEnabled(event.target.checked)} aria-label="Włącz wypełnienie" />Wypełnij</label>
-              <label className="line-width-control" title="Grubość konturu"><span>Linia</span><input type="range" min="1" max="8" step="0.25" value={strokeWidth} onChange={event => applyStrokeWidth(Number(event.target.value))} aria-label="Grubość konturu" /><output>{rounded(strokeWidth)}</output></label>
+              <label className="line-width-control" title="Grubość konturu i pędzla"><span>{tool === 'freehand' ? 'Pędzel' : 'Linia'}</span><input type="range" min="0.5" max="24" step="0.25" value={strokeWidth} onChange={event => applyStrokeWidth(Number(event.target.value))} aria-label={tool === 'freehand' ? 'Grubość pędzla' : 'Grubość konturu'} /><output>{rounded(strokeWidth)}</output></label>
               <label className="font-size-control" title="Rozmiar tekstu"><Type size={14} /><input type="number" min="8" max="160" step="0.5" value={fontSize} onChange={event => applyFontSize(Number(event.target.value))} aria-label="Rozmiar tekstu" /></label>
             </div>
             <div className="drawing-geometry-controls" role="group" aria-label="Pozycja i rozmiar zaznaczenia">
@@ -1371,7 +1618,7 @@ export function VectorEditor({
           </div>
         </div>
         <div className="drawing-stage-wrap"><div ref={mount} className="drawing-stage" /></div>
-        <footer className="modal-footer advanced-modal-footer"><p>Przeciągnij pusty obszar, aby zaznaczać · uchwyty narożne zmieniają rozmiar · strzałki klawiatury przesuwają o 1 px (Alt: 0,1 px, Shift: 10 px) · Ctrl+G grupuje · Ctrl+Shift+G rozgrupowuje</p><div><button className="button secondary" onClick={onClose}>Anuluj</button><button className="button primary" onClick={save}>Zapisz grafikę</button></div></footer>
+        <footer className="modal-footer advanced-modal-footer"><p>Biblioteka zawiera 40 symboli. Pędzel tworzy edytowalne ścieżki; inteligentna korekta prostuje szkice lub dopasowuje je do dowolnego symbolu z biblioteki. Przeciągnij pusty obszar, aby zaznaczać · Ctrl+G grupuje · Ctrl+Shift+G rozgrupowuje</p><div><button className="button secondary" onClick={onClose}>Anuluj</button><button className="button primary" onClick={save}>Zapisz grafikę</button></div></footer>
       </section>
     </div>
   )
