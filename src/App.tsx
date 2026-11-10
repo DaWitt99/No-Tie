@@ -7,6 +7,7 @@ import {
 import { exportArchiveToFolder, parseArchive } from './archive'
 import { ChatPanel } from './ChatPanel'
 import { starterAssets, starterNotes } from './content'
+import { MarkdownSourceEditor } from './MarkdownSourceEditor'
 import { listOllamaModels, type OllamaModel } from './ollama'
 import { ReviewSessionDialog } from './ReviewSessionDialog'
 import { ReviewSessionView } from './ReviewSessionView'
@@ -1045,14 +1046,7 @@ function App() {
                 <div className="editor-tools-left"><div className="view-mode-toggle" role="group" aria-label="Widok notatki"><button className={`view-mode-button ${editorMode === 'rendered' ? 'active' : ''}`} title="Widok wizualny" aria-label="Widok wizualny" aria-pressed={editorMode === 'rendered'} onClick={() => setEditorMode('rendered')}><Eye size={16} /></button><button className={`view-mode-button ${editorMode === 'source' ? 'active' : ''}`} title="Surowy Markdown" aria-label="Surowy Markdown" aria-pressed={editorMode === 'source'} onClick={() => setEditorMode('source')}><FileText size={16} /></button></div><span className="toolbar-separator" /><button className="inline-tool" onClick={() => { setEditingAsset(undefined); setShowDrawing(true) }}><Sparkles size={15} />Dodaj schemat</button>{currentAssets.map(asset => <button className="inline-tool asset-tool" key={asset.id} onClick={() => { setEditingAsset(asset); setShowDrawing(true) }}><Lightbulb size={14} />{asset.fileName}</button>)}</div>
                 <select className="template-select" defaultValue="" aria-label="Wstaw szablon" onChange={event => { const template = templates.find(item => item.id === event.target.value); if (template) { patchNote(selectedNote.id, { title: template.title, content: template.content, tags: [...new Set([...selectedNote.tags, ...template.tags])] }); setEditorRevision(value => value + 1) } event.target.value = '' }}><option value="" disabled>Szablon</option>{templates.map(template => <option key={template.id} value={template.id}>{template.title}</option>)}</select>
               </div>
-              {editorMode === 'source' ? <textarea
-                className="markdown-source-editor"
-                aria-label="Surowy tekst Markdown"
-                spellCheck={false}
-                value={selectedNote.content}
-                onSelect={event => { const input = event.currentTarget; setEditorSelection({ noteId: selectedNote.id, mode: 'source', text: input.value.slice(input.selectionStart, input.selectionEnd) }) }}
-                onChange={event => { const input = event.currentTarget; patchNote(selectedNote.id, { content: input.value }); setEditorSelection({ noteId: selectedNote.id, mode: 'source', text: input.value.slice(input.selectionStart, input.selectionEnd) }) }}
-              /> : <Suspense fallback={<div className="editor-loading">Otwieram edytor…</div>}><MarkdownEditor key={`${selectedNote.id}-${editorRevision}`} noteId={selectedNote.id} markdown={selectedNote.content} assets={currentAssets} revision={editorRevision} onChange={content => patchNote(selectedNote.id, { content })} onSelectionChange={text => setEditorSelection({ noteId: selectedNote.id, mode: 'rendered', text })} /></Suspense>}
+              {editorMode === 'source' ? <MarkdownSourceEditor markdown={selectedNote.content} onChange={content => patchNote(selectedNote.id, { content })} onSelectionChange={text => setEditorSelection({ noteId: selectedNote.id, mode: 'source', text })} /> : <Suspense fallback={<div className="editor-loading">Otwieram edytor…</div>}><MarkdownEditor key={`${selectedNote.id}-${editorRevision}`} noteId={selectedNote.id} markdown={selectedNote.content} assets={currentAssets} revision={editorRevision} onChange={content => patchNote(selectedNote.id, { content })} onSelectionChange={text => setEditorSelection({ noteId: selectedNote.id, mode: 'rendered', text })} /></Suspense>}
               <div className="editor-content-stats" aria-label="Statystyki dokumentu i zaznaczenia">
                 <span>Dokument: <strong>{polishCount(documentCounts.words, ['słowo', 'słowa', 'słów'])}</strong><i>·</i><strong>{polishCount(documentCounts.characters, ['znak', 'znaki', 'znaków'])}</strong></span>
                 <span className="editor-stats-divider" aria-hidden="true" />

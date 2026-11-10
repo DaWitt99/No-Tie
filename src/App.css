@@ -221,6 +221,23 @@
 .markdown-editor .milkdown pre { overflow: auto; padding: 16px; border-radius: 9px; color: #e8eaf2; background: #202a40; }
 .markdown-editor .milkdown a { color: #5d72d4; text-decoration: underline; text-underline-offset: 3px; }
 .markdown-editor .milkdown .ProseMirror-focused { outline: none; }
+.markdown-context-menu { position: fixed; z-index: 160; width: 214px; padding: 5px; border: 1px solid #e2e5ee; border-radius: 10px; background: #fff; box-shadow: 0 14px 36px #17213c26; color: #39445c; }
+.markdown-context-section { position: relative; }
+.markdown-context-category, .markdown-context-submenu button { display: flex; align-items: center; justify-content: space-between; width: 100%; min-height: 34px; padding: 0 10px; border: 0; border-radius: 6px; color: #46516a; background: transparent; text-align: left; font: inherit; font-size: 11px; cursor: pointer; }
+.markdown-context-category:hover, .markdown-context-category.active, .markdown-context-submenu button:hover { color: #354a9b; background: #f1f3fb; }
+.markdown-context-chevron { color: #9aa2b5; font-size: 17px; line-height: 1; }
+.markdown-context-submenu { position: absolute; z-index: 1; top: -5px; left: calc(100% + 4px); width: 244px; max-height: min(440px, calc(100vh - 16px)); overflow: auto; padding: 5px; border: 1px solid #e2e5ee; border-radius: 10px; background: #fff; box-shadow: 0 14px 36px #17213c26; scrollbar-width: none; }
+.markdown-context-submenu::-webkit-scrollbar { display: none; }
+.markdown-context-submenu.opens-left { right: calc(100% + 4px); left: auto; }
+.markdown-context-submenu button { justify-content: flex-start; }
+.markdown-editor .milkdown del { color: #9096a6; }
+.markdown-editor .milkdown u { text-decoration-color: #5c70d1; text-decoration-thickness: 1px; text-underline-offset: 3px; }
+.markdown-editor .milkdown mark { padding: 0 .12em; border-radius: 3px; color: inherit; }
+.markdown-editor .milkdown .note-comment-mark { border-bottom: 1px dashed #9a73b6; color: #75568a; text-decoration: none; }
+.markdown-editor .milkdown table { width: 100%; margin: 14px 0; border-collapse: collapse; }
+.markdown-editor .milkdown th, .markdown-editor .milkdown td { min-width: 70px; padding: 7px 9px; border: 1px solid #e2e5ee; text-align: left; }
+.markdown-editor .milkdown th { background: #f6f7fb; }
+.markdown-editor .milkdown li[data-item-type="task"] { list-style: none; }
 .editor-end-note { display: flex; align-items: center; gap: 12px; margin: 40px 0 0; color: #b5b8c1; font-size: 9px; }
 .end-line { height: 1px; flex: 1; background: #eeeef2; }
 .editor-footer { display: flex; align-items: center; justify-content: space-between; min-height: 49px; padding: 0 25px; border-top: 1px solid #eff0f3; color: #a0a4af; font-size: 9px; }

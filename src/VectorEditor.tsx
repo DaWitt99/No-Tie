@@ -108,62 +108,248 @@ function simplifyStroke(points: Point[], tolerance: number): Point[] {
 
 type SketchRecognition =
   | { type: 'line'; start: Point; end: Point }
-  | { type: 'rect'; box: Box }
-  | { type: 'ellipse'; box: Box; circle: boolean }
-  | { type: 'polygon'; points: Point[] }
+  | { type: 'shape'; shapeId: string; box: Box }
+
+type LibraryComponent = { points: Point[]; length: number; closed: boolean }
+type LibraryTemplate = { id: string; bounds: Box; components: LibraryComponent[] }
+
+const cachedLibraryTemplates = new Map<string, LibraryTemplate>()
+
+function splitPathComponents(pathData: string): string[] {
+  const starts = [...pathData.matchAll(/[Mm](?=\s|[-+.\d])/g)].map(match => match.index ?? 0)
+  if (starts.length <= 1) return [pathData]
+  return starts.map((start, index) => pathData.slice(start, starts[index + 1]))
+}
+
+function samplePathComponent(pathData: string): LibraryComponent | undefined {
+  try {
+    const path = document.createElementNS(SVG_NS, 'path')
+    path.setAttribute('d', pathData)
+    const length = path.getTotalLength()
+    if (!Number.isFinite(length) || length < 1) return undefined
+    const count = Math.max(16, Math.min(180, Math.ceil(length / 2)))
+    const points = Array.from({ length: count + 1 }, (_, index) => {
+      const point = path.getPointAtLength(length * index / count)
+      return { x: point.x, y: point.y }
+    })
+    const bounds = pointsBounds(points)
+    const diagonal = Math.hypot(bounds.width, bounds.height)
+    const closed = Math.hypot(points[0].x - points.at(-1)!.x, points[0].y - points.at(-1)!.y) <= Math.max(2, diagonal * 0.045)
+    return { points, length, closed }
+  } catch {
+    return undefined
+  }
+}
+
+function libraryTemplate(shapeId: string): LibraryTemplate | undefined {
+  const cached = cachedLibraryTemplates.get(shapeId)
+  if (cached) return cached
+  const shape = shapeLibrary.find(item => item.id === shapeId)
+  if (!shape) return undefined
+  const components = shape.paths.flatMap(item => splitPathComponents(item.d))
+    .map(samplePathComponent)
+    .filter((component): component is LibraryComponent => Boolean(component))
+  if (!components.length) return undefined
+  const template = { id: shape.id, bounds: pointsBounds(components.flatMap(component => component.points)), components }
+  cachedLibraryTemplates.set(shapeId, template)
+  return template
+}
+
+function libraryTemplates(): LibraryTemplate[] {
+  return shapeLibrary.map(shape => libraryTemplate(shape.id)).filter((template): template is LibraryTemplate => Boolean(template))
+}
+
+function normalizePoints(points: Point[], bounds: Box): Point[] {
+  return points.map(point => ({
+    x: (point.x - bounds.x) * 100 / Math.max(bounds.width, 0.1),
+    y: (point.y - bounds.y) * 100 / Math.max(bounds.height, 0.1),
+  }))
+}
+
+function resamplePolyline(points: Point[], count: number, close: boolean): Point[] {
+  const stroke = points.filter((point, index) => index === 0 || Math.hypot(point.x - points[index - 1].x, point.y - points[index - 1].y) > 0.35)
+  if (stroke.length < 2) return stroke
+  if (close && Math.hypot(stroke[0].x - stroke.at(-1)!.x, stroke[0].y - stroke.at(-1)!.y) > 0.1) stroke.push(stroke[0])
+  const lengths = [0]
+  for (let index = 1; index < stroke.length; index++) lengths.push(lengths[index - 1] + Math.hypot(stroke[index].x - stroke[index - 1].x, stroke[index].y - stroke[index - 1].y))
+  const total = lengths.at(-1) ?? 0
+  if (total < 0.1) return stroke
+  const result: Point[] = []
+  let segment = 1
+  for (let index = 0; index < count; index++) {
+    const target = total * index / (count - 1)
+    while (segment < lengths.length - 1 && lengths[segment] < target) segment++
+    const startLength = lengths[segment - 1]
+    const segmentLength = lengths[segment] - startLength || 1
+    const ratio = (target - startLength) / segmentLength
+    const start = stroke[segment - 1]
+    const end = stroke[segment]
+    result.push({ x: start.x + (end.x - start.x) * ratio, y: start.y + (end.y - start.y) * ratio })
+  }
+  return result
+}
+
+function trimmedNearestMean(source: Point[], target: Point[]): number {
+  if (!source.length || !target.length) return Infinity
+  const distances = source.map(point => {
+    let nearest = Infinity
+    for (const candidate of target) nearest = Math.min(nearest, Math.hypot(point.x - candidate.x, point.y - candidate.y))
+    return nearest
+  }).sort((a, b) => a - b)
+  const retained = Math.max(1, Math.ceil(distances.length * 0.88))
+  return distances.slice(0, retained).reduce((sum, distance) => sum + distance, 0) / retained
+}
+
+function matchLibraryShape(points: Point[], bounds: Box, closed: boolean): { shapeId: string; score: number } | undefined {
+  const stroke = resamplePolyline(normalizePoints(points, bounds), 128, closed)
+  let best: { shapeId: string; score: number } | undefined
+  for (const template of libraryTemplates()) {
+    const components = template.components.map(component => ({
+      ...component,
+      points: normalizePoints(component.points, template.bounds),
+    }))
+    const matchingContours = components.filter(component => component.closed === closed)
+    const variants: { points: Point[]; penalty: number }[] = []
+    if (closed) {
+      const contour = matchingContours.sort((a, b) => b.length - a.length)[0]
+      if (contour) {
+        const omittedLength = Math.max(0, components.reduce((sum, component) => sum + component.length, 0) - contour.length)
+        variants.push({ points: contour.points, penalty: Math.min(10, omittedLength / Math.max(contour.length + omittedLength, 1) * 15) })
+      }
+      if (components.length > 1) variants.push({ points: components.flatMap(component => component.points), penalty: 0 })
+    } else if (matchingContours.length === components.length) {
+      variants.push({ points: components.flatMap(component => component.points), penalty: 0 })
+    }
+    for (const variant of variants) {
+      const score = (trimmedNearestMean(stroke, variant.points) * 0.55 + trimmedNearestMean(variant.points, stroke) * 0.45) + variant.penalty
+      if (!best || score < best.score) best = { shapeId: template.id, score }
+    }
+  }
+  return best && best.score <= 19 ? best : undefined
+}
+
+function shapeTransformBox(shapeId: string, target: Box): Box {
+  const template = libraryTemplate(shapeId)
+  if (!template) return target
+  const scaleX = target.width / Math.max(template.bounds.width, 0.1)
+  const scaleY = target.height / Math.max(template.bounds.height, 0.1)
+  return {
+    x: target.x - template.bounds.x * scaleX,
+    y: target.y - template.bounds.y * scaleY,
+    width: scaleX * 100,
+    height: scaleY * 100,
+  }
+}
+
+function pointToSegmentDistance(point: Point, start: Point, end: Point): number {
+  const dx = end.x - start.x
+  const dy = end.y - start.y
+  const lengthSquared = dx * dx + dy * dy || 1
+  const ratio = Math.max(0, Math.min(1, ((point.x - start.x) * dx + (point.y - start.y) * dy) / lengthSquared))
+  return Math.hypot(point.x - (start.x + dx * ratio), point.y - (start.y + dy * ratio))
+}
+
+function isDatabaseContour(points: Point[], box: Box): boolean {
+  const width = Math.max(box.width, 0.1)
+  const height = Math.max(box.height, 0.1)
+  const ratio = width / height
+  if (ratio < 0.65 || ratio > 1.3) return false
+  const normalized = normalizePoints(points, box)
+  const top = normalized.filter(point => point.y < 12)
+  const bottom = normalized.filter(point => point.y > 88)
+  const left = normalized.filter(point => point.x < 8)
+  const right = normalized.filter(point => point.x > 92)
+  const xRange = (samples: Point[]) => samples.length ? Math.max(...samples.map(point => point.x)) - Math.min(...samples.map(point => point.x)) : 100
+  const yRange = (samples: Point[]) => samples.length ? Math.max(...samples.map(point => point.y)) - Math.min(...samples.map(point => point.y)) : 0
+  return top.length >= 3 && bottom.length >= 3 && xRange(top) < 90 && xRange(bottom) < 90
+    && left.length > normalized.length * 0.08 && right.length > normalized.length * 0.08
+    && yRange(left) > 48 && yRange(right) > 48
+}
+
+function recognizeCommonLibraryShape(points: Point[], box: Box, diagonal: number): string | undefined {
+  const corners = simplifyStroke(points, Math.max(3, diagonal * 0.14))
+  const normalizedCorners = corners.map(point => ({
+    x: (point.x - box.x) / Math.max(box.width, 0.1),
+    y: (point.y - box.y) / Math.max(box.height, 0.1),
+  }))
+
+  let edgeMidpoints = false
+  let rightAngled = false
+  let diamondLike = false
+  if (normalizedCorners.length === 4) {
+    rightAngled = corners.every((point, index) => {
+      const before = corners[(index + corners.length - 1) % corners.length]
+      const after = corners[(index + 1) % corners.length]
+      const a = { x: before.x - point.x, y: before.y - point.y }
+      const b = { x: after.x - point.x, y: after.y - point.y }
+      return Math.abs((a.x * b.x + a.y * b.y) / (Math.hypot(a.x, a.y) * Math.hypot(b.x, b.y) || 1)) < 0.65
+    })
+    const axisAligned = normalizedCorners.every(point => (point.x < 0.24 || point.x > 0.76) && (point.y < 0.24 || point.y > 0.76))
+    edgeMidpoints = normalizedCorners.every(point => {
+      const onHorizontalEdge = (point.y < 0.22 || point.y > 0.78) && Math.abs(point.x - 0.5) < 0.24
+      const onVerticalEdge = (point.x < 0.22 || point.x > 0.78) && Math.abs(point.y - 0.5) < 0.24
+      return onHorizontalEdge || onVerticalEdge
+    })
+    const polygonDeviation = points.reduce((sum, point) => {
+      const distance = corners.reduce((nearest, corner, index) => Math.min(nearest, pointToSegmentDistance(point, corner, corners[(index + 1) % corners.length])), Infinity)
+      return sum + distance
+    }, 0) / points.length / Math.max(diagonal, 1)
+    if (axisAligned && isDatabaseContour(points, box)) return 'flow-database'
+    if (axisAligned && polygonDeviation < 0.065) return 'flow-process'
+    if (edgeMidpoints && rightAngled) {
+      diamondLike = polygonDeviation < 0.075
+    }
+  }
+
+  if (normalizedCorners.length === 3) {
+    const top = Math.min(...normalizedCorners.map(point => point.y))
+    const bottom = Math.max(...normalizedCorners.map(point => point.y))
+    const apexAtTop = normalizedCorners.filter(point => point.y < top + 0.2).length === 1
+    const apexAtBottom = normalizedCorners.filter(point => point.y > bottom - 0.2).length === 1
+    if (apexAtTop || apexAtBottom) return apexAtBottom ? 'flow-merge' : 'flow-extract'
+  }
+
+  if (points.length >= 12 && simplifyStroke(points, Math.max(1.5, diagonal * 0.035)).length >= 8) {
+    const center = { x: box.x + box.width / 2, y: box.y + box.height / 2 }
+    const radiusX = Math.max(box.width / 2, 0.1)
+    const radiusY = Math.max(box.height / 2, 0.1)
+    const radialDeviation = points.reduce((sum, point) => {
+      const radius = Math.hypot((point.x - center.x) / radiusX, (point.y - center.y) / radiusY)
+      return sum + Math.abs(radius - 1)
+    }, 0) / points.length
+    if (radialDeviation < 0.16) {
+      const isCircle = Math.abs(box.width - box.height) / Math.max(box.width, box.height) < 0.18
+      return isCircle ? 'flow-connector' : 'flow-terminator'
+    }
+  }
+
+  if (diamondLike) return 'flow-decision'
+
+  return undefined
+}
 
 function recognizeSketch(points: Point[]): SketchRecognition | undefined {
   if (points.length < 3) return undefined
   const box = pointsBounds(points)
   const diagonal = Math.hypot(box.width, box.height)
-  const closed = Math.hypot(points[0].x - points.at(-1)!.x, points[0].y - points.at(-1)!.y) <= Math.max(10, diagonal * 0.2)
+  const endpointGap = Math.hypot(points[0].x - points.at(-1)!.x, points[0].y - points.at(-1)!.y)
+  const closed = endpointGap <= Math.max(14, diagonal * 0.3)
   if (!closed) {
-    const simplified = simplifyStroke(points, Math.max(2.5, diagonal * 0.035))
+    const simplified = simplifyStroke(points, Math.max(3, diagonal * 0.075))
     if (simplified.length === 2) {
       const start = simplified[0]
       const end = simplified[1]
       const length = Math.hypot(end.x - start.x, end.y - start.y)
       const maxDistance = Math.max(...points.map(point => Math.abs((end.y - start.y) * point.x - (end.x - start.x) * point.y + end.x * start.y - end.y * start.x))) / Math.max(length, 1)
-      if (maxDistance <= Math.max(3, diagonal * 0.06)) return { type: 'line', start, end }
+      if (maxDistance <= Math.max(6, diagonal * 0.1)) return { type: 'line', start, end }
     }
-    return undefined
+  } else {
+    const commonShape = recognizeCommonLibraryShape(points, box, diagonal)
+    if (commonShape) return { type: 'shape', shapeId: commonShape, box }
   }
-
-  const corners = simplifyStroke(points, Math.max(2, diagonal * 0.045))
-  if (corners.length === 4) {
-    const rightAngles = corners.every((point, index) => {
-      const before = corners[(index + corners.length - 1) % corners.length]
-      const after = corners[(index + 1) % corners.length]
-      const a = { x: before.x - point.x, y: before.y - point.y }
-      const b = { x: after.x - point.x, y: after.y - point.y }
-      return Math.abs((a.x * b.x + a.y * b.y) / (Math.hypot(a.x, a.y) * Math.hypot(b.x, b.y) || 1)) < 0.4
-    })
-    if (rightAngles) {
-      let cleanBox = box
-      if (Math.abs(box.width - box.height) / Math.max(box.width, box.height) < 0.18) {
-        const side = (box.width + box.height) / 2
-        cleanBox = { x: box.x + (box.width - side) / 2, y: box.y + (box.height - side) / 2, width: side, height: side }
-      }
-      return { type: 'rect', box: cleanBox }
-    }
-  }
-  const meanRadius = points.reduce((sum, point) => sum + Math.hypot(point.x - (box.x + box.width / 2), point.y - (box.y + box.height / 2)), 0) / points.length
-  const radialDeviation = points.reduce((sum, point) => sum + Math.abs(Math.hypot(point.x - (box.x + box.width / 2), point.y - (box.y + box.height / 2)) - meanRadius), 0) / points.length / Math.max(meanRadius, 1)
-  let smoothTurns = 0
-  let measuredTurns = 0
-  for (let index = 2; index < points.length - 2; index++) {
-    const before = { x: points[index].x - points[index - 2].x, y: points[index].y - points[index - 2].y }
-    const after = { x: points[index + 2].x - points[index].x, y: points[index + 2].y - points[index].y }
-    const angle = Math.abs(Math.atan2(before.x * after.y - before.y * after.x, before.x * after.x + before.y * after.y))
-    measuredTurns++
-    if (angle > 0.08) smoothTurns++
-  }
-  const curveRatio = smoothTurns / Math.max(measuredTurns, 1)
-  if (corners.length >= 6 && points.length >= 12 && radialDeviation < 0.2 && curveRatio > 0.26) {
-    return { type: 'ellipse', box, circle: Math.abs(box.width - box.height) / Math.max(box.width, box.height) < 0.16 }
-  }
-  if (corners.length >= 3 && corners.length <= 8) return { type: 'polygon', points: corners }
-  return undefined
+  const match = matchLibraryShape(points, box, closed)
+  if (!match) return undefined
+  return { type: 'shape', shapeId: match.shapeId, box }
 }
 
 function createLibraryShapeNode(shapeId: string, box: Box, base?: SVGElement, objectId: string = crypto.randomUUID()): SVGGElement {
@@ -185,35 +371,6 @@ function createLibraryShapeNode(shapeId: string, box: Box, base?: SVGElement, ob
     group.append(path)
   })
   return group
-}
-
-function replacePathWithRecognition(path: SVGElement, recognition: SketchRecognition) {
-  const common = ['data-object-id', 'pointer-events', 'stroke', 'stroke-width', 'stroke-linecap', 'stroke-linejoin', 'fill']
-  const tag = recognition.type === 'line' ? 'line' : recognition.type === 'ellipse' ? recognition.circle ? 'circle' : 'ellipse' : recognition.type === 'polygon' ? 'polygon' : 'rect'
-  const replacement = document.createElementNS(SVG_NS, tag)
-  common.forEach(name => {
-    const value = path.getAttribute(name)
-    if (value !== null) replacement.setAttribute(name, value)
-  })
-  if (recognition.type === 'line') {
-    replacement.setAttribute('x1', rounded(recognition.start.x)); replacement.setAttribute('y1', rounded(recognition.start.y))
-    replacement.setAttribute('x2', rounded(recognition.end.x)); replacement.setAttribute('y2', rounded(recognition.end.y))
-  } else if (recognition.type === 'ellipse') {
-    const { x, y, width, height } = recognition.box
-    if (recognition.circle) {
-      replacement.setAttribute('cx', rounded(x + width / 2)); replacement.setAttribute('cy', rounded(y + height / 2))
-      replacement.setAttribute('r', rounded(Math.max(width, height) / 2))
-    } else {
-      replacement.setAttribute('cx', rounded(x + width / 2)); replacement.setAttribute('cy', rounded(y + height / 2))
-      replacement.setAttribute('rx', rounded(width / 2)); replacement.setAttribute('ry', rounded(height / 2))
-    }
-  } else if (recognition.type === 'rect') {
-    Object.entries(recognition.box).forEach(([name, value]) => replacement.setAttribute(name, rounded(value)))
-  } else {
-    replacement.setAttribute('points', recognition.points.map(point => `${rounded(point.x)},${rounded(point.y)}`).join(' '))
-  }
-  path.replaceWith(replacement)
-  return replacement
 }
 
 function rounded(value: number): string {
@@ -1151,8 +1308,20 @@ export function VectorEditor({
           } else {
             const recognition = recognizeSketch(current.points)
             if (recognition) {
-              const replacement = replacePathWithRecognition(current.element.node, recognition)
-              replacement.setAttribute('fill', recognition.type !== 'line' && fillEnabledRef.current ? fillColorRef.current : 'none')
+              if (recognition.type === 'line') {
+                const replacement = document.createElementNS(SVG_NS, 'line')
+                for (const attribute of ['data-object-id', 'pointer-events', 'stroke', 'stroke-width', 'stroke-linecap', 'stroke-linejoin']) {
+                  const value = current.element.node.getAttribute(attribute)
+                  if (value !== null) replacement.setAttribute(attribute, value)
+                }
+                replacement.setAttribute('x1', rounded(recognition.start.x)); replacement.setAttribute('y1', rounded(recognition.start.y))
+                replacement.setAttribute('x2', rounded(recognition.end.x)); replacement.setAttribute('y2', rounded(recognition.end.y))
+                current.element.node.replaceWith(replacement)
+              } else {
+                const replacement = createLibraryShapeNode(recognition.shapeId, shapeTransformBox(recognition.shapeId, recognition.box), current.element.node, current.id)
+                replacement.setAttribute('fill', fillEnabledRef.current ? fillColorRef.current : 'none')
+                current.element.node.replaceWith(replacement)
+              }
             }
           }
         }
