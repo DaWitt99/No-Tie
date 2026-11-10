@@ -1,5 +1,5 @@
 import { parse as parseYaml, stringify as stringifyYaml } from 'yaml'
-import type { Note, NoteAsset } from './types'
+import type { Note, NoteAsset, NoteAttachment } from './types'
 
 export const starterNotes: Note[] = [
   {
@@ -54,6 +54,7 @@ export function noteToMarkdown(note: Note): string {
     updatedAt: note.updatedAt,
   }
   if (typeof note.color === 'string' && /^#[\da-f]{6}$/i.test(note.color)) metadata.color = note.color
+  if (typeof note.dailyDate === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(note.dailyDate)) metadata.dailyDate = note.dailyDate
   return `---\n${stringifyYaml(metadata).trimEnd()}\n---\n\n${note.content.trimStart()}\n`
 }
 
@@ -72,6 +73,7 @@ export function markdownToNote(markdown: string, fallbackId: string, now = Date.
     favorite: metadata.favorite === true,
     createdAt: typeof metadata.createdAt === 'number' ? metadata.createdAt : now,
     updatedAt: typeof metadata.updatedAt === 'number' ? metadata.updatedAt : now,
+    dailyDate: typeof metadata.dailyDate === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(metadata.dailyDate) ? metadata.dailyDate : undefined,
     content: body.trimStart(),
   }
 }
@@ -83,17 +85,19 @@ export function svgDataUrl(svg: string): string {
   return `data:image/svg+xml;base64,${btoa(binary)}`
 }
 
-export function markdownForEditor(content: string, assets: NoteAsset[]): string {
-  return assets.reduce((markdown, asset) => {
+export function markdownForEditor(content: string, assets: NoteAsset[], attachments: NoteAttachment[] = []): string {
+  const withSvg = assets.reduce((markdown, asset) => {
     const path = `./assets/${asset.fileName}`
     return markdown.replaceAll(`](${path})`, `](${svgDataUrl(asset.svg)})`)
   }, content)
+  return attachments.reduce((markdown, attachment) => markdown.replaceAll(`]('./assets/${attachment.fileName}')`, `](${attachment.dataUrl})`).replaceAll(`](./assets/${attachment.fileName})`, `](${attachment.dataUrl})`), withSvg)
 }
 
-export function markdownFromEditor(content: string, assets: NoteAsset[]): string {
+export function markdownFromEditor(content: string, assets: NoteAsset[], attachments: NoteAttachment[] = []): string {
+  const withAttachments = attachments.reduce((markdown, attachment) => markdown.replaceAll(`](${attachment.dataUrl})`, `](./assets/${attachment.fileName})`), content)
   return assets.reduce((markdown, asset) => {
     return markdown.replaceAll(`](${svgDataUrl(asset.svg)})`, `](./assets/${asset.fileName})`)
-  }, content)
+  }, withAttachments)
 }
 
 export function sanitizeSvg(source: string): string {

@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState, type MouseEvent as ReactMouseEvent } from 'react'
 import { commandsCtx, defaultValueCtx, editorViewCtx, Editor, rootCtx } from '@milkdown/kit/core'
+import { Fragment } from '@milkdown/kit/prose/model'
 import {
   commonmark,
   strongSchema,
@@ -12,44 +13,143 @@ import {
   wrapInHeadingCommand,
   wrapInOrderedListCommand,
 } from '@milkdown/kit/preset/commonmark'
-import { gfm, toggleStrikethroughCommand } from '@milkdown/kit/preset/gfm'
+import {
+  addColAfterCommand,
+  addColBeforeCommand,
+  addRowAfterCommand,
+  addRowBeforeCommand,
+  columnResizingPlugin,
+  gfm,
+  toggleStrikethroughCommand,
+} from '@milkdown/kit/preset/gfm'
 import { listener, listenerCtx } from '@milkdown/kit/plugin/listener'
 import { toggleMark as toggleProseMark } from '@milkdown/kit/prose/commands'
 import { TextSelection } from '@milkdown/kit/prose/state'
+import type { EditorView } from '@milkdown/kit/prose/view'
 import { getMarkdown, replaceAll, replaceRange } from '@milkdown/kit/utils'
 import { markdownForEditor, markdownFromEditor } from './content'
 import { MarkdownContextMenu, type MarkdownMenuAction } from './MarkdownContextMenu'
+import { MarkdownTableMenu, type MarkdownTableAction } from './MarkdownTableMenu'
 import { highlightSchema, markdownMarkupPlugins, noteCommentSchema, underlineSchema } from './markdownMarkup'
-import type { NoteAsset } from './types'
+import { applyTableColumnWidths, markdownWithTableColumnWidths, parseTableColumnWidths, stripTableWidthMetadata } from './markdownTableWidths'
+import { WIKI_LINK_INSERT_EVENT, markdownToWikiLinks, wikiLinksToMarkdown, wikiNoteHref, wikiNoteTargetFromHref, type WikiLinkInsertDetail } from './wikiLinks'
+import type { NoteAsset, NoteAttachment } from './types'
 
 type ContextMenuState = { left: number; top: number; opensLeft: boolean }
+type TableTarget = { tablePos: number; row: number; column: number; element: HTMLTableElement }
+type TableOverlayState = TableTarget & { left: number; top: number }
+type TableContextState = TableTarget & { left: number; top: number }
+type TableFilterState = { tablePos: number; column: number; value: string }
+
+function tablePositionAt(doc: import('@milkdown/kit/prose/model').Node, pos: number): number | undefined {
+  try {
+    const $pos = doc.resolve(Math.max(0, Math.min(pos, doc.content.size)))
+    for (let depth = $pos.depth; depth > 0; depth--) {
+      if ($pos.node(depth).type.name === 'table') return $pos.before(depth)
+    }
+  } catch {
+    return undefined
+  }
+  return undefined
+}
+
+function cellPositionAt(table: import('@milkdown/kit/prose/model').Node, tablePos: number, rowIndex: number, columnIndex: number): number | undefined {
+  let rowStart = tablePos + 1
+  for (let row = 0; row < table.childCount; row++) {
+    const rowNode = table.child(row)
+    if (row === rowIndex && columnIndex < rowNode.childCount) {
+      let cellStart = rowStart + 1
+      for (let column = 0; column < columnIndex; column++) cellStart += rowNode.child(column).nodeSize
+      return cellStart
+    }
+    rowStart += rowNode.nodeSize
+  }
+  return undefined
+}
+
+function markdownForTable(table: import('@milkdown/kit/prose/model').Node): string {
+  const rows: string[] = []
+  table.forEach(row => {
+    const cells: string[] = []
+    row.forEach(cell => cells.push(cell.textContent.replace(/\|/g, '\\|').replace(/\s*\n\s*/g, '<br>')))
+    rows.push(`| ${cells.join(' | ')} |`)
+  })
+  if (rows.length < 2) return rows.join('\n')
+  const columns = table.firstChild?.childCount ?? 1
+  return [rows[0], `| ${Array(columns).fill('---').join(' | ')} |`, ...rows.slice(1)].join('\n')
+}
+
+async function copyMarkdownToClipboard(value: string): Promise<boolean> {
+  try {
+    if (navigator.clipboard?.writeText) {
+      await navigator.clipboard.writeText(value)
+      return true
+    }
+  } catch {
+    // Fall back to the clipboard API available in older WebViews.
+  }
+  const input = document.createElement('textarea')
+  input.value = value
+  input.style.position = 'fixed'
+  input.style.opacity = '0'
+  document.body.append(input)
+  input.select()
+  const copied = document.execCommand('copy')
+  input.remove()
+  return copied
+}
 
 export function MarkdownEditor({
   noteId,
   markdown,
   assets,
+  attachments,
   revision,
   onChange,
   onSelectionChange,
+  onOpenNote,
 }: {
   noteId: string
   markdown: string
   assets: NoteAsset[]
+  attachments: NoteAttachment[]
   revision: number
   onChange: (markdown: string) => void
   onSelectionChange: (text: string) => void
+  onOpenNote: (target: string) => void
 }) {
   const root = useRef<HTMLDivElement>(null)
+  const tableFilterStyle = useRef<HTMLStyleElement>(null)
   const editorRef = useRef<Editor | null>(null)
   const contextRange = useRef({ from: 0, to: 0 })
+  const activeTableElement = useRef<HTMLTableElement | null>(null)
+  const tableToolbarDismissTimer = useRef<number | null>(null)
   const onChangeRef = useRef(onChange)
   const onSelectionChangeRef = useRef(onSelectionChange)
+  const onOpenNoteRef = useRef(onOpenNote)
   const [contextMenu, setContextMenu] = useState<ContextMenuState | null>(null)
-  const [initialDocument] = useState(() => ({ markdown, assets }))
+  const [hoverTable, setHoverTable] = useState<TableOverlayState | null>(null)
+  const [tableContextMenu, setTableContextMenu] = useState<TableContextState | null>(null)
+  const tableFilter = useRef<TableFilterState | null>(null)
+  const [tableFilterView, setTableFilterView] = useState<TableFilterState | null>(null)
+  const [tableRevision, setTableRevision] = useState(0)
+  const [tableCopied, setTableCopied] = useState(false)
+  const [initialDocument] = useState(() => ({ markdown, assets, attachments }))
   const lastMarkdown = useRef(initialDocument.markdown)
 
   useEffect(() => { onChangeRef.current = onChange }, [onChange])
   useEffect(() => { onSelectionChangeRef.current = onSelectionChange }, [onSelectionChange])
+  useEffect(() => { onOpenNoteRef.current = onOpenNote }, [onOpenNote])
+  useEffect(() => {
+    const style = document.createElement('style')
+    style.dataset.noTieTableFilterStyle = ''
+    document.head.append(style)
+    tableFilterStyle.current = style
+    return () => {
+      style.remove()
+      tableFilterStyle.current = null
+    }
+  }, [])
 
   useEffect(() => {
     if (!root.current) return
@@ -57,16 +157,20 @@ export function MarkdownEditor({
     const editor = Editor.make()
       .config(ctx => {
         ctx.set(rootCtx, root.current!)
-        ctx.set(defaultValueCtx, markdownForEditor(initialDocument.markdown, initialDocument.assets))
+        ctx.set(defaultValueCtx, markdownForEditor(wikiLinksToMarkdown(stripTableWidthMetadata(initialDocument.markdown)), initialDocument.assets, initialDocument.attachments))
         ctx.get(listenerCtx).markdownUpdated((_ctx, updated) => {
-          const next = markdownFromEditor(updated, initialDocument.assets)
+          const next = markdownWithTableColumnWidths(markdownToWikiLinks(markdownFromEditor(updated, initialDocument.assets, initialDocument.attachments)), _ctx.get(editorViewCtx))
           if (next === lastMarkdown.current) return
           lastMarkdown.current = next
           onChangeRef.current(next)
         })
       })
-      .use([...commonmark, ...gfm, ...markdownMarkupPlugins, listener])
-    void editor.create().then(() => { editorRef.current = editor }).catch(error => console.error('Nie udało się uruchomić edytora Markdown', error))
+      .use([...commonmark, columnResizingPlugin, ...gfm, ...markdownMarkupPlugins, listener])
+    void editor.create().then(() => {
+      editorRef.current = editor
+      const widths = parseTableColumnWidths(initialDocument.markdown)
+      if (widths.length) applyTableColumnWidths(editor.ctx.get(editorViewCtx), widths)
+    }).catch(error => console.error('Nie udało się uruchomić edytora Markdown', error))
     return () => {
       editorRef.current = null
       void editor.destroy()
@@ -74,7 +178,32 @@ export function MarkdownEditor({
   }, [noteId, revision, initialDocument])
 
   useEffect(() => {
+    const insertWikiLink = (event: Event) => {
+      const detail = (event as CustomEvent<WikiLinkInsertDetail>).detail
+      if (detail?.noteId !== noteId || !detail.target) return
+      const editor = editorRef.current
+      if (!editor) return
+      const view = editor.ctx.get(editorViewCtx)
+      const { from, to, empty } = view.state.selection
+      const label = empty ? detail.target : view.state.doc.textBetween(from, to, '\n')
+      const linkMark = view.state.schema.marks.link
+      if (!linkMark) view.dispatch(view.state.tr.insertText(`[[${detail.target}]]`, from, to))
+      else {
+        const transaction = view.state.tr
+        if (empty) transaction.insertText(label, from, to)
+        transaction.addMark(from, from + label.length, linkMark.create({ href: wikiNoteHref(detail.target) }))
+        view.dispatch(transaction)
+      }
+      view.focus()
+    }
+    window.addEventListener(WIKI_LINK_INSERT_EVENT, insertWikiLink)
+    return () => window.removeEventListener(WIKI_LINK_INSERT_EVENT, insertWikiLink)
+  }, [noteId])
+
+  useEffect(() => {
     function updateSelection() {
+      const activeElement = document.activeElement
+      if (activeElement instanceof Element && activeElement.closest('.markdown-table-tools')) return
       const selection = window.getSelection()
       const container = root.current
       if (selection && container?.contains(selection.anchorNode)) onSelectionChangeRef.current(selection.toString())
@@ -84,8 +213,102 @@ export function MarkdownEditor({
     return () => document.removeEventListener('selectionchange', updateSelection)
   }, [])
 
+  function tableTargetAt(view: EditorView, table: HTMLTableElement, row: number, column: number, clientX?: number, clientY?: number): TableTarget | null {
+    let position: number | undefined
+    if (clientX !== undefined && clientY !== undefined) position = view.posAtCoords({ left: clientX, top: clientY })?.pos
+    if (position === undefined) {
+      try { position = view.posAtDOM(table, 0) } catch { /* Use the table's last known document position. */ }
+    }
+    const tablePos = position === undefined ? undefined : tablePositionAt(view.state.doc, position)
+    if (tablePos === undefined) return null
+    return { tablePos, row: Math.max(0, row), column: Math.max(0, column), element: table }
+  }
+
+  function filterStateFor(target: TableTarget) {
+    const filter = tableFilter.current
+    return filter?.tablePos === target.tablePos && filter.column === target.column ? filter : null
+  }
+
+  function showFilterForTarget(target: TableTarget) {
+    const filter = tableFilter.current
+    if (filter && (filter.tablePos !== target.tablePos || filter.column !== target.column)) {
+      tableFilter.current = null
+      if (tableFilterStyle.current) tableFilterStyle.current.textContent = ''
+    }
+    setTableFilterView(filterStateFor(target))
+  }
+
+  function showTableContextMenu(event: ReactMouseEvent<HTMLDivElement>, table: HTMLTableElement) {
+    const editor = editorRef.current
+    if (!editor) return
+    const view = editor.ctx.get(editorViewCtx)
+    const hit = view.posAtCoords({ left: event.clientX, top: event.clientY })
+    if (hit) view.dispatch(view.state.tr.setSelection(TextSelection.near(view.state.doc.resolve(hit.pos))))
+    const cell = (event.target as Element).closest('th, td') as HTMLTableCellElement | null
+    const row = cell?.parentElement instanceof HTMLTableRowElement ? Array.from(table.rows).indexOf(cell.parentElement) : 0
+    const target = tableTargetAt(view, table, row, cell?.cellIndex ?? 0, event.clientX, event.clientY)
+    if (!target) return
+    activeTableElement.current = table
+    showFilterForTarget(target)
+    setHoverTable({ ...target, left: Math.max(8, Math.min(table.getBoundingClientRect().left, window.innerWidth - 320)), top: Math.max(8, table.getBoundingClientRect().top) })
+    setContextMenu(null)
+    setTableContextMenu({
+      ...target,
+      left: Math.max(8, Math.min(event.clientX, window.innerWidth - 278)),
+      top: Math.max(8, Math.min(event.clientY, window.innerHeight - 520)),
+    })
+  }
+
+  function updateTableHover(event: ReactMouseEvent<HTMLDivElement>) {
+    const eventTarget = event.target
+    if (!(eventTarget instanceof Element)) return
+    if (eventTarget.closest('.markdown-table-tools')) {
+      if (tableToolbarDismissTimer.current !== null) window.clearTimeout(tableToolbarDismissTimer.current)
+      tableToolbarDismissTimer.current = null
+      return
+    }
+    const table = eventTarget.closest('table') as HTMLTableElement | null
+    const cell = eventTarget.closest('th, td') as HTMLTableCellElement | null
+    if (!table || !cell) return
+    const editor = editorRef.current
+    if (!editor) return
+    const view = editor.ctx.get(editorViewCtx)
+    const row = cell.parentElement instanceof HTMLTableRowElement ? Array.from(table.rows).indexOf(cell.parentElement) : 0
+    const target = tableTargetAt(view, table, row, cell.cellIndex, event.clientX, event.clientY)
+    if (!target) return
+    const rect = table.getBoundingClientRect()
+    activeTableElement.current = table
+    setHoverTable(current => current?.tablePos === target.tablePos && current.row === target.row && current.column === target.column && current.element === table
+      ? current
+      : { ...target, left: Math.max(8, Math.min(rect.left, window.innerWidth - 320)), top: Math.max(8, rect.top) })
+    showFilterForTarget(target)
+  }
+
+  function dismissTableToolbar(event: ReactMouseEvent<HTMLDivElement>) {
+    const related = event.relatedTarget
+    if (related instanceof Element && (activeTableElement.current?.contains(related) || related.closest('.markdown-table-tools'))) {
+      if (tableToolbarDismissTimer.current !== null) window.clearTimeout(tableToolbarDismissTimer.current)
+      tableToolbarDismissTimer.current = null
+      return
+    }
+    if (tableToolbarDismissTimer.current !== null) window.clearTimeout(tableToolbarDismissTimer.current)
+    tableToolbarDismissTimer.current = window.setTimeout(() => {
+      tableToolbarDismissTimer.current = null
+      activeTableElement.current = null
+      setHoverTable(null)
+    }, 180)
+  }
+
   function showContextMenu(event: ReactMouseEvent<HTMLDivElement>) {
     event.preventDefault()
+    const target = event.target
+    if (target instanceof Element) {
+      const table = target.closest('table') as HTMLTableElement | null
+      if (table) {
+        showTableContextMenu(event, table)
+        return
+      }
+    }
     const editor = editorRef.current
     if (!editor) return
     const view = editor.ctx.get(editorViewCtx)
@@ -104,6 +327,248 @@ export function MarkdownEditor({
       opensLeft: event.clientX > window.innerWidth - 486,
     })
   }
+
+  function currentTablePosition(view: EditorView, target: TableTarget) {
+    if (target.element.isConnected) {
+      try {
+        const fromDom = tablePositionAt(view.state.doc, view.posAtDOM(target.element, 0))
+        if (fromDom !== undefined) return fromDom
+      } catch { /* Use the captured position if the current DOM cannot be mapped. */ }
+    }
+    return target.tablePos
+  }
+
+  function tableElementForTarget(view: EditorView, target: TableTarget) {
+    const tablePos = currentTablePosition(view, target)
+    const node = view.nodeDOM(tablePos)
+    if (node instanceof HTMLTableElement) return node
+    if (node instanceof Element) {
+      const table = node.querySelector('table')
+      if (table instanceof HTMLTableElement) return table
+    }
+    return target.element.isConnected ? target.element : null
+  }
+
+  function selectorFromAncestor(ancestor: HTMLElement, element: HTMLElement) {
+    const parts: string[] = []
+    let current: HTMLElement | null = element
+    while (current && current !== ancestor) {
+      const parent: HTMLElement | null = current.parentElement
+      if (!parent) return null
+      parts.unshift(`${current.tagName.toLowerCase()}:nth-child(${Array.from(parent.children).indexOf(current) + 1})`)
+      current = parent
+    }
+    return current === ancestor ? parts.join(' > ') : null
+  }
+
+  function updateTableFilterStyle(table: HTMLTableElement, column: number, value: string) {
+    const container = root.current
+    const style = tableFilterStyle.current
+    if (!container || !style) return
+    const tablePath = selectorFromAncestor(container, table)
+    if (!tablePath) return
+    const rules: string[] = []
+    const normalized = value.trim().toLocaleLowerCase()
+    if (normalized) Array.from(table.rows).forEach((row, index) => {
+      if (index === 0) return
+      const cellValue = row.cells[column]?.textContent?.trim().toLocaleLowerCase() ?? ''
+      if (cellValue.includes(normalized)) return
+      const rowPath = selectorFromAncestor(table, row)
+      if (rowPath) rules.push(`.markdown-editor > ${tablePath} > ${rowPath} { display: none !important; }`)
+    })
+    style.textContent = rules.join('\n')
+  }
+
+  function selectTableCell(view: EditorView, table: import('@milkdown/kit/prose/model').Node, tablePos: number, row: number, column: number) {
+    const cellPos = cellPositionAt(table, tablePos, row, column)
+    if (cellPos === undefined) return
+    const cursor = Math.min(cellPos + 2, view.state.doc.content.size)
+    view.dispatch(view.state.tr.setSelection(TextSelection.near(view.state.doc.resolve(cursor))))
+  }
+
+  function saveEditorMarkdown(editor: Editor) {
+    const view = editor.ctx.get(editorViewCtx)
+    const updated = markdownWithTableColumnWidths(markdownToWikiLinks(markdownFromEditor(editor.action(getMarkdown()), initialDocument.assets, initialDocument.attachments)), view)
+    if (updated === lastMarkdown.current) return
+    lastMarkdown.current = updated
+    onChangeRef.current(updated)
+  }
+
+  function applyTableAction(action: MarkdownTableAction, target: TableTarget, fromContextMenu: boolean) {
+    const editor = editorRef.current
+    if (!editor) return
+    if (action === 'clear-filter') {
+      tableFilter.current = null
+      setTableFilterView(null)
+      if (tableFilterStyle.current) tableFilterStyle.current.textContent = ''
+      if (fromContextMenu) setTableContextMenu(null)
+      return
+    }
+    let copiedMarkdown = ''
+    let changedDocument = false
+    editor.action(ctx => {
+      const view = ctx.get(editorViewCtx)
+      const tablePos = currentTablePosition(view, target)
+      const table = view.state.doc.nodeAt(tablePos)
+      if (!table || table.type.name !== 'table') return
+      selectTableCell(view, table, tablePos, target.row, target.column)
+
+      if (action === 'copy-table') {
+        copiedMarkdown = getMarkdown({ from: tablePos, to: tablePos + table.nodeSize })(ctx).trim() || markdownForTable(table)
+        return
+      }
+      if (action === 'add-row-before' || action === 'add-row-after' || action === 'add-column-before' || action === 'add-column-after') {
+        const commands = ctx.get(commandsCtx)
+        const command = action === 'add-row-before' ? addRowBeforeCommand
+          : action === 'add-row-after' ? addRowAfterCommand
+            : action === 'add-column-before' ? addColBeforeCommand : addColAfterCommand
+        commands.call(command.key)
+        changedDocument = true
+        return
+      }
+
+      const rows: import('@milkdown/kit/prose/model').Node[] = []
+      table.forEach(row => rows.push(row))
+      if (action === 'delete-row') {
+        if (target.row === 0 || rows.length <= 2) return
+        const nextRows = rows.filter((_row, index) => index !== target.row)
+        view.dispatch(view.state.tr.replaceWith(tablePos, tablePos + table.nodeSize, table.copy(Fragment.fromArray(nextRows))))
+        changedDocument = true
+        return
+      }
+      if (action === 'delete-column') {
+        const columnCount = rows[0]?.childCount ?? 0
+        if (columnCount <= 1) return
+        const nextRows = rows.map(row => {
+          const cells: import('@milkdown/kit/prose/model').Node[] = []
+          row.forEach((cell, _offset, column) => { if (column !== target.column) cells.push(cell) })
+          return row.copy(Fragment.fromArray(cells))
+        })
+        view.dispatch(view.state.tr.replaceWith(tablePos, tablePos + table.nodeSize, table.copy(Fragment.fromArray(nextRows))))
+        changedDocument = true
+        return
+      }
+      if (action === 'sort-ascending' || action === 'sort-descending') {
+        if (rows.length <= 2 || target.column >= (rows[0]?.childCount ?? 0)) return
+        const direction = action === 'sort-ascending' ? 1 : -1
+        const collator = new Intl.Collator('pl', { numeric: true, sensitivity: 'base' })
+        const sortedRows = [...rows.slice(1)].sort((left, right) => direction * collator.compare(left.child(target.column).textContent.trim(), right.child(target.column).textContent.trim()))
+        view.dispatch(view.state.tr.replaceWith(tablePos, tablePos + table.nodeSize, table.copy(Fragment.fromArray([rows[0], ...sortedRows]))))
+        changedDocument = true
+      }
+    })
+
+    if (fromContextMenu) setTableContextMenu(null)
+    if (changedDocument) {
+      setTableRevision(value => value + 1)
+      saveEditorMarkdown(editor)
+    }
+    if (copiedMarkdown) {
+      void copyMarkdownToClipboard(copiedMarkdown).then(copied => {
+        setTableCopied(copied)
+        window.setTimeout(() => setTableCopied(false), 1500)
+      })
+    }
+  }
+
+  function applyTableCellColor(color: string, target: TableTarget, fromContextMenu: boolean) {
+    const editor = editorRef.current
+    if (!editor) return
+    let changedDocument = false
+    editor.action(ctx => {
+      const view = ctx.get(editorViewCtx)
+      const tablePos = currentTablePosition(view, target)
+      const table = view.state.doc.nodeAt(tablePos)
+      if (!table || table.type.name !== 'table') return
+      const cellPos = cellPositionAt(table, tablePos, target.row, target.column)
+      if (cellPos === undefined) return
+      const cell = view.state.doc.nodeAt(cellPos)
+      if (!cell) return
+      const markType = highlightSchema.type(ctx)
+      const textRanges: { from: number; to: number }[] = []
+      cell.descendants((node, offset) => {
+        if (!node.isText) return
+        const from = cellPos + 1 + offset
+        textRanges.push({ from, to: from + node.nodeSize })
+      })
+      const transaction = view.state.tr
+      if (!textRanges.length && color) {
+        transaction.insert(cellPos + 2, view.state.schema.text('\u200b', [markType.create({ color })]))
+      } else {
+        const from = textRanges[0]?.from
+        const to = textRanges.at(-1)?.to
+        if (from === undefined || to === undefined) return
+        transaction.removeMark(from, to, markType)
+        if (color) transaction.addMark(from, to, markType.create({ color }))
+        else if (cell.textContent === '\u200b') transaction.delete(from, to)
+      }
+      if (transaction.docChanged) {
+        view.dispatch(transaction)
+        changedDocument = true
+      }
+    })
+    if (fromContextMenu) setTableContextMenu(null)
+    if (changedDocument) saveEditorMarkdown(editor)
+  }
+
+  function setFilterForTable(value: string, target: TableTarget) {
+    tableFilter.current = { tablePos: target.tablePos, column: target.column, value }
+    setTableFilterView(tableFilter.current)
+    const editor = editorRef.current
+    if (!editor) return
+    const table = tableElementForTarget(editor.ctx.get(editorViewCtx), target)
+    if (!table) return
+    updateTableFilterStyle(table, target.column, value)
+  }
+
+  function openWikiLink(event: ReactMouseEvent<HTMLDivElement>) {
+    const target = event.target
+    if (!(target instanceof Element)) return
+    const anchor = target.closest<HTMLAnchorElement>('a[href^="#no-tie-note/"], a[href^="notie-note:"]')
+    if (!anchor) return
+    const noteTarget = wikiNoteTargetFromHref(anchor.getAttribute('href') ?? '')
+    if (noteTarget === null) return
+    event.preventDefault()
+    onOpenNoteRef.current(noteTarget)
+  }
+
+  useEffect(() => {
+    const filter = tableFilter.current
+    const editor = editorRef.current
+    if (!filter || !filter.value.trim() || !editor) {
+      if (tableFilterStyle.current) tableFilterStyle.current.textContent = ''
+      return
+    }
+    const view = editor.ctx.get(editorViewCtx)
+    const dom = view.nodeDOM(filter.tablePos)
+    const table = dom instanceof HTMLTableElement ? dom : dom instanceof Element ? dom.querySelector('table') : null
+    if (!(table instanceof HTMLTableElement)) return
+    const apply = () => updateTableFilterStyle(table, filter.column, filter.value)
+    apply()
+    const observer = new MutationObserver(apply)
+    observer.observe(table, { childList: true, subtree: true, characterData: true })
+    return () => {
+      observer.disconnect()
+    }
+  }, [noteId, tableFilterView, tableRevision])
+
+  useEffect(() => {
+    if (!hoverTable) return
+    const syncPosition = () => {
+      const rect = hoverTable.element.getBoundingClientRect()
+      if (!hoverTable.element.isConnected) {
+        setHoverTable(null)
+        return
+      }
+      setHoverTable(current => current ? { ...current, left: Math.max(8, Math.min(rect.left, window.innerWidth - 320)), top: Math.max(8, rect.top) } : current)
+    }
+    window.addEventListener('scroll', syncPosition, true)
+    window.addEventListener('resize', syncPosition)
+    return () => {
+      window.removeEventListener('scroll', syncPosition, true)
+      window.removeEventListener('resize', syncPosition)
+    }
+  }, [hoverTable])
 
   function applyAction(action: MarkdownMenuAction) {
     const editor = editorRef.current
@@ -187,14 +652,48 @@ export function MarkdownEditor({
       }
       view.focus()
     })
-    const updated = markdownFromEditor(editor.action(getMarkdown()), initialDocument.assets)
+    const updated = markdownWithTableColumnWidths(markdownToWikiLinks(markdownFromEditor(editor.action(getMarkdown()), initialDocument.assets, initialDocument.attachments)), editor.ctx.get(editorViewCtx))
     if (updated !== lastMarkdown.current) {
       lastMarkdown.current = updated
       onChangeRef.current(updated)
     }
   }
 
-  return <div className="markdown-editor" ref={root} aria-label="Treść notatki" onContextMenu={showContextMenu}>
+  return <div
+    className="markdown-editor"
+    ref={root}
+    aria-label="Treść notatki"
+    onContextMenu={showContextMenu}
+    onMouseOver={updateTableHover}
+    onMouseOut={dismissTableToolbar}
+    onClick={openWikiLink}
+  >
     {contextMenu && <MarkdownContextMenu {...contextMenu} onAction={applyAction} onDismiss={() => setContextMenu(null)} />}
+    {!tableContextMenu && hoverTable && <MarkdownTableMenu
+      key={`hover-${hoverTable.tablePos}-${hoverTable.row}-${hoverTable.column}`}
+      mode="toolbar"
+      left={hoverTable.left}
+      top={hoverTable.top}
+      row={hoverTable.row}
+      filterValue={tableFilterView?.tablePos === hoverTable.tablePos && tableFilterView.column === hoverTable.column ? tableFilterView.value : ''}
+      copied={tableCopied}
+      onAction={action => applyTableAction(action, hoverTable, false)}
+      onCellColor={color => applyTableCellColor(color, hoverTable, false)}
+      onFilterChange={value => setFilterForTable(value, hoverTable)}
+      onDismiss={() => { activeTableElement.current = null; setHoverTable(null) }}
+    />}
+    {tableContextMenu && <MarkdownTableMenu
+      key={`context-${tableContextMenu.tablePos}-${tableContextMenu.row}-${tableContextMenu.column}`}
+      mode="context"
+      left={tableContextMenu.left}
+      top={tableContextMenu.top}
+      row={tableContextMenu.row}
+      filterValue={tableFilterView?.tablePos === tableContextMenu.tablePos && tableFilterView.column === tableContextMenu.column ? tableFilterView.value : ''}
+      copied={tableCopied}
+      onAction={action => applyTableAction(action, tableContextMenu, true)}
+      onCellColor={color => applyTableCellColor(color, tableContextMenu, true)}
+      onFilterChange={value => setFilterForTable(value, tableContextMenu)}
+      onDismiss={() => setTableContextMenu(null)}
+    />}
   </div>
 }

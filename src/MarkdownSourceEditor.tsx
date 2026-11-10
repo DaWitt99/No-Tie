@@ -1,5 +1,6 @@
-import { useRef, useState, type MouseEvent as ReactMouseEvent } from 'react'
+import { useEffect, useRef, useState, type MouseEvent as ReactMouseEvent } from 'react'
 import { MarkdownContextMenu, type MarkdownMenuAction } from './MarkdownContextMenu'
+import { WIKI_LINK_INSERT_EVENT, type WikiLinkInsertDetail } from './wikiLinks'
 
 type ContextMenuPosition = { left: number; top: number; opensLeft: boolean }
 
@@ -17,10 +18,12 @@ function stripParagraphMarkers(line: string) {
 }
 
 export function MarkdownSourceEditor({
+  noteId,
   markdown,
   onChange,
   onSelectionChange,
 }: {
+  noteId: string
   markdown: string
   onChange: (markdown: string) => void
   onSelectionChange: (text: string) => void
@@ -28,6 +31,30 @@ export function MarkdownSourceEditor({
   const textareaRef = useRef<HTMLTextAreaElement>(null)
   const contextRange = useRef({ from: 0, to: 0 })
   const [contextMenu, setContextMenu] = useState<ContextMenuPosition | null>(null)
+
+  useEffect(() => {
+    const insertWikiLink = (event: Event) => {
+      const detail = (event as CustomEvent<WikiLinkInsertDetail>).detail
+      if (detail?.noteId !== noteId || !detail.target) return
+      const input = textareaRef.current
+      if (!input) return
+      const from = input.selectionStart
+      const to = input.selectionEnd
+      const selected = input.value.slice(from, to)
+      const wikiLink = selected ? `[[${detail.target}|${selected}]]` : `[[${detail.target}]]`
+      const next = input.value.slice(0, from) + wikiLink + input.value.slice(to)
+      const selectedStart = from + (selected ? detail.target.length + 3 : wikiLink.length)
+      onChange(next)
+      onSelectionChange(selected ? next.slice(selectedStart, selectedStart + selected.length) : '')
+      setContextMenu(null)
+      requestAnimationFrame(() => {
+        input.focus()
+        input.setSelectionRange(selected ? selectedStart : from + wikiLink.length, selected ? selectedStart + selected.length : from + wikiLink.length)
+      })
+    }
+    window.addEventListener(WIKI_LINK_INSERT_EVENT, insertWikiLink)
+    return () => window.removeEventListener(WIKI_LINK_INSERT_EVENT, insertWikiLink)
+  }, [noteId, onChange, onSelectionChange])
 
   function showContextMenu(event: ReactMouseEvent<HTMLTextAreaElement>) {
     event.preventDefault()
