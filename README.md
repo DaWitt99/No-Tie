@@ -47,3 +47,11 @@ Podgląd Vite działa w zwykłej przeglądarce i używa IndexedDB jako trybu dew
 ## Licencje
 
 Interfejs i główne zależności używają licencji open source dopuszczających wykorzystanie komercyjne. Przed dystrybucją należy dołączyć wymagane informacje o licencjach zależności.
+
+## Android ARM64 — poprawka odczytu plików
+
+[Pobierz ZIP z APK dla Androida 15 / ARM64](https://github.com/DaWitt99/No-Tie/raw/refs/heads/installers/android-v0.1.0/installers/No-Tie-Android-0.1.0-arm64-api35-storage-fix.zip)
+
+Paczka zawiera pełny APK No-Tie 0.1.0 (ARM64, `targetSdk 35`, `minSdk 24`). Podpis i identyfikator aplikacji są zgodne z poprzednią paczką, więc można zainstalować aktualizację bez odinstalowywania No-Tie. Poprawka nadaje aplikacji dostęp do jej własnego katalogu Dokumenty i pokazuje szczegół błędu, jeśli odczyt nadal się nie powiedzie.
+
+SHA-256 ZIP: `c0cced561ef17f5b73a857779471a4cf2d1d250439e71d8214d9b1c841a9b8f9`
