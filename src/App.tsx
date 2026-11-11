@@ -24,10 +24,12 @@ import { parseTasks, updateTaskLine, type ParsedTask } from './knowledge'
 import { listOllamaModels, type OllamaModel } from './ollama'
 import { ReviewSessionDialog } from './ReviewSessionDialog'
 import { ReviewSessionView } from './ReviewSessionView'
+import { ReviewSessionsOverview } from './ReviewSessionsOverview'
 import { checkpointReviewSession } from './reviews'
-import { getAssets, getAttachments, getFolderColors, getFolders, getNoteTemplates, getNoteVersions, getNotes, getReviewSessions, getSavedSearches, hasInitialized, markInitialized, removeAssetsForNote, removeAttachmentsForNote, removeAttachment, removeFolderFromDisk, removeNote, saveAsset, saveAttachment, saveFolderColors, saveFolders, saveNote, saveNoteTemplates, saveNoteVersion, saveNoteVersions, saveReviewSessions, saveSavedSearches, storageLocationLabel, usesNativeFiles } from './storage'
-import type { Note, NoteAsset, NoteAttachment, NoteTemplate, NoteVersion, ReviewSession, SavedSearch } from './types'
+import { archiveAttachment, getAssets, getAttachmentHistory, getAttachments, getFolderColors, getFolders, getNoteTemplates, getNoteVersions, getNotes, getReviewSessions, getSavedSearches, hasInitialized, markInitialized, removeAssetsForNote, removeAttachmentsForNote, removeAttachment, removeFolderFromDisk, removeNote, restoreArchivedAttachment, saveArchivedAttachment, saveAsset, saveAttachment, saveFolderColors, saveFolders, saveNote, saveNoteTemplates, saveNoteVersion, saveNoteVersions, saveReviewSessions, saveSavedSearches, storageLocationLabel, usesNativeFiles } from './storage'
+import type { Note, NoteAsset, NoteAttachment, NoteAttachmentReference, NoteTemplate, NoteVersion, ReviewSession, SavedSearch } from './types'
 import { dispatchWikiLinkInsert, replaceWikiLinkTarget } from './wikiLinks'
+import { fileFingerprint } from './fileFingerprint'
 import './App.css'
 
 type Filter = 'all' | 'favorites' | string
@@ -37,6 +39,8 @@ type DeleteTarget = EntryTarget & { label: string; noteCount: number }
 type EntryColor = { value: string; label: string }
 type EntryPointerDrag = { target: EntryTarget; label: string; pointerId: number; startX: number; startY: number; started: boolean }
 type EntryDragVisual = { target: EntryTarget; label: string; x: number; y: number; dropFolder: string | null }
+
+const REVIEW_SESSIONS_OVERVIEW_ID = '__no_tie_review_sessions_overview__'
 
 function folderParents(path: string): string[] {
   const parts = path.split('/').map(part => part.trim()).filter(Boolean)
@@ -79,7 +83,7 @@ const dataUrlFromFile = async (file: File, mimeType: string) => {
   const bytes = new Uint8Array(await file.arrayBuffer())
   let binary = ''
   for (let start = 0; start < bytes.length; start += 0x8000) binary += String.fromCharCode(...bytes.subarray(start, start + 0x8000))
-  return `data:${mimeType};base64,${btoa(binary)}`
+  return { dataUrl: `data:${mimeType};base64,${btoa(binary)}`, contentHash: fileFingerprint(bytes) }
 }
 const escapeRegExp = (value: string) => value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
 const excerpt = (content: string) => content.replace(/^#+\s*/gm, '').replace(/[>*_`!-]/g, '').replace(/\(\.\/assets\/[^)]+\)/g, '').replace(/\s+/g, ' ').trim().slice(0, 110)
@@ -95,6 +99,21 @@ const markdownTextForCounts = (markdown: string) => markdown
   .replace(/^\s{0,3}(?:#{1,6}\s+|>\s?|[-+*]\s+|\d+[.)]\s+)/gm, '')
   .replace(/[*_~]/g, '')
   .replace(/\\([*_`])/g, '$1')
+const attachmentBytesFromDataUrl = (dataUrl: string) => {
+  const binary = atob(dataUrl.slice(dataUrl.indexOf(',') + 1))
+  return Uint8Array.from(binary, character => character.charCodeAt(0))
+}
+const attachmentReference = (attachment: NoteAttachment): NoteAttachmentReference => ({
+  fileName: attachment.fileName,
+  mimeType: attachment.mimeType,
+  size: attachment.size,
+  contentHash: attachment.contentHash ?? fileFingerprint(attachmentBytesFromDataUrl(attachment.dataUrl)),
+})
+const sameAttachmentReference = (attachment: NoteAttachment, reference: NoteAttachmentReference) => {
+  const current = attachmentReference(attachment)
+  return current.fileName === reference.fileName && current.mimeType === reference.mimeType && current.size === reference.size
+    && (!reference.contentHash || current.contentHash === reference.contentHash)
+}
 function polishCount(value: number, forms: [string, string, string]) {
   const mod100 = value % 100
   const mod10 = value % 10
@@ -348,6 +367,10 @@ function App() {
         if (event.cancelable) event.preventDefault()
         const targetElement = findDropTarget(event.clientX, event.clientY)
         if (targetElement) entryDropAction.current(drag.target, targetElement.dataset.dropFolder ?? '')
+        else {
+          const underPointer = document.elementFromPoint(event.clientX, event.clientY)
+          if (underPointer instanceof Element && underPointer.closest('.sidebar')) entryDropAction.current(drag.target, '')
+        }
         suppressEntryClick.current = true
         window.setTimeout(() => { suppressEntryClick.current = false }, 0)
       }
@@ -369,6 +392,7 @@ function App() {
   }, [])
   const selectedNote = notes.find(note => note.id === selectedId)
   const activeReviewSession = reviewSessions.find(session => session.id === activeReviewSessionId)
+  const showingReviewSessionsOverview = activeReviewSessionId === REVIEW_SESSIONS_OVERVIEW_ID
   const notesRef = useRef<Note[]>([])
   useLayoutEffect(() => { notesRef.current = notes }, [notes])
   useLayoutEffect(() => {
@@ -422,13 +446,13 @@ function App() {
     if (latest) await saveNoteVersion(latest)
   }
 
-  function patchNote(id: string, patch: Partial<Note>) {
+  function patchNote(id: string, patch: Partial<Note>, recordPersistentHistory = true) {
     const existing = notes.find(note => note.id === id)
     if (existing && Object.entries(patch).every(([key, value]) => JSON.stringify(existing[key as keyof Note]) === JSON.stringify(value))) return
     setSaved(false)
     const updatedAt = currentTimestamp()
     const updated = existing ? { ...existing, ...patch, updatedAt } : undefined
-    if (existing && updated) scheduleNoteVersion(updated, existing)
+    if (existing && updated && recordPersistentHistory) scheduleNoteVersion(updated, existing)
     setNotes(current => current.map(note => {
       if (note.id !== id) return note
       const next = { ...note, ...patch, updatedAt }
@@ -524,6 +548,7 @@ function App() {
   async function addAttachments(files: File[]) {
     if (!selectedNote) return
     const note = selectedNote
+    await saveNoteVersion(note)
     const additions: NoteAttachment[] = []
     const usedNames = new Set(attachments.filter(attachment => attachment.noteId === note.id).map(attachment => attachment.fileName.toLocaleLowerCase('pl')))
     let content = note.content
@@ -533,14 +558,16 @@ function App() {
       if (!mimeType || (file.type && file.type !== mimeType)) { setToast(`Typ pliku „${file.name}” nie jest obsługiwany.`); window.setTimeout(() => setToast(''), 3000); continue }
       if (file.size > 15 * 1024 * 1024) { setToast(`Plik „${file.name}” przekracza limit 15 MB.`); window.setTimeout(() => setToast(''), 3000); continue }
       const fileName = uniqueAttachmentName(safeAttachmentName(file.name), usedNames)
-      const attachment: NoteAttachment = { id: `${note.id}:${crypto.randomUUID()}`, noteId: note.id, fileName, mimeType, dataUrl: await dataUrlFromFile(file, mimeType), size: file.size }
+      const payload = await dataUrlFromFile(file, mimeType)
+      const attachment: NoteAttachment = { id: `${note.id}:${crypto.randomUUID()}`, noteId: note.id, fileName, mimeType, ...payload, size: file.size }
       await saveAttachment(attachment)
       additions.push(attachment)
       if (mimeType.startsWith('image/')) content += `\n\n![${fileName}](./assets/${fileName})`
     }
     if (additions.length) {
       setAttachments(current => [...current, ...additions])
-      patchNote(note.id, { content })
+      patchNote(note.id, { content }, false)
+      await saveNoteVersion({ ...note, content, updatedAt: currentTimestamp() })
       setEditorRevision(value => value + 1)
       setToast(`Dodano ${additions.length} ${additions.length === 1 ? 'załącznik' : 'załączniki'}.`)
       window.setTimeout(() => setToast(''), 2500)
@@ -548,13 +575,17 @@ function App() {
   }
 
   async function deleteAttachment(attachment: NoteAttachment) {
+    const note = notes.find(item => item.id === attachment.noteId)
+    if (note) await saveNoteVersion(note)
+    await archiveAttachment(attachment)
     await removeAttachment(attachment)
     setAttachments(current => current.filter(item => item.id !== attachment.id))
-    const note = notes.find(item => item.id === attachment.noteId)
+    let content = note?.content
     if (note) {
       const path = escapeRegExp(`./assets/${attachment.fileName}`)
-      const content = note.content.replace(new RegExp(`!?\\[[^\\]]*\\]\\(${path}\\)`, 'g'), '').replace(/\n{3,}/g, '\n\n')
-      if (content !== note.content) patchNote(note.id, { content })
+      content = note.content.replace(new RegExp(`!?\\[[^\\]]*\\]\\(${path}\\)`, 'g'), '').replace(/\n{3,}/g, '\n\n')
+      if (content !== note.content) patchNote(note.id, { content }, false)
+      await saveNoteVersion({ ...note, content, updatedAt: currentTimestamp() })
     }
     setEditorRevision(value => value + 1)
   }
@@ -588,19 +619,78 @@ function App() {
     historyDialogNoteIdRef.current = ''
   }
 
-  function restoreNoteVersion(version: NoteVersion) {
+  async function restoreNoteVersion(version: NoteVersion) {
     if (!selectedNote || selectedNote.id !== version.noteId) return
     const snapshot = version.note
-    patchNote(selectedNote.id, {
+    await saveNoteVersion(selectedNote)
+    const currentAttachments = attachments.filter(attachment => attachment.noteId === version.noteId)
+    const historicalAttachments = await getAttachmentHistory(version.noteId)
+    const legacyNames = version.attachments === undefined
+      ? [...snapshot.content.matchAll(/\]\(\.\/assets\/([^\s)]+)\)/g)].map(match => match[1]).filter(fileName => !fileName.toLowerCase().endsWith('.svg'))
+      : []
+    const references = version.attachments ?? [...new Map(legacyNames.flatMap(fileName => {
+      const attachment = currentAttachments.find(item => item.fileName === fileName)
+        ?? historicalAttachments.find(item => item.fileName === fileName)
+      return attachment ? [[attachment.fileName, attachmentReference(attachment)]] : []
+    })).values()]
+    const missingFileNames = new Set<string>()
+    let restoredAttachments = [...currentAttachments]
+
+    if (version.attachments !== undefined) {
+      const keep = currentAttachments.filter(attachment => references.some(reference => sameAttachmentReference(attachment, reference)))
+      const remove = currentAttachments.filter(attachment => !keep.includes(attachment))
+      for (const attachment of remove) {
+        await archiveAttachment(attachment)
+        await removeAttachment(attachment)
+      }
+      restoredAttachments = keep
+    }
+
+    for (const reference of references) {
+      if (restoredAttachments.some(attachment => sameAttachmentReference(attachment, reference))) continue
+      const restored = await restoreArchivedAttachment(version.noteId, reference)
+      if (restored) restoredAttachments.push(restored)
+      else missingFileNames.add(reference.fileName)
+    }
+
+    for (const fileName of legacyNames) {
+      if (restoredAttachments.some(attachment => attachment.fileName === fileName)) continue
+      const archived = historicalAttachments.find(attachment => attachment.fileName === fileName)
+      if (!archived) { missingFileNames.add(fileName); continue }
+      const restored = await restoreArchivedAttachment(version.noteId, attachmentReference(archived))
+      if (restored) restoredAttachments.push(restored)
+      else missingFileNames.add(fileName)
+    }
+
+    if (version.attachments !== undefined) {
+      const keepIds = new Set(restoredAttachments.map(attachment => attachment.id))
+      setAttachments(current => [...current.filter(attachment => attachment.noteId !== version.noteId), ...restoredAttachments.filter(attachment => keepIds.has(attachment.id))])
+    } else if (restoredAttachments.length !== currentAttachments.length) {
+      const restoredIds = new Set(restoredAttachments.map(attachment => attachment.id))
+      setAttachments(current => [...current.filter(attachment => attachment.noteId !== version.noteId), ...restoredAttachments.filter(attachment => restoredIds.has(attachment.id))])
+    }
+
+    let restoredContent = snapshot.content
+    for (const fileName of missingFileNames) {
+      const path = escapeRegExp(`./assets/${fileName}`)
+      restoredContent = restoredContent.replace(new RegExp(`!?\\[[^\\]]*\\]\\(${path}\\)`, 'g'), '')
+    }
+    const restoredNote = {
+      ...selectedNote,
       title: snapshot.title,
-      content: snapshot.content,
+      content: restoredContent,
       folder: snapshot.folder,
       color: snapshot.color,
       tags: [...snapshot.tags],
       favorite: snapshot.favorite,
-    })
+      updatedAt: currentTimestamp(),
+    }
+    patchNote(selectedNote.id, restoredNote, false)
+    await saveNoteVersion(restoredNote)
     setEditorRevision(value => value + 1)
-    setToast('Przywrócono wybraną wersję notatki.')
+    setToast(missingFileNames.size
+      ? `Przywrócono wersję. ${missingFileNames.size} brakujących załączników nie udało się odzyskać.`
+      : 'Przywrócono wybraną wersję notatki wraz z jej załącznikami.')
     window.setTimeout(() => setToast(''), 2800)
   }
 
@@ -757,6 +847,27 @@ function App() {
     setOpenActionMenu('')
   }
 
+  function removeNotesFromReviewSessions(noteIdsToRemove: Set<string>) {
+    if (!noteIdsToRemove.size) return
+    const now = Date.now()
+    setReviewSessions(current => current.map(session => {
+      if (!session.noteIds.some(id => noteIdsToRemove.has(id))) return session
+      const checkpointed = checkpointReviewSession(session, now)
+      const noteIds = checkpointed.noteIds.filter(id => !noteIdsToRemove.has(id))
+      const status = !noteIds.length && checkpointed.status === 'running' ? 'paused' : checkpointed.status
+      const noteTimesMs = Object.fromEntries(Object.entries(checkpointed.noteTimesMs).filter(([id]) => noteIds.includes(id)))
+      return {
+        ...checkpointed,
+        noteIds,
+        noteTimesMs,
+        activeNoteId: checkpointed.activeNoteId && noteIds.includes(checkpointed.activeNoteId) ? checkpointed.activeNoteId : noteIds[0] ?? null,
+        status,
+        runningSince: status === 'running' ? checkpointed.runningSince : undefined,
+        updatedAt: now,
+      }
+    }))
+  }
+
   function commitRename() {
     const value = renameDraft.trim()
     if (!renameTarget || !value) return
@@ -811,6 +922,7 @@ function App() {
     setAssets(current => current.filter(asset => asset.noteId !== id))
     setAttachments(current => current.filter(attachment => attachment.noteId !== id))
     setNotes(current => current.filter(note => note.id !== id))
+    removeNotesFromReviewSessions(new Set([id]))
     if (selectedId === id) selectNote(notes.find(note => note.id !== id)?.id ?? '')
     setSaved(true)
   }
@@ -829,6 +941,7 @@ function App() {
           await removeNote(note.id)
         }))
         const removedIds = new Set(removedNotes.map(note => note.id))
+        removeNotesFromReviewSessions(removedIds)
         setAssets(current => current.filter(asset => !removedIds.has(asset.noteId)))
         setAttachments(current => current.filter(attachment => !removedIds.has(attachment.noteId)))
         setNotes(current => current.filter(note => !removedIds.has(note.id)))
@@ -1096,7 +1209,9 @@ function App() {
     try {
       await Promise.all(notes.map(note => flushNoteVersion(note.id, note)))
       const versions = (await Promise.all(notes.map(note => getNoteVersions(note.id)))).flat()
-      const savedPath = await exportArchiveToFolder(notes, assets, versions, attachments)
+      const attachmentHistory = (await Promise.all(notes.map(note => getAttachmentHistory(note.id)))).flat()
+      const workspace = { reviewSessions, savedSearches, noteTemplates: templates, folderColors }
+      const savedPath = await exportArchiveToFolder(notes, assets, versions, attachments, workspace, attachmentHistory)
       if (!savedPath) return
       setToast(`Paczka została zapisana: ${savedPath}`)
     } catch (error) {
@@ -1164,28 +1279,41 @@ function App() {
       const imported = parseArchive(new Uint8Array(await file.arrayBuffer()))
       setSaved(false)
       await Promise.all(imported.notes.map(async note => {
+        await removeAssetsForNote(note.id)
+        await removeAttachmentsForNote(note.id)
         await saveNote(note)
         const versions = imported.versions.filter(version => version.noteId === note.id)
-        if (versions.length) await saveNoteVersions(note.id, versions)
-        else await saveNoteVersion(note)
+        await saveNoteVersions(note.id, versions)
+        if (!versions.length) await saveNoteVersion(note)
       }))
       await Promise.all(imported.assets.map(saveAsset))
       await Promise.all(imported.attachments.map(saveAttachment))
+      await Promise.all(imported.attachmentHistory.map(saveArchivedAttachment))
+      setFolderRegistry(current => [...new Set([...current, ...imported.notes.flatMap(note => folderParents(note.folder))])])
       setNotes(current => {
         const byId = new Map(current.map(note => [note.id, note]))
         imported.notes.forEach(note => byId.set(note.id, note))
         return [...byId.values()].sort((a, b) => b.updatedAt - a.updatedAt)
       })
       setAssets(current => {
-        const byId = new Map(current.map(asset => [asset.id, asset]))
-        imported.assets.forEach(asset => byId.set(asset.id, asset))
-        return [...byId.values()]
+        const importedIds = new Set(imported.notes.map(note => note.id))
+        return [...current.filter(asset => !importedIds.has(asset.noteId)), ...imported.assets]
       })
       setAttachments(current => {
-        const byId = new Map(current.map(attachment => [attachment.id, attachment]))
-        imported.attachments.forEach(attachment => byId.set(attachment.id, attachment))
-        return [...byId.values()]
+        const importedIds = new Set(imported.notes.map(note => note.id))
+        return [...current.filter(attachment => !importedIds.has(attachment.noteId)), ...imported.attachments]
       })
+      if (imported.workspace) {
+        const availableNoteIds = new Set([...notes.map(note => note.id), ...imported.notes.map(note => note.id)])
+        setReviewSessions(imported.workspace.reviewSessions.map(session => {
+          const noteIds = session.noteIds.filter(id => availableNoteIds.has(id))
+          const noteTimesMs = Object.fromEntries(Object.entries(session.noteTimesMs).filter(([id]) => noteIds.includes(id)))
+          return { ...session, noteIds, noteTimesMs, activeNoteId: session.activeNoteId && noteIds.includes(session.activeNoteId) ? session.activeNoteId : noteIds[0] ?? null }
+        }))
+        setSavedSearches(imported.workspace.savedSearches)
+        setTemplates(imported.workspace.noteTemplates.length ? imported.workspace.noteTemplates : defaultTemplates)
+        setFolderColors(imported.workspace.folderColors)
+      }
       selectNote(imported.notes[0].id)
       setActiveFilter('all')
       setEditorRevision(value => value + 1)
@@ -1252,18 +1380,11 @@ function App() {
             <button className="nav-item" onClick={() => setShowSavedSearches(true)}><BookmarkPlus size={16} /><span>Zapisane widoki</span><span className="nav-count">{savedSearches.length}</span></button>
             {savedSearches.map(search => <button className="nav-item saved-search-nav" key={search.id} title={search.name} onClick={() => applySavedSearch(search)}><Search size={14} /><span>{search.name}</span></button>)}
             <button className="nav-item" onClick={() => setShowTemplateManager(true)}><FilePlus2 size={16} /><span>Szablony</span></button>
-          </div>
-          <div className="sidebar-section review-sidebar-section">
-            <div className="section-heading"><span className="section-label">POWTÓRKI</span><button className="tiny-icon" title="Nowa powtórka" aria-label="Nowa powtórka" onClick={() => openReviewSessionEditor()}><Plus size={15} /></button></div>
-            <button className="nav-item review-new-button" onClick={() => openReviewSessionEditor()}><Repeat2 size={16} /><span>Nowa powtórka</span></button>
-            {reviewSessions.map(session => <button key={session.id} className={`nav-item review-session-nav ${activeReviewSessionId === session.id ? 'active' : ''}`} onClick={() => { setActiveReviewSessionId(session.id); setMobileDrawer('none') }} title={session.title} aria-current={activeReviewSessionId === session.id ? 'page' : undefined}><Repeat2 size={14} /><span className={`review-session-dot ${session.status === 'running' ? 'running' : ''}`} /><span>{session.title}</span><span className="nav-count">{session.noteIds.length}</span></button>)}
-            {!reviewSessions.length && <p className="review-sidebar-empty">Utwórz sesję, aby zapisać listę notatek do powtórki.</p>}
+            <button className={`nav-item ${showingReviewSessionsOverview || activeReviewSession ? 'active' : ''}`} onClick={() => { setActiveReviewSessionId(REVIEW_SESSIONS_OVERVIEW_ID); setMobileDrawer('none') }}><Repeat2 size={16} /><span>Powtórki</span><span className="nav-count">{reviewSessions.length}</span></button>
+            <button className="nav-item review-new-button" onClick={() => openReviewSessionEditor()}><Plus size={15} /><span>Nowa powtórka</span></button>
           </div>
           <div className="sidebar-section folders-section" data-drop-folder="">
             <div className="section-heading"><span className="section-label">FOLDERY</span><button className="tiny-icon" title="Dodaj folder" aria-label="Dodaj folder" onClick={() => { setFolderDraft(''); setShowFolderDialog(true) }}><Plus size={15} /></button></div>
-            <div className={`folder-drop-row root-folder-drop ${activeFilter === 'root' ? 'active' : ''}`} data-drop-folder="">
-              <button className={`nav-item folder-item ${activeFilter === 'root' && !activeReviewSession ? 'active' : ''}`} onClick={() => { setActiveReviewSessionId(''); setActiveFilter('root'); setMobileDrawer('none') }}><Folder size={16} /><span>Bez folderu</span><span className="nav-count">{notes.filter(note => !note.folder).length}</span></button>
-            </div>
             {notes.filter(note => !note.folder).map(note => renderNoteFile(note))}
             {renderFolderTree('')}
             {!folders.length && !notes.some(note => !note.folder) && <p className="empty-hint">Utwórz folder lub przeciągnij tu notatkę.</p>}
@@ -1276,7 +1397,7 @@ function App() {
       </aside>
 
       <section className={`notes-panel ${mobileDrawer === 'notes' ? 'mobile-visible' : ''}`} hidden={!showLibrary}>
-        <div className="notes-panel-heading"><div><p className="eyebrow">TWOJA BIBLIOTEKA</p><h1>{activeFilter === 'all' ? 'Notatki' : activeFilter === 'favorites' ? 'Ulubione' : activeFilter === 'root' ? 'Bez folderu' : activeFilter.split('/').at(-1)}</h1></div><button className="mobile-close icon-button" onClick={() => setMobileDrawer('none')} aria-label="Zamknij listę"><X size={18} /></button></div>
+        <div className="notes-panel-heading"><div><p className="eyebrow">TWOJA BIBLIOTEKA</p><h1>{activeFilter === 'all' ? 'Notatki' : activeFilter === 'favorites' ? 'Ulubione' : activeFilter === 'root' ? 'Poziom główny' : activeFilter.split('/').at(-1)}</h1></div><button className="mobile-close icon-button" onClick={() => setMobileDrawer('none')} aria-label="Zamknij listę"><X size={18} /></button></div>
         <div className="search-controls">
           <label className="search-box"><Search size={16} /><input value={query} onChange={event => { setQuery(event.target.value); setQuickSearchActiveIndex(0) }} placeholder="Szukaj notatek…" title="Szukaj także po treści, tagach i folderach. Obsługuje tag:, folder:, title: i content:." /><kbd>⌘/Ctrl K</kbd></label>
           <button className={`search-filter-button ${showSearchFilters ? 'active' : ''}`} type="button" aria-label="Filtry wyszukiwania" aria-expanded={showSearchFilters} title="Filtruj po tagu i folderze" onClick={() => setShowSearchFilters(value => !value)}><SlidersHorizontal size={16} /></button>
@@ -1295,7 +1416,7 @@ function App() {
               {noteDisplayMode === 'full' && <div className="note-card-top"><span className="note-date">{dateLabel(note.updatedAt)}</span>{note.favorite && <Star size={14} className="favorite-mini" fill="currentColor" />}</div>}
               <strong>{note.title || 'Bez tytułu'}</strong>
               {noteDisplayMode === 'full' && <p>{excerpt(note.content) || 'Pusta notatka'}</p>}
-              {noteDisplayMode !== 'names' && <div className="note-card-bottom">{noteDisplayMode === 'full' && <span className="folder-pill"><Folder size={12} />{note.folder || 'Bez folderu'}</span>}{note.tags.map(tag => <span key={tag} className="tag-pill">{tag}</span>)}</div>}
+              {noteDisplayMode !== 'names' && <div className="note-card-bottom">{noteDisplayMode === 'full' && note.folder && <span className="folder-pill"><Folder size={12} />{note.folder}</span>}{note.tags.map(tag => <span key={tag} className="tag-pill">{tag}</span>)}</div>}
             </button>
           ))}
           {!visibleNotes.length && <div className="empty-state compact"><div className="empty-illustration"><Search size={22} /></div><strong>Brak pasujących notatek</strong><span>Spróbuj zmienić wyszukiwanie albo utwórz nową notatkę.</span><button className="button secondary" onClick={() => createNote()}><Plus size={15} />Nowa notatka</button></div>}
@@ -1306,7 +1427,7 @@ function App() {
       <section className="editor-panel">
         <header className="topbar">
           <div className="mobile-actions"><button className="icon-button" onClick={() => setMobileDrawer('sidebar')} aria-label="Otwórz menu"><Menu size={19} /></button><button className="icon-button" onClick={() => { if (!showLibrary) { localStorage.setItem('no-tie-library-visible', 'true'); setShowLibrary(true) } setMobileDrawer('notes') }} aria-label={showLibrary ? 'Pokaż notatki' : 'Pokaż bibliotekę'}><PanelLeft size={18} /></button></div>
-          <div className="breadcrumb"><span>{activeReviewSession ? 'Powtórki' : 'Notatki'}</span><span className="crumb-slash">/</span><span>{activeReviewSession?.title ?? selectedNote?.folder ?? 'Osobiste'}</span></div>
+          <div className="breadcrumb"><span>{showingReviewSessionsOverview || activeReviewSession ? 'Powtórki' : 'Notatki'}</span><span className="crumb-slash">/</span><span>{showingReviewSessionsOverview ? 'Wszystkie powtórki' : activeReviewSession?.title ?? selectedNote?.folder ?? 'Osobiste'}</span></div>
           <div className="topbar-actions">
             <span className={`save-indicator ${saved ? 'is-saved' : ''}`}><span className="save-dot" />{saved ? 'Zapisano' : 'Zapisywanie…'}</span>
             {selectedNote && <button className="icon-button note-history-button" onClick={() => void openNoteHistory()} title="Historia wersji notatki" aria-label="Historia wersji notatki"><History size={17} /></button>}
@@ -1318,7 +1439,16 @@ function App() {
           </div>
         </header>
 
-        {activeReviewSession ? (
+        {showingReviewSessionsOverview ? (
+          <ReviewSessionsOverview
+            sessions={reviewSessions}
+            notes={notes}
+            now={reviewClockNow}
+            onOpen={sessionId => { setActiveReviewSessionId(sessionId); setMobileDrawer('none') }}
+            onCreate={() => openReviewSessionEditor()}
+            onEdit={openReviewSessionEditor}
+          />
+        ) : activeReviewSession ? (
           <ReviewSessionView
             session={activeReviewSession}
             notes={notes}
@@ -1358,7 +1488,7 @@ function App() {
           <div className="empty-state editor-empty"><div className="empty-illustration"><FilePlus2 size={25} /></div><p className="eyebrow">TWOJA PRZESTRZEŃ</p><h2>Zapisz pierwszą myśl</h2><span>Twoje notatki będą dostępne lokalnie i offline.</span><button className="button primary" onClick={() => createNote()}><Plus size={16} />Nowa notatka</button></div>
         )}
       </section>
-      <ChatPanel open={showChat} baseUrl={ollamaBaseUrl} model={ollamaModel} note={selectedNote} notes={notes} assets={assets} onClose={closeChat} onOpenSettings={openOllamaSettings} />
+      <ChatPanel open={showChat} baseUrl={ollamaBaseUrl} model={ollamaModel} note={selectedNote} notes={notes} assets={assets} attachments={attachments} onClose={closeChat} onOpenSettings={openOllamaSettings} />
       {showHelp && <HelpDialog onClose={() => setShowHelp(false)} />}
       {entryDragVisual && <div className="entry-drag-ghost" style={{ left: entryDragVisual.x, top: entryDragVisual.y }} aria-hidden="true"><div>{entryDragVisual.target.kind === 'folder' ? <Folder size={15} /> : <FileText size={15} />}<strong>{entryDragVisual.label}</strong></div><span>{entryDragVisual.dropFolder === null ? 'Upuść na folder' : entryDragVisual.dropFolder ? `Przenieś do: ${entryDragVisual.dropFolder}` : 'Przenieś do: Bez folderu'}</span></div>}
       {showDrawing && selectedNote && <Suspense fallback={<div className="modal-backdrop"><div className="loading-screen">Otwieram edytor SVG…</div></div>}><VectorEditor asset={editingAsset} onClose={() => { setShowDrawing(false); setEditingAsset(undefined) }} onSave={svg => void saveDrawing(svg)} /></Suspense>}
@@ -1402,7 +1532,7 @@ function App() {
         }}
         onClose={() => setShowNoteLinkDialog(false)}
       />}
-      {showNoteHistory && selectedNote && historyDialogNoteId === selectedNote.id && <NoteHistoryDialog note={selectedNote} versions={noteVersions} loading={noteVersionsLoading} onRestore={restoreNoteVersion} onClose={closeNoteHistory} />}
+      {showNoteHistory && selectedNote && historyDialogNoteId === selectedNote.id && <NoteHistoryDialog note={selectedNote} attachments={currentAttachments} versions={noteVersions} loading={noteVersionsLoading} onRestore={restoreNoteVersion} onClose={closeNoteHistory} />}
       {toast && <div className="app-toast" role="status"><Check size={16} />{toast}</div>}
       {mobileDrawer !== 'none' && <button className="drawer-scrim" aria-label="Zamknij menu" onClick={() => setMobileDrawer('none')} />}
     </main>

@@ -16,6 +16,7 @@ export type NoteVersion = {
   noteId: string
   createdAt: number
   note: Note
+  attachments?: NoteAttachmentReference[]
 }
 
 export type NoteAsset = {
@@ -32,6 +33,13 @@ export type NoteAttachment = {
   mimeType: string
   dataUrl: string
   size: number
+  contentHash?: string
+}
+
+export type NoteAttachmentReference = Pick<NoteAttachment, 'fileName' | 'mimeType' | 'size' | 'contentHash'>
+
+export type NoteAttachmentHistory = NoteAttachment & {
+  deletedAt: number
 }
 
 export type SavedSearch = {
@@ -62,4 +70,11 @@ export type ReviewSession = {
   activeNoteId: string | null
   status: ReviewSessionStatus
   runningSince?: number
+}
+
+export type WorkspaceBackup = {
+  reviewSessions: ReviewSession[]
+  savedSearches: SavedSearch[]
+  noteTemplates: NoteTemplate[]
+  folderColors: Record<string, string>
 }

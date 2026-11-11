@@ -14,10 +14,6 @@ import {
   wrapInOrderedListCommand,
 } from '@milkdown/kit/preset/commonmark'
 import {
-  addColAfterCommand,
-  addColBeforeCommand,
-  addRowAfterCommand,
-  addRowBeforeCommand,
   columnResizingPlugin,
   gfm,
   toggleStrikethroughCommand,
@@ -379,13 +375,6 @@ export function MarkdownEditor({
     style.textContent = rules.join('\n')
   }
 
-  function selectTableCell(view: EditorView, table: import('@milkdown/kit/prose/model').Node, tablePos: number, row: number, column: number) {
-    const cellPos = cellPositionAt(table, tablePos, row, column)
-    if (cellPos === undefined) return
-    const cursor = Math.min(cellPos + 2, view.state.doc.content.size)
-    view.dispatch(view.state.tr.setSelection(TextSelection.near(view.state.doc.resolve(cursor))))
-  }
-
   function saveEditorMarkdown(editor: Editor) {
     const view = editor.ctx.get(editorViewCtx)
     const updated = markdownWithTableColumnWidths(markdownToWikiLinks(markdownFromEditor(editor.action(getMarkdown()), initialDocument.assets, initialDocument.attachments)), view)
@@ -411,18 +400,49 @@ export function MarkdownEditor({
       const tablePos = currentTablePosition(view, target)
       const table = view.state.doc.nodeAt(tablePos)
       if (!table || table.type.name !== 'table') return
-      selectTableCell(view, table, tablePos, target.row, target.column)
 
       if (action === 'copy-table') {
         copiedMarkdown = getMarkdown({ from: tablePos, to: tablePos + table.nodeSize })(ctx).trim() || markdownForTable(table)
         return
       }
       if (action === 'add-row-before' || action === 'add-row-after' || action === 'add-column-before' || action === 'add-column-after') {
-        const commands = ctx.get(commandsCtx)
-        const command = action === 'add-row-before' ? addRowBeforeCommand
-          : action === 'add-row-after' ? addRowAfterCommand
-            : action === 'add-column-before' ? addColBeforeCommand : addColAfterCommand
-        commands.call(command.key)
+        const rows: import('@milkdown/kit/prose/model').Node[] = []
+        table.forEach(row => rows.push(row))
+        if (action === 'add-row-before' || action === 'add-row-after') {
+          if (target.row === 0 && action === 'add-row-before') return
+          const insertAfter = action === 'add-row-after'
+          const insertAt = target.row + (insertAfter ? 1 : 0)
+          const template = rows[target.row === 0 ? 1 : target.row] ?? rows[1]
+          if (!template) return
+          const cells: import('@milkdown/kit/prose/model').Node[] = []
+          for (let column = 0; column < template.childCount; column++) {
+            const reference = template.child(column)
+            const blankCell = reference.type.createAndFill(reference.attrs, undefined, reference.marks)
+            if (!blankCell) return
+            cells.push(blankCell)
+          }
+          const blankRow = template.type.create(template.attrs, Fragment.fromArray(cells), template.marks)
+          rows.splice(insertAt, 0, blankRow)
+        } else {
+          const insertAfter = action === 'add-column-after'
+          const nextRows = rows.map(row => {
+            const cells: import('@milkdown/kit/prose/model').Node[] = []
+            row.forEach((cell, _offset, column) => {
+              if (!insertAfter && column === target.column) {
+                const blankCell = cell.type.createAndFill(cell.attrs, undefined, cell.marks)
+                if (blankCell) cells.push(blankCell)
+              }
+              cells.push(cell)
+              if (insertAfter && column === target.column) {
+                const blankCell = cell.type.createAndFill(cell.attrs, undefined, cell.marks)
+                if (blankCell) cells.push(blankCell)
+              }
+            })
+            return row.copy(Fragment.fromArray(cells))
+          })
+          rows.splice(0, rows.length, ...nextRows)
+        }
+        view.dispatch(view.state.tr.replaceWith(tablePos, tablePos + table.nodeSize, table.copy(Fragment.fromArray(rows))))
         changedDocument = true
         return
       }
@@ -485,19 +505,13 @@ export function MarkdownEditor({
       const cell = view.state.doc.nodeAt(cellPos)
       if (!cell) return
       const markType = highlightSchema.type(ctx)
-      const textRanges: { from: number; to: number }[] = []
-      cell.descendants((node, offset) => {
-        if (!node.isText) return
-        const from = cellPos + 1 + offset
-        textRanges.push({ from, to: from + node.nodeSize })
-      })
       const transaction = view.state.tr
-      if (!textRanges.length && color) {
+      const from = cellPos + 2
+      const to = cellPos + cell.nodeSize - 2
+      if (to <= from && color) {
         transaction.insert(cellPos + 2, view.state.schema.text('\u200b', [markType.create({ color })]))
       } else {
-        const from = textRanges[0]?.from
-        const to = textRanges.at(-1)?.to
-        if (from === undefined || to === undefined) return
+        if (to <= from) return
         transaction.removeMark(from, to, markType)
         if (color) transaction.addMark(from, to, markType.create({ color }))
         else if (cell.textContent === '\u200b') transaction.delete(from, to)
@@ -675,6 +689,7 @@ export function MarkdownEditor({
       left={hoverTable.left}
       top={hoverTable.top}
       row={hoverTable.row}
+      column={hoverTable.column}
       filterValue={tableFilterView?.tablePos === hoverTable.tablePos && tableFilterView.column === hoverTable.column ? tableFilterView.value : ''}
       copied={tableCopied}
       onAction={action => applyTableAction(action, hoverTable, false)}
@@ -688,6 +703,7 @@ export function MarkdownEditor({
       left={tableContextMenu.left}
       top={tableContextMenu.top}
       row={tableContextMenu.row}
+      column={tableContextMenu.column}
       filterValue={tableFilterView?.tablePos === tableContextMenu.tablePos && tableFilterView.column === tableContextMenu.column ? tableFilterView.value : ''}
       copied={tableCopied}
       onAction={action => applyTableAction(action, tableContextMenu, true)}

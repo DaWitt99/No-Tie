@@ -168,16 +168,17 @@ const helpSections: HelpSection[] = [
   {
     id: 'ollama',
     title: 'Czat z lokalnym modelem Ollama',
-    summary: 'Czat wysyła wiadomości do lokalnego serwera Ollama. Możesz dołączyć bieżącą notatkę lub całą bibliotekę jako kontekst.',
+    summary: 'Czat wysyła wiadomości do lokalnego serwera Ollama. Możesz dołączyć bieżącą notatkę lub wyszukiwać w bibliotece jako kontekście.',
     steps: [
       'Zainstaluj i uruchom Ollama oraz pobierz model. Otwórz czat ikoną dymku w górnym pasku, a potem ustaw adres serwera i model przyciskiem ustawień.',
       'Domyślny adres to http://localhost:11434. W ustawieniach możesz pobrać listę dostępnych modeli i zapisać wybrany model.',
       'Wpisz pytanie w panelu czatu i naciśnij Enter; Shift+Enter dodaje nowy wiersz. Odpowiedź pojawia się strumieniowo.',
-      'Zaznacz „Bieżąca notatka i schematy SVG”, aby dołączyć kontekst otwartej notatki. Zaznacz „Cała biblioteka”, aby model mógł przeszukiwać wszystkie notatki i schematy.',
-      'Analiza grafiki wymaga modelu obsługującego obrazy/wizję. Schematy SVG są przekazywane jako obrazy wraz z pytaniem.',
+      'Zaznacz „Bieżąca notatka, SVG i załączniki”, aby dołączyć otwarty wpis. „Szukaj w bibliotece” dobiera notatki pasujące do pytania i dołącza ich materiały.',
+      'Do modelu trafia maksymalnie 50 notatek, 48 000 znaków i 20 obrazów lub stron PDF w jednej wiadomości. Przy dużej bibliotece odpowiedź może pominąć niezałączony materiał.',
+      'Analiza grafiki wymaga modelu obsługującego obrazy/wizję. Schematy SVG, obrazy z załączników i strony PDF są przekazywane jako obrazy; z długiego PDF-a dołącza się najwyżej 6 pierwszych stron.',
       'Ikona kosza czyści rozmowę; ustawienia i przycisk zamknięcia są w nagłówku panelu.',
     ],
-    tip: 'Przy włączeniu kontekstu cała biblioteka jest wysyłana do lokalnego serwera modelu. Sprawdź, czy wybrany model i urządzenie poradzą sobie z jej rozmiarem.',
+    tip: 'Kontekst biblioteki dobiera notatki do pytania. Zawsze sprawdź, czy odpowiedź opiera się na trafnych źródłach, zwłaszcza przy dużej bibliotece.',
     keywords: 'AI asystent LLM chat lokalny wizja obraz stream strumieniowanie model URL context kontekst Ollama',
   },
   {
@@ -186,8 +187,10 @@ const helpSections: HelpSection[] = [
     summary: 'Historia pozwala przywrócić wcześniejszą wersję notatki, a paczka ZIP przenieść bibliotekę lub utworzyć kopię zapasową.',
     steps: [
       'Kliknij ikonę historii w górnym pasku, aby zobaczyć zapisane wersje bieżącej notatki i przywrócić jedną z nich.',
+      'Historia obejmuje również załączniki dodane po aktualizacji aplikacji; możesz przywrócić ich wcześniejszy zestaw wraz z treścią notatki. Wersje sprzed aktualizacji mogą nie zawierać informacji o załącznikach.',
       'Ctrl+Z cofa, a Ctrl+Y ponawia ostatnie zmiany podczas edycji notatki lub schematu SVG.',
-      'Kliknij „Eksportuj” i wybierz miejsce zapisu, aby utworzyć paczkę ZIP z notatkami oraz ich schematami, załącznikami i historią.',
+      'Kliknij „Eksportuj” i wybierz miejsce zapisu, aby utworzyć paczkę ZIP z notatkami, schematami, załącznikami oraz historią wersji i usuniętych plików.',
+      'Paczka zawiera też sesje powtórek, zapisane widoki, własne szablony i kolory folderów, aby przenieść ustawienia pracy na inne urządzenie.',
       'Kliknij ikonę importu obok eksportu i wskaż paczkę ZIP. Po imporcie notatki są dostępne w bibliotece.',
     ],
     keywords: 'historia wersja przywróć kopia zapasowa przenieś urządzenie ZIP eksport import undo redo',

@@ -2,7 +2,8 @@ import { isTauri } from '@tauri-apps/api/core'
 import { documentDir, join } from '@tauri-apps/api/path'
 import { exists, mkdir, readDir, readFile, readTextFile, remove, rename, writeFile, writeTextFile } from '@tauri-apps/plugin-fs'
 import { markdownToNote, noteToMarkdown, sanitizeSvg } from './content'
-import type { Note, NoteAsset, NoteAttachment, NoteTemplate, NoteVersion, ReviewSession, ReviewSessionStatus, SavedSearch } from './types'
+import { fileFingerprint } from './fileFingerprint'
+import type { Note, NoteAsset, NoteAttachment, NoteAttachmentHistory, NoteAttachmentReference, NoteTemplate, NoteVersion, ReviewSession, ReviewSessionStatus, SavedSearch } from './types'
 
 const DATABASE = 'no-tie-notes'
 const DATABASE_VERSION = 4
@@ -12,6 +13,7 @@ const REVIEW_SESSIONS_FILE = '.no-tie-review-sessions.json'
 const NOTE_VERSIONS_FILE = '.no-tie-versions.json'
 const SAVED_SEARCHES_FILE = '.no-tie-saved-searches.json'
 const NOTE_TEMPLATES_FILE = '.no-tie-templates.json'
+const NOTE_ATTACHMENT_HISTORY_FILE = '.no-tie-attachment-history.json'
 const MAX_NOTE_VERSIONS = 80
 
 let databasePromise: Promise<IDBDatabase> | undefined
@@ -396,6 +398,12 @@ function normalizeNoteVersions(value: unknown, noteId: string): NoteVersion[] {
     const snapshot = record.note
     if (typeof record.id !== 'string' || record.noteId !== noteId || typeof record.createdAt !== 'number' || !snapshot || snapshot.id !== noteId) return []
     if (typeof snapshot.title !== 'string' || typeof snapshot.content !== 'string' || typeof snapshot.folder !== 'string') return []
+    const attachments = Array.isArray(record.attachments) ? record.attachments.flatMap((item): NoteAttachmentReference[] => {
+      if (!item || typeof item !== 'object') return []
+      const attachment = item as Partial<NoteAttachmentReference>
+      if (typeof attachment.fileName !== 'string' || typeof attachment.mimeType !== 'string' || typeof attachment.size !== 'number') return []
+      return [{ fileName: attachment.fileName, mimeType: attachment.mimeType, size: attachment.size, contentHash: typeof attachment.contentHash === 'string' ? attachment.contentHash : undefined }]
+    }) : undefined
     return [{
       id: record.id,
       noteId,
@@ -412,6 +420,7 @@ function normalizeNoteVersions(value: unknown, noteId: string): NoteVersion[] {
         updatedAt: typeof snapshot.updatedAt === 'number' ? snapshot.updatedAt : record.createdAt,
         dailyDate: typeof snapshot.dailyDate === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(snapshot.dailyDate) ? snapshot.dailyDate : undefined,
       },
+      attachments,
     }]
   }).sort((a, b) => b.createdAt - a.createdAt)
 }
@@ -432,21 +441,29 @@ export async function getNoteVersions(noteId: string): Promise<NoteVersion[]> {
   return readNoteVersions(noteId)
 }
 
-function sameVersionSnapshot(left: Note, right: Note) {
+function sameVersionSnapshot(left: Note, right: Note, leftAttachments: NoteAttachmentReference[] = [], rightAttachments: NoteAttachmentReference[] = []) {
   return left.title === right.title && left.content === right.content && left.folder === right.folder && left.color === right.color
     && left.favorite === right.favorite && JSON.stringify(left.tags) === JSON.stringify(right.tags)
+    && JSON.stringify(leftAttachments) === JSON.stringify(rightAttachments)
 }
 
 export async function saveNoteVersion(note: Note): Promise<void> {
   const previousQueue = noteVersionQueues.get(note.id) ?? Promise.resolve()
   const queue = previousQueue.catch(() => {}).then(async () => {
     const versions = await readNoteVersions(note.id)
-    if (versions[0] && sameVersionSnapshot(versions[0].note, note)) return
+    const attachments = (await getAttachmentsForNote(note.id)).map(attachment => ({
+      fileName: attachment.fileName,
+      mimeType: attachment.mimeType,
+      size: attachment.size,
+      contentHash: attachment.contentHash ?? fileFingerprint(dataUrlBytes(attachment.dataUrl)),
+    })).sort((a, b) => a.fileName.localeCompare(b.fileName, 'pl'))
+    if (versions[0] && sameVersionSnapshot(versions[0].note, note, versions[0].attachments ?? [], attachments)) return
     const version: NoteVersion = {
       id: crypto.randomUUID(),
       noteId: note.id,
       createdAt: Date.now(),
       note: { ...note, tags: [...note.tags] },
+      attachments,
     }
     const next = [version, ...versions].slice(0, MAX_NOTE_VERSIONS)
     if (usesNativeFiles) {
@@ -576,7 +593,7 @@ async function readNativeAttachments(noteId: string, directory: string): Promise
     try {
       const bytes = await readFile(await join(assetsDirectory, entry.name))
       const mimeType = attachmentMimeType(entry.name)
-      attachments.push({ id: `${noteId}:${entry.name}`, noteId, fileName: entry.name, mimeType, dataUrl: `data:${mimeType};base64,${bytesToBase64(bytes)}`, size: bytes.byteLength })
+      attachments.push({ id: `${noteId}:${entry.name}`, noteId, fileName: entry.name, mimeType, dataUrl: `data:${mimeType};base64,${bytesToBase64(bytes)}`, size: bytes.byteLength, contentHash: fileFingerprint(bytes) })
     } catch { /* Skip unreadable user attachments and keep the rest of the note library available. */ }
   }
   return attachments
@@ -585,6 +602,91 @@ async function readNativeAttachments(noteId: string, directory: string): Promise
 export async function getAttachments(): Promise<NoteAttachment[]> {
   if (!usesNativeFiles) return withStore<NoteAttachment[]>('attachments', 'readonly', store => store.getAll())
   return (await Promise.all([...nativeNoteDirectories.entries()].map(([noteId, directory]) => readNativeAttachments(noteId, directory)))).flat()
+}
+
+export async function getAttachmentsForNote(noteId: string): Promise<NoteAttachment[]> {
+  if (!usesNativeFiles) {
+    const database = await openDatabase()
+    return new Promise((resolve, reject) => {
+      const request = database.transaction('attachments', 'readonly').objectStore('attachments').index('noteId').getAll(noteId)
+      request.onsuccess = () => resolve(request.result as NoteAttachment[])
+      request.onerror = () => reject(request.error)
+    })
+  }
+  const directory = nativeNoteDirectories.get(noteId)
+  return directory ? readNativeAttachments(noteId, directory) : []
+}
+
+const attachmentHistoryKey = (noteId: string) => `attachmentHistory:${noteId}`
+
+function normalizeAttachmentHistory(value: unknown, noteId: string): NoteAttachmentHistory[] {
+  if (!Array.isArray(value)) return []
+  return value.flatMap((item): NoteAttachmentHistory[] => {
+    if (!item || typeof item !== 'object') return []
+    const attachment = item as Partial<NoteAttachmentHistory>
+    if (attachment.noteId !== noteId || typeof attachment.id !== 'string' || typeof attachment.fileName !== 'string' || typeof attachment.mimeType !== 'string' || typeof attachment.dataUrl !== 'string') return []
+    if (typeof attachment.size !== 'number' || typeof attachment.deletedAt !== 'number') return []
+    return [{
+      id: attachment.id,
+      noteId,
+      fileName: attachment.fileName,
+      mimeType: attachment.mimeType,
+      dataUrl: attachment.dataUrl,
+      size: attachment.size,
+      contentHash: typeof attachment.contentHash === 'string' ? attachment.contentHash : fileFingerprint(dataUrlBytes(attachment.dataUrl)),
+      deletedAt: attachment.deletedAt,
+    }]
+  }).sort((a, b) => b.deletedAt - a.deletedAt)
+}
+
+async function writeAttachmentHistory(noteId: string, history: NoteAttachmentHistory[]): Promise<void> {
+  if (!usesNativeFiles) {
+    await withStore<IDBValidKey>('settings', 'readwrite', store => store.put(history, attachmentHistoryKey(noteId)))
+    return
+  }
+  const directory = nativeNoteDirectories.get(noteId)
+  if (!directory) return
+  await writeTextFile(await join(directory, NOTE_ATTACHMENT_HISTORY_FILE), JSON.stringify(history, null, 2))
+}
+
+export async function getAttachmentHistory(noteId: string): Promise<NoteAttachmentHistory[]> {
+  if (!usesNativeFiles) {
+    const value = await withStore<unknown>('settings', 'readonly', store => store.get(attachmentHistoryKey(noteId)))
+    return normalizeAttachmentHistory(value, noteId)
+  }
+  const directory = nativeNoteDirectories.get(noteId)
+  if (!directory) return []
+  const path = await join(directory, NOTE_ATTACHMENT_HISTORY_FILE)
+  if (!await exists(path)) return []
+  try { return normalizeAttachmentHistory(JSON.parse(await readTextFile(path)), noteId) } catch { return [] }
+}
+
+export async function archiveAttachment(attachment: NoteAttachment): Promise<void> {
+  const history = await getAttachmentHistory(attachment.noteId)
+  const archived: NoteAttachmentHistory = {
+    ...attachment,
+    contentHash: attachment.contentHash ?? fileFingerprint(dataUrlBytes(attachment.dataUrl)),
+    deletedAt: Date.now(),
+  }
+  await writeAttachmentHistory(attachment.noteId, [archived, ...history.filter(item => item.id !== archived.id || item.contentHash !== archived.contentHash)].slice(0, 80))
+}
+
+export async function saveArchivedAttachment(attachment: NoteAttachmentHistory): Promise<void> {
+  const history = await getAttachmentHistory(attachment.noteId)
+  await writeAttachmentHistory(attachment.noteId, [attachment, ...history.filter(item => item.id !== attachment.id || item.contentHash !== attachment.contentHash)].slice(0, 80))
+}
+
+export async function restoreArchivedAttachment(noteId: string, reference: NoteAttachmentReference): Promise<NoteAttachment | undefined> {
+  const history = await getAttachmentHistory(noteId)
+  const match = history.find(item => item.fileName === reference.fileName
+    && (!reference.contentHash || item.contentHash === reference.contentHash)
+    && item.mimeType === reference.mimeType
+    && item.size === reference.size)
+  if (!match) return undefined
+  const { deletedAt: _deletedAt, ...attachment } = match
+  await saveAttachment(attachment)
+  await writeAttachmentHistory(noteId, history.filter(item => item.id !== match.id || item.contentHash !== match.contentHash || item.deletedAt !== match.deletedAt))
+  return attachment
 }
 
 export async function saveAttachment(attachment: NoteAttachment): Promise<IDBValidKey | void> {
@@ -617,14 +719,19 @@ export async function removeAttachmentsForNote(noteId: string): Promise<void> {
       transaction.onerror = () => reject(transaction.error)
       transaction.onabort = () => reject(transaction.error)
     })
+    await withStore<undefined>('settings', 'readwrite', store => store.delete(attachmentHistoryKey(noteId)))
     return
   }
   const directory = nativeNoteDirectories.get(noteId)
   const assetsDirectory = directory ? await join(directory, 'assets') : undefined
-  if (!assetsDirectory || !await exists(assetsDirectory)) return
-  for (const entry of await readDir(assetsDirectory)) {
-    if (entry.isFile && !entry.name.toLowerCase().endsWith('.svg') && attachmentMimeType(entry.name) !== 'application/octet-stream') await remove(await join(assetsDirectory, entry.name))
+  if (assetsDirectory && await exists(assetsDirectory)) {
+    for (const entry of await readDir(assetsDirectory)) {
+      if (entry.isFile && !entry.name.toLowerCase().endsWith('.svg') && attachmentMimeType(entry.name) !== 'application/octet-stream') await remove(await join(assetsDirectory, entry.name))
+    }
   }
+  if (!directory) return
+  const historyPath = await join(directory, NOTE_ATTACHMENT_HISTORY_FILE)
+  if (await exists(historyPath)) await remove(historyPath)
 }
 
 export async function saveAsset(asset: NoteAsset): Promise<IDBValidKey | void> {

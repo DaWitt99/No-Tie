@@ -13,6 +13,26 @@ export type OllamaMessage = {
   images?: string[]
 }
 
+export async function imageAttachmentToPngBase64(dataUrl: string): Promise<string> {
+  const image = new Image()
+  await new Promise<void>((resolve, reject) => {
+    image.onload = () => resolve()
+    image.onerror = () => reject(new Error('Nie udało się odczytać obrazu z załącznika.'))
+    image.src = dataUrl
+  })
+  if (!image.naturalWidth || !image.naturalHeight) throw new Error('Obraz z załącznika ma nieprawidłowe wymiary.')
+  const scale = Math.min(1.6, 1600 / Math.max(image.naturalWidth, image.naturalHeight))
+  const canvas = document.createElement('canvas')
+  canvas.width = Math.max(1, Math.round(image.naturalWidth * scale))
+  canvas.height = Math.max(1, Math.round(image.naturalHeight * scale))
+  const context = canvas.getContext('2d', { alpha: false })
+  if (!context) throw new Error('Nie udało się przygotować obrazu z załącznika.')
+  context.fillStyle = '#fff'
+  context.fillRect(0, 0, canvas.width, canvas.height)
+  context.drawImage(image, 0, 0, canvas.width, canvas.height)
+  return canvas.toDataURL('image/png').split(',', 2)[1] ?? ''
+}
+
 export async function svgToPngBase64(svg: string): Promise<string> {
   const safeSvg = sanitizeSvg(svg)
   const parsedDocument = new DOMParser().parseFromString(safeSvg, 'image/svg+xml')
