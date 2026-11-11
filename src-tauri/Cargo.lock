@@ -1921,6 +1921,7 @@ checksum = "650eef8c711430f1a879fdd01d4745a7deea475becfb90269c06775983bbf086"
 name = "no-tie"
 version = "0.0.0"
 dependencies = [
+ "futures-util",
  "reqwest 0.12.28",
  "serde",
  "serde_json",
@@ -1928,6 +1929,7 @@ dependencies = [
  "tauri-build",
  "tauri-plugin-dialog",
  "tauri-plugin-fs",
+ "tokio",
 ]
 
 [[package]]

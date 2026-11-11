@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react'
-import { Bot, LoaderCircle, MessageSquare, Send, Settings2, Sparkles, Trash2, UserRound, X } from 'lucide-react'
+import { Bot, LoaderCircle, MessageSquare, Send, Settings2, Sparkles, Square, Trash2, UserRound, X } from 'lucide-react'
 import type { Note, NoteAsset, NoteAttachment } from './types'
 import { imageAttachmentToPngBase64, streamOllamaMessage, svgToPngBase64, type OllamaMessage } from './ollama'
 
@@ -20,7 +20,15 @@ type ChatPanelProps = {
   onOpenSettings: () => void
 }
 
-type ChatLine = Pick<OllamaMessage, 'role' | 'content'>
+type ChatLine = Pick<OllamaMessage, 'role' | 'content'> & { responseDurationMs?: number }
+
+function formatResponseTime(milliseconds: number) {
+  const totalSeconds = Math.max(0, Math.floor(milliseconds / 1000))
+  const hours = Math.floor(totalSeconds / 3600)
+  const minutes = Math.floor((totalSeconds % 3600) / 60)
+  const seconds = totalSeconds % 60
+  return [hours, minutes, seconds].map(value => String(value).padStart(2, '0')).join(':')
+}
 
 function loadConversation(key: string): ChatLine[] {
   try {
@@ -30,7 +38,8 @@ function loadConversation(key: string): ChatLine[] {
     return Array.isArray(parsed)
       ? parsed.filter((line): line is ChatLine => line && typeof line === 'object'
         && ['user', 'assistant'].includes((line as ChatLine).role)
-        && typeof (line as ChatLine).content === 'string')
+        && typeof (line as ChatLine).content === 'string'
+        && ((line as ChatLine).responseDurationMs === undefined || (typeof (line as ChatLine).responseDurationMs === 'number' && (line as ChatLine).responseDurationMs! >= 0)))
       : []
   } catch {
     return []
@@ -85,12 +94,23 @@ export function ChatPanel({ open, baseUrl, model, note, notes, assets, attachmen
   const [useNoteContext, setUseNoteContext] = useState(true)
   const [useLibraryContext, setUseLibraryContext] = useState(() => localStorage.getItem('no-tie-ollama-library-context') === 'true')
   const [sending, setSending] = useState(false)
+  const [responseStartedAt, setResponseStartedAt] = useState<number | null>(null)
+  const [responseElapsedMs, setResponseElapsedMs] = useState(0)
+  const activeRequestController = useRef<AbortController | null>(null)
   const messagesPanel = useRef<HTMLDivElement>(null)
   const storageKey = `no-tie-ollama-chat:${note?.id ?? 'general'}`
   const messages = conversations[storageKey] ?? loadConversation(storageKey)
   const error = conversationErrors[storageKey] ?? ''
   const noteAssets = note ? assets.filter(asset => asset.noteId === note.id) : []
   const noteAttachments = note ? attachments.filter(attachment => attachment.noteId === note.id) : []
+
+  useEffect(() => {
+    if (responseStartedAt === null) return
+    const update = () => setResponseElapsedMs(performance.now() - responseStartedAt)
+    update()
+    const interval = window.setInterval(update, 1000)
+    return () => window.clearInterval(interval)
+  }, [responseStartedAt])
 
   useEffect(() => {
     const panel = messagesPanel.current
@@ -111,8 +131,11 @@ export function ChatPanel({ open, baseUrl, model, note, notes, assets, attachmen
     localStorage.setItem(requestKey, JSON.stringify(nextMessages))
     setDraft('')
     setConversationErrors(current => ({ ...current, [requestKey]: '' }))
+    const requestController = new AbortController()
+    activeRequestController.current = requestController
     setSending(true)
     let answer = ''
+    let responseStart: number | null = null
     setConversations(current => ({ ...current, [requestKey]: [...nextMessages, { role: 'assistant', content: '' }] }))
 
     const librarySelection = useLibraryContext ? selectLibraryNotes(notes, content, useNoteContext ? note?.id : undefined) : undefined
@@ -147,6 +170,7 @@ export function ChatPanel({ open, baseUrl, model, note, notes, assets, attachmen
       const imageLabels: string[] = []
       let omittedVisuals = 0
       for (const visual of visuals) {
+        if (requestController.signal.aborted) break
         if (encodedImages.length >= MAX_CONTEXT_IMAGES) { omittedVisuals += 1; continue }
         const owner = noteById.get(visual.noteId)
         const ownerLabel = `${owner?.title || 'Bez tytułu'} (${owner?.folder || 'Bez folderu'})`
@@ -154,15 +178,18 @@ export function ChatPanel({ open, baseUrl, model, note, notes, assets, attachmen
           if (visual.kind === 'svg') {
             encodedImages.push(await svgToPngBase64(visual.asset.svg))
             imageLabels.push(`Schemat SVG „${visual.fileName}” — ${ownerLabel}`)
+            if (requestController.signal.aborted) break
           } else if (visual.attachment.mimeType.startsWith('image/')) {
             encodedImages.push(await imageAttachmentToPngBase64(visual.attachment.dataUrl))
             imageLabels.push(`Załączony obraz „${visual.fileName}” — ${ownerLabel}`)
+            if (requestController.signal.aborted) break
           } else if (visual.attachment.mimeType === 'application/pdf') {
             const pdfPageLimit = Math.min(MAX_PDF_PAGES_PER_ATTACHMENT, MAX_CONTEXT_IMAGES - encodedImages.length)
             if (pdfPageLimit <= 0) { omittedVisuals += 1; continue }
             const { pdfAttachmentToVisionPages } = await import('./pdfVision')
             const pdf = await pdfAttachmentToVisionPages(visual.attachment.dataUrl, pdfPageLimit)
             for (const page of pdf.pages) {
+              if (requestController.signal.aborted) break
               encodedImages.push(page.base64)
               imageLabels.push(`PDF „${visual.fileName}”, strona ${page.pageNumber} z ${page.totalPages} — ${ownerLabel}`)
             }
@@ -173,7 +200,12 @@ export function ChatPanel({ open, baseUrl, model, note, notes, assets, attachmen
           throw new Error(`Nie udało się dołączyć „${visual.fileName}”. ${detail}`)
         }
       }
-      const requestMessages: OllamaMessage[] = [...prompt, ...nextMessages.map(message => ({ ...message }))]
+      if (requestController.signal.aborted) {
+        localStorage.setItem(requestKey, JSON.stringify(nextMessages))
+        setConversations(current => ({ ...current, [requestKey]: nextMessages }))
+        return
+      }
+      const requestMessages: OllamaMessage[] = [...prompt, ...nextMessages.map(({ role, content: messageContent }) => ({ role, content: messageContent }))]
       const currentUserMessage = requestMessages.at(-1)
       if (currentUserMessage?.role === 'user' && encodedImages.length) {
         currentUserMessage.content += `\n\nDołączone pliki jako obrazy w polu images[], w tej samej kolejności:\n${imageLabels.map((label, index) => `${index + 1}. ${label}`).join('\n')}${omittedVisuals ? `\nPominięto ${omittedVisuals} dalszych obrazów lub stron PDF z powodu limitu wizualnego.` : ''}`
@@ -181,22 +213,39 @@ export function ChatPanel({ open, baseUrl, model, note, notes, assets, attachmen
       } else if (currentUserMessage?.role === 'user' && omittedVisuals) {
         currentUserMessage.content += `\n\nNiektóre pliki wizualne pominięto z powodu limitu ${MAX_CONTEXT_IMAGES} obrazów.`
       }
+      responseStart = performance.now()
+      setResponseElapsedMs(0)
+      setResponseStartedAt(responseStart)
       await streamOllamaMessage(baseUrl, model, requestMessages, chunk => {
         answer += chunk
         setConversations(current => ({ ...current, [requestKey]: [...nextMessages, { role: 'assistant', content: answer }] }))
-      })
-      const complete = answer ? [...nextMessages, { role: 'assistant' as const, content: answer }] : nextMessages
+      }, requestController.signal)
+      const responseDurationMs = responseStart === null ? undefined : performance.now() - responseStart
+      const complete = answer ? [...nextMessages, { role: 'assistant' as const, content: answer, responseDurationMs }] : nextMessages
       localStorage.setItem(requestKey, JSON.stringify(complete))
       setConversations(current => ({ ...current, [requestKey]: complete }))
     } catch (sendError) {
+      if (requestController.signal.aborted) {
+        const partial = answer ? [...nextMessages, { role: 'assistant' as const, content: answer }] : nextMessages
+        localStorage.setItem(requestKey, JSON.stringify(partial))
+        setConversations(current => ({ ...current, [requestKey]: partial }))
+        return
+      }
       const message = typeof sendError === 'string' ? sendError : sendError instanceof Error ? sendError.message : 'Nie udało się uzyskać odpowiedzi modelu.'
-      const partial = answer ? [...nextMessages, { role: 'assistant' as const, content: answer }] : nextMessages
+      const responseDurationMs = responseStart === null ? undefined : performance.now() - responseStart
+      const partial = answer ? [...nextMessages, { role: 'assistant' as const, content: answer, responseDurationMs }] : nextMessages
       localStorage.setItem(requestKey, JSON.stringify(partial))
       setConversations(current => ({ ...current, [requestKey]: partial }))
       setConversationErrors(current => ({ ...current, [requestKey]: message }))
     } finally {
+      if (activeRequestController.current === requestController) activeRequestController.current = null
+      setResponseStartedAt(null)
       setSending(false)
     }
+  }
+
+  function stopGeneration() {
+    activeRequestController.current?.abort()
   }
 
   function clearConversation() {
@@ -213,7 +262,7 @@ export function ChatPanel({ open, baseUrl, model, note, notes, assets, attachmen
           <div><strong>Lokalny asystent</strong><span><i className={model ? 'model-status ready' : 'model-status'} />{model || 'Model niepodłączony'}</span></div>
         </div>
         <div className="ollama-chat-actions">
-          {messages.length > 0 && <button className="chat-icon-button" onClick={clearConversation} title="Wyczyść rozmowę" aria-label="Wyczyść rozmowę"><Trash2 size={15} /></button>}
+          {messages.length > 0 && <button className="chat-icon-button" onClick={clearConversation} disabled={sending} title="Wyczyść rozmowę" aria-label="Wyczyść rozmowę"><Trash2 size={15} /></button>}
           <button className="chat-icon-button" onClick={onOpenSettings} title="Ustawienia Ollama" aria-label="Ustawienia Ollama"><Settings2 size={16} /></button>
           <button className="chat-icon-button chat-close" onClick={onClose} title="Zamknij czat" aria-label="Zamknij czat"><X size={17} /></button>
         </div>
@@ -230,10 +279,14 @@ export function ChatPanel({ open, baseUrl, model, note, notes, assets, attachmen
         <>
           <div className="ollama-chat-messages" ref={messagesPanel} aria-live="polite">
             {messages.length === 0 && <div className="chat-welcome"><div className="chat-empty-mark"><Sparkles size={21} /></div><strong>{note ? 'Porozmawiaj o tej notatce' : 'Zacznij rozmowę'}</strong><p>{note ? `Kontekst: ${note.title}` : 'Wiadomości są wysyłane do lokalnego serwera Ollama.'}</p></div>}
-            {messages.map((message, index) => <article key={`${index}-${message.role}`} className={`chat-message ${message.role}`}>
+            {messages.map((message, index) => {
+              const isCurrentResponse = sending && responseStartedAt !== null && index === messages.length - 1 && message.role === 'assistant'
+              const responseDuration = isCurrentResponse ? responseElapsedMs : message.responseDurationMs
+              return <article key={`${index}-${message.role}`} className={`chat-message ${message.role}`}>
               <div className="chat-message-avatar">{message.role === 'user' ? <UserRound size={14} /> : <Bot size={14} />}</div>
-              <div className="chat-message-body"><span>{message.role === 'user' ? 'Ty' : 'Asystent'}</span><p>{message.content}{sending && index === messages.length - 1 && message.role === 'assistant' && message.content && <span className="chat-stream-cursor" aria-hidden="true">▍</span>}</p></div>
-            </article>)}
+              <div className="chat-message-body"><div className="chat-message-label"><span>{message.role === 'user' ? 'Ty' : 'Asystent'}</span>{message.role === 'assistant' && responseDuration !== undefined && <time className="chat-response-time" title="Czas odpowiedzi AI" aria-label={`Czas odpowiedzi AI: ${formatResponseTime(responseDuration)}`} aria-live="off">{formatResponseTime(responseDuration)}</time>}</div><p>{message.content}{sending && index === messages.length - 1 && message.role === 'assistant' && message.content && <span className="chat-stream-cursor" aria-hidden="true">▍</span>}</p></div>
+            </article>
+            })}
             {sending && messages.at(-1)?.role === 'assistant' && !messages.at(-1)?.content && <div className="chat-thinking"><LoaderCircle size={15} className="spin" />Model przygotowuje odpowiedź…</div>}
           </div>
           <form className="ollama-chat-composer" onSubmit={event => { event.preventDefault(); void sendMessage() }}>
@@ -241,7 +294,7 @@ export function ChatPanel({ open, baseUrl, model, note, notes, assets, attachmen
             <label className="chat-context-toggle" title="Dobiera notatki pasujące do pytania oraz ich schematy SVG i załączniki. Wysyła najwyżej 50 notatek, 48 000 znaków treści i 20 obrazów lub stron PDF na wiadomość."><input type="checkbox" checked={useLibraryContext} onChange={event => { setUseLibraryContext(event.target.checked); localStorage.setItem('no-tie-ollama-library-context', String(event.target.checked)) }} disabled={!notes.length} />Szukaj w bibliotece ({notes.length} notatek)</label>
             {useLibraryContext && <span className="chat-library-context-info">Dobieram notatki do pytania; dołączę maks. 20 obrazów lub stron PDF.</span>}
             {error && <p className="chat-error" role="alert">{error}</p>}
-            <div className="chat-compose-box"><textarea value={draft} onChange={event => setDraft(event.target.value)} onKeyDown={event => { if (event.key === 'Enter' && !event.shiftKey) { event.preventDefault(); void sendMessage() } }} placeholder="Napisz wiadomość…" aria-label="Wiadomość do lokalnego modelu" rows={3} disabled={sending} /><button type="submit" disabled={!draft.trim() || sending} title="Wyślij" aria-label="Wyślij wiadomość"><Send size={16} /></button></div>
+            <div className="chat-compose-box"><textarea value={draft} onChange={event => setDraft(event.target.value)} onKeyDown={event => { if (event.key === 'Enter' && !event.shiftKey) { event.preventDefault(); void sendMessage() } }} placeholder="Napisz wiadomość…" aria-label="Wiadomość do lokalnego modelu" rows={3} disabled={sending} />{sending ? <button type="button" className="chat-stop-button" onClick={stopGeneration} title="Zatrzymaj generowanie odpowiedzi" aria-label="Zatrzymaj generowanie odpowiedzi"><Square size={13} /><span>Zatrzymaj</span></button> : <button type="submit" disabled={!draft.trim()} title="Wyślij" aria-label="Wyślij wiadomość"><Send size={16} /></button>}</div>
             <span className="chat-local-note"><MessageSquare size={12} />Rozmowa pozostaje na tym urządzeniu</span>
           </form>
         </>

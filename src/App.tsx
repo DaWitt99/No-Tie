@@ -41,6 +41,8 @@ type EntryPointerDrag = { target: EntryTarget; label: string; pointerId: number;
 type EntryDragVisual = { target: EntryTarget; label: string; x: number; y: number; dropFolder: string | null }
 
 const REVIEW_SESSIONS_OVERVIEW_ID = '__no_tie_review_sessions_overview__'
+const SAVED_SEARCHES_PAGE_ID = '__no_tie_saved_searches_page__'
+const NOTE_TEMPLATES_PAGE_ID = '__no_tie_note_templates_page__'
 
 function folderParents(path: string): string[] {
   const parts = path.split('/').map(part => part.trim()).filter(Boolean)
@@ -86,12 +88,11 @@ const dataUrlFromFile = async (file: File, mimeType: string) => {
   return { dataUrl: `data:${mimeType};base64,${btoa(binary)}`, contentHash: fileFingerprint(bytes) }
 }
 const escapeRegExp = (value: string) => value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
-const excerpt = (content: string) => content.replace(/^#+\s*/gm, '').replace(/[>*_`!-]/g, '').replace(/\(\.\/assets\/[^)]+\)/g, '').replace(/\s+/g, ' ').trim().slice(0, 110)
 const countEditorText = (text: string) => ({
   words: text.match(/[\p{L}\p{N}]+(?:[’'-][\p{L}\p{N}]+)*/gu)?.length ?? 0,
   characters: Array.from(text).length,
 })
-const markdownTextForCounts = (markdown: string) => markdown
+const plainMarkdownTextForCounts = (markdown: string) => markdown
   .replace(/```[^\n]*\n?([\s\S]*?)```/g, '$1')
   .replace(/!\[([^\]]*)\]\([^)]*\)/g, '$1')
   .replace(/\[([^\]]+)\]\([^)]*\)/g, '$1')
@@ -99,6 +100,107 @@ const markdownTextForCounts = (markdown: string) => markdown
   .replace(/^\s{0,3}(?:#{1,6}\s+|>\s?|[-+*]\s+|\d+[.)]\s+)/gm, '')
   .replace(/[*_~]/g, '')
   .replace(/\\([*_`])/g, '$1')
+
+function hasMarkdownTablePipe(line: string) {
+  return line.replace(/\\\|/g, '').includes('|')
+}
+
+function markdownTableCells(line: string) {
+  const escapedPipe = '\uE000'
+  const normalized = line.trim()
+    .replace(/\\\|/g, escapedPipe)
+    .replace(/\[\[[^\]]*\|[^\]]*\]\]/g, match => match.replace('|', escapedPipe))
+    .replace(/^\|/, '')
+    .replace(/\|$/, '')
+  return normalized.split('|').map(cell => cell.replaceAll(escapedPipe, '|').trim())
+}
+
+function markdownTextForPreview(markdown: string) {
+  const lines = markdown.split(/\r?\n/)
+  const textLines: string[] = []
+  let insideCodeFence = false
+  for (let index = 0; index < lines.length;) {
+    if (/^\s{0,3}```/.test(lines[index])) {
+      insideCodeFence = !insideCodeFence
+      index++
+      continue
+    }
+    if (insideCodeFence) {
+      textLines.push(lines[index++])
+      continue
+    }
+    if (hasMarkdownTablePipe(lines[index]) && index + 1 < lines.length && isMarkdownTableSeparator(lines[index + 1])) {
+      textLines.push(markdownTableCells(lines[index]).join(' '))
+      index += 2
+      while (index < lines.length && hasMarkdownTablePipe(lines[index])) textLines.push(markdownTableCells(lines[index++]).join(' '))
+      continue
+    }
+    textLines.push(lines[index++])
+  }
+  return textLines.join('\n')
+}
+
+function excerpt(content: string) {
+  return markdownTextForPreview(content)
+    .replace(/^\s{0,3}\[[^\]]+\]:\s*\S+.*$/gm, '')
+    .replace(/!\[([^\]]*)\]\([^)]*\)/g, '$1')
+    .replace(/\[\[([^\]]+)\]\]/g, (_match, raw: string) => raw.split('|', 2)[1]?.trim() || raw.split('|', 1)[0].trim())
+    .replace(/\[([^\]]+)\]\([^)]*\)/g, '$1')
+    .replace(/\[([^\]]+)\]\[[^\]]*\]/g, '$1')
+    .replace(/<(https?:\/\/[^>]+|mailto:[^>]+)>/gi, '$1')
+    .replace(/`([^`]+)`/g, '$1')
+    .replace(/^\s{0,3}(?:#{1,6}\s+|>\s?|(?:[-+*]|\d+[.)])\s+(?:\[[ xX]\]\s+)?)/gm, '')
+    .replace(/^\s*[-*_]{3,}\s*$/gm, ' ')
+    .replace(/<[^>]*>/g, ' ')
+    .replace(/\\([*_`])/g, '$1')
+    .replace(/[>*_~`$]/g, '')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .slice(0, 110)
+}
+
+function isMarkdownTableSeparator(line: string) {
+  const cells = markdownTableCells(line)
+  return cells.length > 0 && cells.every(cell => /^:?-{3,}:?$/.test(cell))
+}
+
+function markdownTextForCounts(markdown: string) {
+  const lines = markdown.split(/\r?\n/)
+  const documentLines: string[] = []
+  const tableCells: string[] = []
+  let insideCodeFence = false
+  for (let index = 0; index < lines.length;) {
+    if (/^\s{0,3}```/.test(lines[index])) {
+      insideCodeFence = !insideCodeFence
+      documentLines.push(lines[index++])
+      continue
+    }
+    if (insideCodeFence) {
+      documentLines.push(lines[index++])
+      continue
+    }
+    if (hasMarkdownTablePipe(lines[index]) && index + 1 < lines.length && isMarkdownTableSeparator(lines[index + 1])) {
+      tableCells.push(...markdownTableCells(lines[index]))
+      index += 2
+      while (index < lines.length && hasMarkdownTablePipe(lines[index])) tableCells.push(...markdownTableCells(lines[index++]))
+      continue
+    }
+    documentLines.push(lines[index++])
+  }
+  return {
+    document: plainMarkdownTextForCounts(documentLines.join('\n')),
+    tableCells: tableCells.map(plainMarkdownTextForCounts),
+  }
+}
+
+function countMarkdownDocument(markdown: string) {
+  const parts = markdownTextForCounts(markdown)
+  const body = countEditorText(parts.document)
+  return parts.tableCells.reduce((total, cell) => {
+    const counts = countEditorText(cell)
+    return { words: total.words + counts.words, characters: total.characters + counts.characters }
+  }, body)
+}
 const attachmentBytesFromDataUrl = (dataUrl: string) => {
   const binary = atob(dataUrl.slice(dataUrl.indexOf(',') + 1))
   return Uint8Array.from(binary, character => character.charCodeAt(0))
@@ -159,8 +261,6 @@ function App() {
   const [showDailyNotes, setShowDailyNotes] = useState(false)
   const [showTaskManager, setShowTaskManager] = useState(false)
   const [showKnowledgeGraph, setShowKnowledgeGraph] = useState(false)
-  const [showSavedSearches, setShowSavedSearches] = useState(false)
-  const [showTemplateManager, setShowTemplateManager] = useState(false)
   const [showHelp, setShowHelp] = useState(false)
   const [selectedId, setSelectedId] = useState('')
   const [activeFilter, setActiveFilter] = useState<Filter>('all')
@@ -393,6 +493,9 @@ function App() {
   const selectedNote = notes.find(note => note.id === selectedId)
   const activeReviewSession = reviewSessions.find(session => session.id === activeReviewSessionId)
   const showingReviewSessionsOverview = activeReviewSessionId === REVIEW_SESSIONS_OVERVIEW_ID
+  const showingSavedSearchesPage = activeReviewSessionId === SAVED_SEARCHES_PAGE_ID
+  const showingNoteTemplatesPage = activeReviewSessionId === NOTE_TEMPLATES_PAGE_ID
+  const showingWorkspacePage = showingReviewSessionsOverview || showingSavedSearchesPage || showingNoteTemplatesPage || Boolean(activeReviewSession)
   const notesRef = useRef<Note[]>([])
   useLayoutEffect(() => { notesRef.current = notes }, [notes])
   useLayoutEffect(() => {
@@ -415,7 +518,7 @@ function App() {
   const currentAssets = assets.filter(asset => asset.noteId === selectedId)
   const currentAttachments = attachments.filter(attachment => attachment.noteId === selectedId)
   const parsedTasks = useMemo(() => parseTasks(notes), [notes])
-  const documentCounts = selectedNote ? countEditorText(markdownTextForCounts(selectedNote.content)) : { words: 0, characters: 0 }
+  const documentCounts = selectedNote ? countMarkdownDocument(selectedNote.content) : { words: 0, characters: 0 }
   const selectionText = selectedNote && editorSelection.noteId === selectedNote.id && editorSelection.mode === editorMode ? editorSelection.text : ''
   const selectionCounts = countEditorText(selectionText)
 
@@ -525,7 +628,6 @@ function App() {
     setSearchFolder(search.folder)
     setActiveFilter('all')
     setActiveReviewSessionId('')
-    setShowSavedSearches(false)
     setShowLibrary(true)
     localStorage.setItem('no-tie-library-visible', 'true')
     setMobileDrawer('none')
@@ -992,7 +1094,7 @@ function App() {
       const color = folderDisplayColor(folder)
       return <div key={folder} className="folder-tree-node" data-drop-folder={folder}>
         <div className={`folder-drop-row ${activeFilter === folder ? 'active' : ''} ${color ? 'has-entry-color' : ''}`} style={{ paddingLeft: `${10 + depth * 14}px`, ...(entryColorStyle(color) ?? {}) }} data-drop-folder={folder}>
-          <button className={`nav-item folder-item ${activeFilter === folder && !activeReviewSession ? 'active' : ''} ${color ? 'has-entry-color' : ''}`} style={entryColorStyle(color)} onPointerDown={event => startEntryPointerDrag(event, target, label)} onClick={() => { if (ignoreClickAfterDrag()) return; setActiveReviewSessionId(''); setActiveFilter(folder); setMobileDrawer('none') }} title={`Przeciągnij folder „${label}”, aby go przenieść`}><Folder size={16} /><span>{label}</span><span className="nav-count">{count}</span></button>
+          <button className={`nav-item folder-item ${activeFilter === folder && !showingWorkspacePage ? 'active' : ''} ${color ? 'has-entry-color' : ''}`} style={entryColorStyle(color)} onPointerDown={event => startEntryPointerDrag(event, target, label)} onClick={() => { if (ignoreClickAfterDrag()) return; setActiveReviewSessionId(''); setActiveFilter(folder); setMobileDrawer('none') }} title={`Przeciągnij folder „${label}”, aby go przenieść`}><Folder size={16} /><span>{label}</span><span className="nav-count">{count}</span></button>
           {renderEntryMenu(target)}
         </div>
         {directNotes.map(note => renderNoteFile(note, depth))}
@@ -1368,8 +1470,8 @@ function App() {
           <button className="new-note-button" onClick={() => createNote()}><Plus size={17} /><span>Nowa notatka</span><kbd>N</kbd></button>
           <div className="sidebar-section">
             <span className="section-label">BIBLIOTEKA</span>
-            <button className={`nav-item ${activeFilter === 'all' && !activeReviewSession ? 'active' : ''}`} onClick={() => { setActiveReviewSessionId(''); setActiveFilter('all'); setMobileDrawer('none') }}><BookOpen size={17} /><span>Wszystkie notatki</span><span className="nav-count">{notes.length}</span></button>
-            <button className={`nav-item ${activeFilter === 'favorites' && !activeReviewSession ? 'active' : ''}`} onClick={() => { setActiveReviewSessionId(''); setActiveFilter('favorites'); setMobileDrawer('none') }}><Heart size={17} /><span>Ulubione</span></button>
+            <button className={`nav-item ${activeFilter === 'all' && !showingWorkspacePage ? 'active' : ''}`} onClick={() => { setActiveReviewSessionId(''); setActiveFilter('all'); setMobileDrawer('none') }}><BookOpen size={17} /><span>Wszystkie notatki</span><span className="nav-count">{notes.length}</span></button>
+            <button className={`nav-item ${activeFilter === 'favorites' && !showingWorkspacePage ? 'active' : ''}`} onClick={() => { setActiveReviewSessionId(''); setActiveFilter('favorites'); setMobileDrawer('none') }}><Heart size={17} /><span>Ulubione</span></button>
             <button className="nav-item" onClick={() => { setActiveReviewSessionId(''); setActiveFilter('all'); setQuery(''); setMobileDrawer('notes') }}><Clock3 size={17} /><span>Ostatnie</span></button>
           </div>
           <div className="sidebar-section workspace-tools">
@@ -1377,9 +1479,8 @@ function App() {
             <button className="nav-item" onClick={() => setShowDailyNotes(true)}><CalendarDays size={16} /><span>Notatki dzienne</span></button>
             <button className="nav-item" onClick={() => setShowTaskManager(true)}><CheckSquare2 size={16} /><span>Zadania</span><span className="nav-count">{parsedTasks.filter(task => !task.done).length}</span></button>
             <button className="nav-item" onClick={() => setShowKnowledgeGraph(true)}><Network size={16} /><span>Mapa powiązań</span></button>
-            <button className="nav-item" onClick={() => setShowSavedSearches(true)}><BookmarkPlus size={16} /><span>Zapisane widoki</span><span className="nav-count">{savedSearches.length}</span></button>
-            {savedSearches.map(search => <button className="nav-item saved-search-nav" key={search.id} title={search.name} onClick={() => applySavedSearch(search)}><Search size={14} /><span>{search.name}</span></button>)}
-            <button className="nav-item" onClick={() => setShowTemplateManager(true)}><FilePlus2 size={16} /><span>Szablony</span></button>
+            <button className={`nav-item ${showingSavedSearchesPage ? 'active' : ''}`} onClick={() => { setActiveReviewSessionId(SAVED_SEARCHES_PAGE_ID); setMobileDrawer('none') }}><BookmarkPlus size={16} /><span>Zapisane widoki</span><span className="nav-count">{savedSearches.length}</span></button>
+            <button className={`nav-item ${showingNoteTemplatesPage ? 'active' : ''}`} onClick={() => { setActiveReviewSessionId(NOTE_TEMPLATES_PAGE_ID); setMobileDrawer('none') }}><FilePlus2 size={16} /><span>Szablony</span><span className="nav-count">{templates.length}</span></button>
             <button className={`nav-item ${showingReviewSessionsOverview || activeReviewSession ? 'active' : ''}`} onClick={() => { setActiveReviewSessionId(REVIEW_SESSIONS_OVERVIEW_ID); setMobileDrawer('none') }}><Repeat2 size={16} /><span>Powtórki</span><span className="nav-count">{reviewSessions.length}</span></button>
             <button className="nav-item review-new-button" onClick={() => openReviewSessionEditor()}><Plus size={15} /><span>Nowa powtórka</span></button>
           </div>
@@ -1427,7 +1528,7 @@ function App() {
       <section className="editor-panel">
         <header className="topbar">
           <div className="mobile-actions"><button className="icon-button" onClick={() => setMobileDrawer('sidebar')} aria-label="Otwórz menu"><Menu size={19} /></button><button className="icon-button" onClick={() => { if (!showLibrary) { localStorage.setItem('no-tie-library-visible', 'true'); setShowLibrary(true) } setMobileDrawer('notes') }} aria-label={showLibrary ? 'Pokaż notatki' : 'Pokaż bibliotekę'}><PanelLeft size={18} /></button></div>
-          <div className="breadcrumb"><span>{showingReviewSessionsOverview || activeReviewSession ? 'Powtórki' : 'Notatki'}</span><span className="crumb-slash">/</span><span>{showingReviewSessionsOverview ? 'Wszystkie powtórki' : activeReviewSession?.title ?? selectedNote?.folder ?? 'Osobiste'}</span></div>
+          <div className="breadcrumb"><span>{showingSavedSearchesPage || showingNoteTemplatesPage || showingReviewSessionsOverview || activeReviewSession ? 'Narzędzia' : 'Notatki'}</span><span className="crumb-slash">/</span><span>{showingSavedSearchesPage ? 'Zapisane widoki' : showingNoteTemplatesPage ? 'Szablony' : showingReviewSessionsOverview ? 'Wszystkie powtórki' : activeReviewSession?.title ?? selectedNote?.folder ?? 'Osobiste'}</span></div>
           <div className="topbar-actions">
             <span className={`save-indicator ${saved ? 'is-saved' : ''}`}><span className="save-dot" />{saved ? 'Zapisano' : 'Zapisywanie…'}</span>
             {selectedNote && <button className="icon-button note-history-button" onClick={() => void openNoteHistory()} title="Historia wersji notatki" aria-label="Historia wersji notatki"><History size={17} /></button>}
@@ -1439,7 +1540,18 @@ function App() {
           </div>
         </header>
 
-        {showingReviewSessionsOverview ? (
+        {showingSavedSearchesPage ? (
+          <SavedSearchDialog
+            searches={savedSearches}
+            current={{ query, tag: searchTag, folder: searchFolder || (activeFilter !== 'all' && activeFilter !== 'favorites' && activeFilter !== 'root' ? activeFilter : '') }}
+            onSave={name => { const folder = searchFolder || (activeFilter !== 'all' && activeFilter !== 'favorites' && activeFilter !== 'root' ? activeFilter : ''); setSavedSearches(current => [{ id: crypto.randomUUID(), name, query, tag: searchTag, folder }, ...current]) }}
+            onApply={applySavedSearch}
+            onDelete={id => setSavedSearches(current => current.filter(search => search.id !== id))}
+            onClose={() => setActiveReviewSessionId('')}
+          />
+        ) : showingNoteTemplatesPage ? (
+          <TemplateManagerDialog templates={templates} onSave={setTemplates} onClose={() => setActiveReviewSessionId('')} />
+        ) : showingReviewSessionsOverview ? (
           <ReviewSessionsOverview
             sessions={reviewSessions}
             notes={notes}
@@ -1470,7 +1582,7 @@ function App() {
               <div className="tags-row"><Tag size={15} /><div className="tag-list">{selectedNote.tags.map(tag => <button className="editable-tag" key={tag} onClick={() => patchNote(selectedNote.id, { tags: selectedNote.tags.filter(item => item !== tag) })} title="Usuń tag">{tag}<X size={11} /></button>)}<input className="tag-input" value={tagInput} onChange={event => setTagInput(event.target.value)} onKeyDown={event => { if (event.key === 'Enter') { event.preventDefault(); addTag() } }} placeholder={selectedNote.tags.length ? 'Dodaj tag…' : 'Dodaj tag'} aria-label="Dodaj tag" />{tagInput && <button className="tag-add-button" onClick={addTag}>Dodaj</button>}</div></div>
               <div className="editor-tools-row">
                 <div className="editor-tools-left"><div className="view-mode-toggle" role="group" aria-label="Widok notatki"><button className={`view-mode-button ${editorMode === 'rendered' ? 'active' : ''}`} title="Widok wizualny" aria-label="Widok wizualny" aria-pressed={editorMode === 'rendered'} onClick={() => setEditorMode('rendered')}><Eye size={16} /></button><button className={`view-mode-button ${editorMode === 'source' ? 'active' : ''}`} title="Surowy Markdown" aria-label="Surowy Markdown" aria-pressed={editorMode === 'source'} onClick={() => setEditorMode('source')}><FileText size={16} /></button></div><span className="toolbar-separator" /><button className="inline-tool" onClick={() => { setEditingAsset(undefined); setShowDrawing(true) }}><Sparkles size={15} />Dodaj schemat</button><button className="inline-tool" onClick={() => setShowNoteLinkDialog(true)}><Link2 size={15} />Połącz notatkę</button>{currentAssets.map(asset => <button className="inline-tool asset-tool" key={asset.id} onClick={() => { setEditingAsset(asset); setShowDrawing(true) }}><Lightbulb size={14} />{asset.fileName}</button>)}</div>
-                <div className="template-toolbar"><select className="template-select" defaultValue="" aria-label="Wstaw szablon" onChange={event => { const template = templates.find(item => item.id === event.target.value); if (template) { patchNote(selectedNote.id, { title: template.title, content: template.content, tags: [...new Set([...selectedNote.tags, ...template.tags])] }); setEditorRevision(value => value + 1) } event.target.value = '' }}><option value="" disabled>Szablon</option>{templates.map(template => <option key={template.id} value={template.id}>{template.title}</option>)}</select><button type="button" className="icon-button template-manage-button" title="Zarządzaj szablonami" aria-label="Zarządzaj szablonami" onClick={() => setShowTemplateManager(true)}><Pencil size={14} /></button></div>
+                <div className="template-toolbar"><select className="template-select" defaultValue="" aria-label="Wstaw szablon" onChange={event => { const template = templates.find(item => item.id === event.target.value); if (template) { patchNote(selectedNote.id, { title: template.title, content: template.content, tags: [...new Set([...selectedNote.tags, ...template.tags])] }); setEditorRevision(value => value + 1) } event.target.value = '' }}><option value="" disabled>Szablon</option>{templates.map(template => <option key={template.id} value={template.id}>{template.title}</option>)}</select><button type="button" className="icon-button template-manage-button" title="Zarządzaj szablonami" aria-label="Zarządzaj szablonami" onClick={() => { setActiveReviewSessionId(NOTE_TEMPLATES_PAGE_ID); setMobileDrawer('none') }}><Pencil size={14} /></button></div>
               </div>
               {editorMode === 'source' ? <MarkdownSourceEditor noteId={selectedNote.id} markdown={selectedNote.content} onChange={content => patchNote(selectedNote.id, { content })} onSelectionChange={text => setEditorSelection({ noteId: selectedNote.id, mode: 'source', text })} /> : <Suspense fallback={<div className="editor-loading">Otwieram edytor…</div>}><MarkdownEditor key={`${selectedNote.id}-${editorRevision}`} noteId={selectedNote.id} markdown={selectedNote.content} assets={currentAssets} attachments={currentAttachments} revision={editorRevision} onChange={content => patchNote(selectedNote.id, { content })} onSelectionChange={text => setEditorSelection({ noteId: selectedNote.id, mode: 'rendered', text })} onOpenNote={openLinkedNote} /></Suspense>}
       <NoteConnections note={selectedNote} notes={notes} onOpen={note => openLinkedNote(note.id)} onShowGraph={() => setShowKnowledgeGraph(true)} />
@@ -1506,8 +1618,6 @@ function App() {
       {showDailyNotes && <DailyNotesDialog notes={notes} onSelect={openDailyNote} onClose={() => setShowDailyNotes(false)} />}
       {showTaskManager && <TaskManagerDialog notes={notes} tasks={parsedTasks} onUpdate={updateTask} onOpenNote={noteId => { setShowTaskManager(false); openLinkedNote(noteId) }} onCreate={createTask} onClose={() => setShowTaskManager(false)} />}
       {showKnowledgeGraph && <KnowledgeGraphDialog notes={notes} onOpen={note => { setShowKnowledgeGraph(false); openLinkedNote(note.id) }} onClose={() => setShowKnowledgeGraph(false)} />}
-      {showSavedSearches && <SavedSearchDialog searches={savedSearches} current={{ query, tag: searchTag, folder: searchFolder || (activeFilter !== 'all' && activeFilter !== 'favorites' && activeFilter !== 'root' ? activeFilter : '') }} onSave={name => { const folder = searchFolder || (activeFilter !== 'all' && activeFilter !== 'favorites' && activeFilter !== 'root' ? activeFilter : ''); setSavedSearches(current => [{ id: crypto.randomUUID(), name, query, tag: searchTag, folder }, ...current]) }} onApply={applySavedSearch} onDelete={id => setSavedSearches(current => current.filter(search => search.id !== id))} onClose={() => setShowSavedSearches(false)} />}
-      {showTemplateManager && <TemplateManagerDialog templates={templates} onSave={setTemplates} onClose={() => setShowTemplateManager(false)} />}
       {showQuickSearch && <NoteSearchDialog
         query={query}
         tag={searchTag}

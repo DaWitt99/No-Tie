@@ -1,9 +1,13 @@
 use serde::{Deserialize, Serialize};
+use futures_util::future::{select, Either};
+use std::collections::{HashMap, HashSet};
+use std::sync::Mutex;
 #[cfg(desktop)]
 use std::io::Write;
 #[cfg(desktop)]
 use std::path::{Component, Path};
 use tauri_plugin_dialog::DialogExt;
+use tokio::sync::watch;
 #[cfg(mobile)]
 use tauri_plugin_fs::{FsExt, OpenOptions};
 
@@ -100,6 +104,15 @@ struct OllamaChatStreamChunk {
     error: Option<String>,
 }
 
+#[derive(Default)]
+struct OllamaChatRegistry {
+    active: HashMap<String, watch::Sender<bool>>,
+    cancelled: HashSet<String>,
+}
+
+#[derive(Default)]
+struct OllamaChatRequests(Mutex<OllamaChatRegistry>);
+
 fn ollama_api_url(base_url: &str, route: &str) -> Result<String, String> {
     let base_url = base_url.trim().trim_end_matches('/');
     let parsed = reqwest::Url::parse(base_url).map_err(|_| {
@@ -163,7 +176,36 @@ async fn ollama_chat_stream(
     base_url: String,
     model: String,
     messages: Vec<OllamaMessage>,
+    request_id: String,
     on_chunk: tauri::ipc::Channel<String>,
+    requests: tauri::State<'_, OllamaChatRequests>,
+) -> Result<(), String> {
+    let (cancel_sender, mut cancel_receiver) = watch::channel(false);
+    {
+        let mut registry = requests
+            .0
+            .lock()
+            .map_err(|error| format!("Nie udało się zarejestrować generowania Ollama: {error}"))?;
+        if registry.cancelled.remove(&request_id) {
+            return Ok(());
+        }
+        registry.active.insert(request_id.clone(), cancel_sender);
+    }
+
+    let result = ollama_chat_stream_inner(base_url, model, messages, &on_chunk, &mut cancel_receiver).await;
+    if let Ok(mut registry) = requests.0.lock() {
+        registry.active.remove(&request_id);
+        registry.cancelled.remove(&request_id);
+    }
+    result
+}
+
+async fn ollama_chat_stream_inner(
+    base_url: String,
+    model: String,
+    messages: Vec<OllamaMessage>,
+    on_chunk: &tauri::ipc::Channel<String>,
+    cancel: &mut watch::Receiver<bool>,
 ) -> Result<(), String> {
     let model = model.trim();
     if model.is_empty() {
@@ -174,22 +216,32 @@ async fn ollama_chat_stream(
         .timeout(std::time::Duration::from_secs(300))
         .build()
         .map_err(|error| format!("Nie udało się przygotować połączenia: {error}"))?;
-    let response = client
-        .post(url)
-        .json(&serde_json::json!({ "model": model, "messages": messages, "stream": true }))
-        .send()
-        .await
-        .map_err(|_| format!("Nie można połączyć się z Ollama pod adresem {base_url}. Sprawdź, czy Ollama jest uruchomiona."))?;
+    let send_future = Box::pin(
+        client
+            .post(url)
+            .json(&serde_json::json!({ "model": model, "messages": messages, "stream": true }))
+            .send(),
+    );
+    let cancel_future = Box::pin(cancel.changed());
+    let response = match select(cancel_future, send_future).await {
+        Either::Left(_) => return Ok(()),
+        Either::Right((result, _)) => result
+            .map_err(|_| format!("Nie można połączyć się z Ollama pod adresem {base_url}. Sprawdź, czy Ollama jest uruchomiona."))?,
+    };
     let response = response
         .error_for_status()
         .map_err(|error| format!("Ollama zwróciła błąd: {error}"))?;
     let mut response = response;
     let mut pending = Vec::new();
-    while let Some(chunk) = response
-        .chunk()
-        .await
-        .map_err(|error| format!("Nie udało się odebrać strumienia Ollama: {error}"))?
-    {
+    loop {
+        let chunk_future = Box::pin(response.chunk());
+        let cancel_future = Box::pin(cancel.changed());
+        let chunk = match select(cancel_future, chunk_future).await {
+            Either::Left(_) => return Ok(()),
+            Either::Right((result, _)) => result
+                .map_err(|error| format!("Nie udało się odebrać strumienia Ollama: {error}"))?,
+        };
+        let Some(chunk) = chunk else { break };
         pending.extend_from_slice(&chunk);
         while let Some(line_end) = pending.iter().position(|byte| *byte == b'\n') {
             let line = pending.drain(..=line_end).collect::<Vec<_>>();
@@ -198,6 +250,23 @@ async fn ollama_chat_stream(
     }
     if !pending.is_empty() {
         forward_ollama_stream_line(&pending, &on_chunk)?;
+    }
+    Ok(())
+}
+
+#[tauri::command]
+fn ollama_chat_cancel(
+    request_id: String,
+    requests: tauri::State<'_, OllamaChatRequests>,
+) -> Result<(), String> {
+    let mut registry = requests
+        .0
+        .lock()
+        .map_err(|error| format!("Nie udało się zatrzymać generowania Ollama: {error}"))?;
+    if let Some(sender) = registry.active.get(&request_id) {
+        sender.send_replace(true);
+    } else {
+        registry.cancelled.insert(request_id);
     }
     Ok(())
 }
@@ -241,12 +310,14 @@ async fn save_archive_file(
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
+        .manage(OllamaChatRequests::default())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_fs::init())
         .invoke_handler(tauri::generate_handler![
             save_archive_file,
             ollama_list_models,
-            ollama_chat_stream
+            ollama_chat_stream,
+            ollama_chat_cancel
         ])
         .run(tauri::generate_context!())
         .expect("Błąd uruchamiania aplikacji No-Tie");

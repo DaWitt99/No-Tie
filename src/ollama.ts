@@ -160,28 +160,42 @@ async function consumeOllamaStream(response: Response, onChunk: (content: string
   if (pending.trim()) readOllamaStreamLine(pending, onChunk)
 }
 
-export async function streamOllamaMessage(baseUrl: string, model: string, messages: OllamaMessage[], onChunk: (content: string) => void): Promise<void> {
+export async function streamOllamaMessage(baseUrl: string, model: string, messages: OllamaMessage[], onChunk: (content: string) => void, signal?: AbortSignal): Promise<void> {
   if (!model.trim()) throw new Error('Wybierz model w ustawieniach Ollama.')
+  if (signal?.aborted) return
   if (isTauri()) {
+    const requestId = crypto.randomUUID()
+    const cancelNativeRequest = () => { void invoke<void>('ollama_chat_cancel', { requestId }).catch(() => {}) }
     const onChunkChannel = new Channel<string>()
     onChunkChannel.onmessage = onChunk
+    signal?.addEventListener('abort', cancelNativeRequest, { once: true })
     try {
-      await invoke<void>('ollama_chat_stream', { baseUrl, model, messages, onChunk: onChunkChannel })
+      if (signal?.aborted) {
+        cancelNativeRequest()
+        return
+      }
+      await invoke<void>('ollama_chat_stream', { baseUrl, model, messages, requestId, onChunk: onChunkChannel })
     } catch (error) {
+      if (signal?.aborted) return
       if (typeof error === 'string') throw new Error(error)
       throw connectionError(error, baseUrl)
+    } finally {
+      signal?.removeEventListener('abort', cancelNativeRequest)
     }
     return
   }
   try {
+    const timeoutSignal = AbortSignal.timeout(5 * 60_000)
+    const requestSignal = signal ? AbortSignal.any([signal, timeoutSignal]) : timeoutSignal
     const response = await fetch(apiUrl(baseUrl, 'chat'), {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ model, messages, stream: true }),
-      signal: AbortSignal.timeout(5 * 60_000),
+      signal: requestSignal,
     })
     await consumeOllamaStream(response, onChunk)
   } catch (error) {
+    if (signal?.aborted) return
     throw connectionError(error, baseUrl)
   }
 }
