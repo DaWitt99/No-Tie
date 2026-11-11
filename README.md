@@ -50,8 +50,8 @@ Interfejs i główne zależności używają licencji open source dopuszczającyc
 
 ## Android ARM64 — poprawka odczytu plików
 
-[Pobierz ZIP z APK dla Androida 15 / ARM64](https://github.com/DaWitt99/No-Tie/raw/refs/heads/installers/android-v0.1.0/installers/No-Tie-Android-0.1.0-arm64-api35-storage-fix.zip)
+[Pobierz ZIP z APK dla Androida 15 / ARM64](https://github.com/DaWitt99/No-Tie/raw/refs/heads/installers/android-v0.1.0/installers/No-Tie-Android-0.1.0-arm64-api35-dotfile-scope-fix.zip)
 
-Paczka zawiera pełny APK No-Tie 0.1.0 (ARM64, `targetSdk 35`, `minSdk 24`). Podpis i identyfikator aplikacji są zgodne z poprzednią paczką, więc można zainstalować aktualizację bez odinstalowywania No-Tie. Poprawka nadaje aplikacji dostęp do jej własnego katalogu Dokumenty i pokazuje szczegół błędu, jeśli odczyt nadal się nie powiedzie.
+Paczka zawiera pełny APK No-Tie 0.1.0 (ARM64, `targetSdk 35`, `minSdk 24`). Podpis i identyfikator aplikacji są zgodne z poprzednią paczką, więc można zainstalować aktualizację bez odinstalowywania No-Tie. Poprawka jawnie dopuszcza także ukryte pliki ustawień `.no-tie-*` w katalogu notatek (wcześniejszy APK je blokował) i pokazuje szczegół błędu, jeśli odczyt nadal się nie powiedzie.
 
-SHA-256 ZIP: `c0cced561ef17f5b73a857779471a4cf2d1d250439e71d8214d9b1c841a9b8f9`
+SHA-256 ZIP: `5a257452720706d94382216cccd5192b5f763dd5172b64f9355fdd6b2a62d042`
