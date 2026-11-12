@@ -1,8 +1,8 @@
 import { useEffect, useRef, useState, type MouseEvent as ReactMouseEvent } from 'react'
-import { MarkdownContextMenu, type MarkdownMenuAction } from './MarkdownContextMenu'
+import { MarkdownContextMenu, type MarkdownMenuAction, type MarkdownNoteAction } from './MarkdownContextMenu'
 import { AI_REPLACE_SELECTION_EVENT, WIKI_EMBED_INSERT_EVENT, WIKI_LINK_INSERT_EVENT, type AiReplaceSelectionDetail, type WikiEmbedInsertDetail, type WikiLinkInsertDetail } from './wikiLinks'
 
-type ContextMenuPosition = { left: number; top: number; opensLeft: boolean }
+type ContextMenuPosition = { left: number; top: number; opensLeft: boolean; opensUp: boolean }
 
 function selectedLineRange(markdown: string, from: number, to: number) {
   const start = from === 0 ? 0 : markdown.lastIndexOf('\n', from - 1) + 1
@@ -22,11 +22,15 @@ export function MarkdownSourceEditor({
   markdown,
   onChange,
   onSelectionChange,
+  noteActions,
+  onNoteAction,
 }: {
   noteId: string
   markdown: string
   onChange: (markdown: string) => void
   onSelectionChange: (text: string) => void
+  noteActions: MarkdownNoteAction[]
+  onNoteAction: (id: string) => void
 }) {
   const textareaRef = useRef<HTMLTextAreaElement>(null)
   const contextRange = useRef({ from: 0, to: 0 })
@@ -39,7 +43,7 @@ export function MarkdownSourceEditor({
       if (detail?.noteId !== noteId || !detail.target) return
       const input = textareaRef.current
       if (!input) return
-      const { from, to } = selectionRange.current
+      const { from, to } = contextRange.current
       const selected = input.value.slice(from, to)
       const wikiLink = selected ? `[[${detail.target}|${selected}]]` : `[[${detail.target}]]`
       const next = input.value.slice(0, from) + wikiLink + input.value.slice(to)
@@ -61,12 +65,17 @@ export function MarkdownSourceEditor({
       const detail = (event as CustomEvent<WikiEmbedInsertDetail>).detail
       const input = textareaRef.current
       if (detail?.noteId !== noteId || !input) return
-      const from = input.selectionStart
-      const to = input.selectionEnd
+      const { from, to } = contextRange.current
+      const line = selectedLineRange(input.value, from, to)
+      const insertion = line.end
       const macro = `![[${detail.target}]]`
-      const next = input.value.slice(0, from) + macro + input.value.slice(to)
+      const before = input.value.slice(0, insertion)
+      const after = input.value.slice(insertion)
+      const separator = before.endsWith('\n\n') ? '' : before.endsWith('\n') ? '\n' : '\n\n'
+      const next = `${before}${separator}${macro}${after.startsWith('\n') ? '' : '\n'}${after}`
+      const cursor = insertion + separator.length + macro.length
       onChange(next)
-      requestAnimationFrame(() => { input.focus(); input.setSelectionRange(from + macro.length, from + macro.length) })
+      requestAnimationFrame(() => { input.focus(); input.setSelectionRange(cursor, cursor) })
     }
     window.addEventListener(WIKI_EMBED_INSERT_EVENT, insertEmbed)
     return () => window.removeEventListener(WIKI_EMBED_INSERT_EVENT, insertEmbed)
@@ -78,7 +87,7 @@ export function MarkdownSourceEditor({
       if (detail?.noteId !== noteId) return
       const input = textareaRef.current
       if (!input) return
-      const { from, to } = selectionRange.current
+      const { from, to } = contextRange.current
       const next = input.value.slice(0, from) + detail.replacement + input.value.slice(to)
       onChange(next)
       onSelectionChange(detail.replacement)
@@ -96,6 +105,7 @@ export function MarkdownSourceEditor({
       left: Math.max(8, Math.min(event.clientX, window.innerWidth - 222)),
       top: Math.max(8, Math.min(event.clientY, window.innerHeight - 160)),
       opensLeft: event.clientX > window.innerWidth - 486,
+      opensUp: event.clientY > window.innerHeight - 320,
     })
   }
 
@@ -214,6 +224,6 @@ export function MarkdownSourceEditor({
         onSelectionChange(input.value.slice(input.selectionStart, input.selectionEnd))
       }}
     />
-    {contextMenu && <MarkdownContextMenu {...contextMenu} onAction={applyAction} onDismiss={() => setContextMenu(null)} />}
+    {contextMenu && <MarkdownContextMenu {...contextMenu} noteActions={noteActions} onNoteAction={action => { setContextMenu(null); onNoteAction(action) }} onAction={applyAction} onDismiss={() => setContextMenu(null)} />}
   </>
 }

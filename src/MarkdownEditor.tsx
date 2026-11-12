@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState, type MouseEvent as ReactMouseEvent } from 'react'
+import { useEffect, useRef, useState, type MouseEvent as ReactMouseEvent, type PointerEvent as ReactPointerEvent } from 'react'
 import { commandsCtx, defaultValueCtx, editorViewCtx, Editor, rootCtx } from '@milkdown/kit/core'
 import { Fragment } from '@milkdown/kit/prose/model'
 import {
@@ -24,14 +24,15 @@ import { TextSelection } from '@milkdown/kit/prose/state'
 import type { EditorView } from '@milkdown/kit/prose/view'
 import { getMarkdown, replaceAll, replaceRange } from '@milkdown/kit/utils'
 import { markdownForEditor, markdownFromEditor } from './content'
-import { MarkdownContextMenu, type MarkdownMenuAction } from './MarkdownContextMenu'
+import { MarkdownContextMenu, type MarkdownMenuAction, type MarkdownNoteAction } from './MarkdownContextMenu'
 import { MarkdownTableMenu, type MarkdownTableAction } from './MarkdownTableMenu'
 import { highlightSchema, markdownMarkupPlugins, noteCommentSchema, underlineSchema } from './markdownMarkup'
-import { applyTableColumnWidths, markdownWithTableColumnWidths, parseTableColumnWidths, stripTableWidthMetadata } from './markdownTableWidths'
+import { applyTableColumnWidths, applyTableRowHeights, markdownWithTableColumnWidths, parseTableColumnWidths, parseTableRowHeights, stripTableWidthMetadata } from './markdownTableWidths'
+import { noteEmbedPlugins, refreshNoteEmbeds } from './noteEmbeds'
 import { AI_REPLACE_SELECTION_EVENT, WIKI_EMBED_INSERT_EVENT, WIKI_LINK_INSERT_EVENT, markdownToWikiLinks, wikiLinksToMarkdown, wikiNoteHref, wikiNoteTargetFromHref, type AiReplaceSelectionDetail, type WikiEmbedInsertDetail, type WikiLinkInsertDetail } from './wikiLinks'
 import type { NoteAsset, NoteAttachment } from './types'
 
-type ContextMenuState = { left: number; top: number; opensLeft: boolean }
+type ContextMenuState = { left: number; top: number; opensLeft: boolean; opensUp: boolean }
 type TableTarget = { tablePos: number; row: number; column: number; element: HTMLTableElement }
 type TableOverlayState = TableTarget & { left: number; top: number }
 type TableContextState = TableTarget & { left: number; top: number }
@@ -105,6 +106,10 @@ export function MarkdownEditor({
   onSelectionChange,
   onOpenNote,
   onOpenAttachment,
+  notes,
+  allAssets,
+  noteActions,
+  onNoteAction,
 }: {
   noteId: string
   markdown: string
@@ -115,6 +120,10 @@ export function MarkdownEditor({
   onSelectionChange: (text: string) => void
   onOpenNote: (target: string) => void
   onOpenAttachment: (fileName: string) => void
+  notes: import('./types').Note[]
+  allAssets: NoteAsset[]
+  noteActions: MarkdownNoteAction[]
+  onNoteAction: (id: string) => void
 }) {
   const root = useRef<HTMLDivElement>(null)
   const tableFilterStyle = useRef<HTMLStyleElement>(null)
@@ -127,10 +136,13 @@ export function MarkdownEditor({
   const onSelectionChangeRef = useRef(onSelectionChange)
   const onOpenNoteRef = useRef(onOpenNote)
   const onOpenAttachmentRef = useRef(onOpenAttachment)
+  const notesRef = useRef(notes)
+  const assetsRef = useRef(allAssets)
   const [contextMenu, setContextMenu] = useState<ContextMenuState | null>(null)
   const [hoverTable, setHoverTable] = useState<TableOverlayState | null>(null)
   const [tableContextMenu, setTableContextMenu] = useState<TableContextState | null>(null)
   const tableFilter = useRef<TableFilterState | null>(null)
+  const rowResize = useRef<{ row: HTMLTableRowElement; startY: number; startHeight: number; pointerId: number; changed: boolean } | null>(null)
   const [tableFilterView, setTableFilterView] = useState<TableFilterState | null>(null)
   const [tableRevision, setTableRevision] = useState(0)
   const [tableCopied, setTableCopied] = useState(false)
@@ -141,6 +153,7 @@ export function MarkdownEditor({
   useEffect(() => { onSelectionChangeRef.current = onSelectionChange }, [onSelectionChange])
   useEffect(() => { onOpenNoteRef.current = onOpenNote }, [onOpenNote])
   useEffect(() => { onOpenAttachmentRef.current = onOpenAttachment }, [onOpenAttachment])
+  useEffect(() => { notesRef.current = notes; assetsRef.current = allAssets }, [notes, allAssets])
   useEffect(() => {
     const style = document.createElement('style')
     style.dataset.noTieTableFilterStyle = ''
@@ -166,11 +179,13 @@ export function MarkdownEditor({
           onChangeRef.current(next)
         })
       })
-      .use([...commonmark, columnResizingPlugin, ...gfm, ...markdownMarkupPlugins, listener])
+      .use([...commonmark, columnResizingPlugin, ...gfm, ...markdownMarkupPlugins, ...noteEmbedPlugins, listener])
     void editor.create().then(() => {
       editorRef.current = editor
       const widths = parseTableColumnWidths(initialDocument.markdown)
       if (widths.length) applyTableColumnWidths(editor.ctx.get(editorViewCtx), widths)
+      applyTableRowHeights(editor.ctx.get(editorViewCtx), parseTableRowHeights(initialDocument.markdown))
+      refreshNoteEmbeds(root.current, notesRef.current, assetsRef.current, note => onOpenNoteRef.current(note.title || note.id))
     }).catch(error => console.error('Nie udało się uruchomić edytora Markdown', error))
     return () => {
       editorRef.current = null
@@ -179,20 +194,61 @@ export function MarkdownEditor({
   }, [noteId, revision, initialDocument])
 
   useEffect(() => {
+    refreshNoteEmbeds(root.current, notes, allAssets, note => onOpenNoteRef.current(note.title || note.id))
+  }, [notes, allAssets])
+
+  useEffect(() => {
+    const moveRowResize = (event: PointerEvent) => {
+      const active = rowResize.current
+      if (!active || event.pointerId !== active.pointerId) return
+      if (event.cancelable) event.preventDefault()
+      const height = Math.max(28, Math.round(active.startHeight + event.clientY - active.startY))
+      active.row.style.height = `${height}px`
+      active.row.dataset.noTieRowHeight = String(height)
+      active.changed = true
+    }
+    const finishRowResize = (event: PointerEvent) => {
+      const active = rowResize.current
+      if (!active || event.pointerId !== active.pointerId) return
+      rowResize.current = null
+      document.body.classList.remove('table-row-resizing')
+      if (active.changed && editorRef.current) saveEditorMarkdown(editorRef.current)
+    }
+    window.addEventListener('pointermove', moveRowResize, { passive: false })
+    window.addEventListener('pointerup', finishRowResize)
+    window.addEventListener('pointercancel', finishRowResize)
+    return () => {
+      window.removeEventListener('pointermove', moveRowResize)
+      window.removeEventListener('pointerup', finishRowResize)
+      window.removeEventListener('pointercancel', finishRowResize)
+      document.body.classList.remove('table-row-resizing')
+    }
+  }, [])
+
+  useEffect(() => {
     const insertWikiLink = (event: Event) => {
       const detail = (event as CustomEvent<WikiLinkInsertDetail>).detail
       if (detail?.noteId !== noteId || !detail.target) return
       const editor = editorRef.current
       if (!editor) return
       const view = editor.ctx.get(editorViewCtx)
-      const { from, to, empty } = view.state.selection
-      const label = empty ? detail.target : view.state.doc.textBetween(from, to, '\n')
+      const current = view.state.selection
+      const { from, to } = contextRange.current
+      const max = view.state.doc.content.size
+      const safeFrom = Math.max(0, Math.min(from, max))
+      const safeTo = Math.max(safeFrom, Math.min(to, max))
+      if (current.from !== safeFrom || current.to !== safeTo) {
+        const selection = safeFrom === safeTo ? TextSelection.near(view.state.doc.resolve(safeFrom)) : TextSelection.create(view.state.doc, safeFrom, safeTo)
+        view.dispatch(view.state.tr.setSelection(selection))
+      }
+      const { from: selectionFrom, to: selectionTo, empty } = view.state.selection
+      const label = empty ? detail.target : view.state.doc.textBetween(selectionFrom, selectionTo, '\n')
       const linkMark = view.state.schema.marks.link
-      if (!linkMark) view.dispatch(view.state.tr.insertText(`[[${detail.target}]]`, from, to))
+      if (!linkMark) view.dispatch(view.state.tr.insertText(`[[${detail.target}]]`, selectionFrom, selectionTo))
       else {
         const transaction = view.state.tr
-        if (empty) transaction.insertText(label, from, to)
-        transaction.addMark(from, from + label.length, linkMark.create({ href: wikiNoteHref(detail.target) }))
+        if (empty) transaction.insertText(label, selectionFrom, selectionTo)
+        transaction.addMark(selectionFrom, selectionFrom + label.length, linkMark.create({ href: wikiNoteHref(detail.target) }))
         view.dispatch(transaction)
       }
       view.focus()
@@ -208,8 +264,28 @@ export function MarkdownEditor({
       const editor = editorRef.current
       if (!editor) return
       const view = editor.ctx.get(editorViewCtx)
-      const { from, to } = selectedRange.current
-      view.dispatch(view.state.tr.insertText(`![[${detail.target}]]`, from, to))
+      const captured = contextRange.current
+      const max = view.state.doc.content.size
+      const from = Math.max(0, Math.min(captured.from, max))
+      const to = Math.max(from, Math.min(captured.to, max))
+      const current = view.state.selection
+      if (current.from !== from || current.to !== to) {
+        const selection = from === to ? TextSelection.near(view.state.doc.resolve(from)) : TextSelection.create(view.state.doc, from, to)
+        view.dispatch(view.state.tr.setSelection(selection))
+      }
+      const nodeType = view.state.schema.nodes.noTieEmbed
+      if (!nodeType) return
+      const selection = view.state.selection
+      let depth = selection.$from.depth
+      while (depth > 0 && !selection.$from.node(depth).isTextblock) depth--
+      const insertion = depth > 0 ? selection.$from.after(depth) : selection.to
+      const embed = nodeType.create({ target: detail.target })
+      const transaction = view.state.tr.insert(insertion, embed)
+      const after = Math.min(insertion + embed.nodeSize, transaction.doc.content.size)
+      transaction.setSelection(TextSelection.near(transaction.doc.resolve(after)))
+      view.dispatch(transaction)
+      refreshNoteEmbeds(root.current, notesRef.current, assetsRef.current, note => onOpenNoteRef.current(note.title || note.id))
+      saveEditorMarkdown(editor)
       view.focus()
     }
     window.addEventListener(WIKI_EMBED_INSERT_EVENT, insertEmbed)
@@ -223,7 +299,15 @@ export function MarkdownEditor({
       const editor = editorRef.current
       if (!editor) return
       const view = editor.ctx.get(editorViewCtx)
-      const { from, to } = selectedRange.current
+      const captured = contextRange.current
+      const max = view.state.doc.content.size
+      const from = Math.max(0, Math.min(captured.from, max))
+      const to = Math.max(from, Math.min(captured.to, max))
+      const current = view.state.selection
+      if (current.from !== from || current.to !== to) {
+        const selection = from === to ? TextSelection.near(view.state.doc.resolve(from)) : TextSelection.create(view.state.doc, from, to)
+        view.dispatch(view.state.tr.setSelection(selection))
+      }
       view.dispatch(view.state.tr.insertText(detail.replacement, from, to))
       view.focus()
     }
@@ -321,6 +405,7 @@ export function MarkdownEditor({
 
   function dismissTableToolbar(event: ReactMouseEvent<HTMLDivElement>) {
     const related = event.relatedTarget
+    if (!(related instanceof Element) || !related.closest('.markdown-editor')) document.body.classList.remove('table-row-cursor')
     if (related instanceof Element && (activeTableElement.current?.contains(related) || related.closest('.markdown-table-tools'))) {
       if (tableToolbarDismissTimer.current !== null) window.clearTimeout(tableToolbarDismissTimer.current)
       tableToolbarDismissTimer.current = null
@@ -353,6 +438,7 @@ export function MarkdownEditor({
     }
     const { from, to } = view.state.selection
     contextRange.current = { from, to }
+    selectedRange.current = { from, to }
 
     const rootWidth = 214
     const menuHeight = 150
@@ -360,7 +446,34 @@ export function MarkdownEditor({
       left: Math.max(8, Math.min(event.clientX, window.innerWidth - rootWidth - 8)),
       top: Math.max(8, Math.min(event.clientY, window.innerHeight - menuHeight - 8)),
       opensLeft: event.clientX > window.innerWidth - 486,
+      opensUp: event.clientY > window.innerHeight - 320,
     })
+  }
+
+  function startRowResize(event: ReactPointerEvent<HTMLDivElement>) {
+    if (event.button !== 0) return
+    const target = event.target
+    if (!(target instanceof Element) || target.closest('.markdown-table-tools')) return
+    const cell = target.closest('td, th') as HTMLTableCellElement | null
+    const row = cell?.parentElement
+    if (!(row instanceof HTMLTableRowElement) || !cell) return
+    const cellBounds = cell.getBoundingClientRect()
+    if (event.clientY < cellBounds.bottom - 6 || event.clientY > cellBounds.bottom + 2) return
+    event.preventDefault()
+    event.stopPropagation()
+    rowResize.current = { row, startY: event.clientY, startHeight: row.getBoundingClientRect().height, pointerId: event.pointerId, changed: false }
+    document.body.classList.add('table-row-resizing')
+  }
+
+  function updateRowResizeCursor(event: ReactMouseEvent<HTMLDivElement>) {
+    const target = event.target
+    if (!(target instanceof Element) || target.closest('.markdown-table-tools')) {
+      document.body.classList.remove('table-row-cursor')
+      return
+    }
+    const cell = target.closest('td, th') as HTMLTableCellElement | null
+    const bounds = cell?.getBoundingClientRect()
+    document.body.classList.toggle('table-row-cursor', Boolean(bounds && event.clientY >= bounds.bottom - 6 && event.clientY <= bounds.bottom + 2))
   }
 
   function currentTablePosition(view: EditorView, target: TableTarget) {
@@ -722,12 +835,14 @@ export function MarkdownEditor({
     className="markdown-editor"
     ref={root}
     aria-label="Treść notatki"
+    onPointerDown={startRowResize}
     onContextMenu={showContextMenu}
     onMouseOver={updateTableHover}
+    onMouseMove={updateRowResizeCursor}
     onMouseOut={dismissTableToolbar}
     onClick={openWikiLink}
   >
-    {contextMenu && <MarkdownContextMenu {...contextMenu} onAction={applyAction} onDismiss={() => setContextMenu(null)} />}
+    {contextMenu && <MarkdownContextMenu {...contextMenu} noteActions={noteActions} onNoteAction={action => { setContextMenu(null); onNoteAction(action) }} onAction={applyAction} onDismiss={() => setContextMenu(null)} />}
     {!tableContextMenu && hoverTable && <MarkdownTableMenu
       key={`hover-${hoverTable.tablePos}-${hoverTable.row}-${hoverTable.column}`}
       mode="toolbar"

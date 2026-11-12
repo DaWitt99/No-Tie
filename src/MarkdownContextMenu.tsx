@@ -5,7 +5,9 @@ export type MarkdownMenuAction =
   | 'bullet-list' | 'ordered-list' | 'task-list' | 'heading-1' | 'heading-2' | 'heading-3' | 'paragraph' | 'blockquote'
   | 'footnote' | 'table' | 'callout' | 'horizontal-rule' | 'code-block' | 'math-block'
 
-type MenuSection = 'format' | 'paragraph' | 'insert'
+type MenuSection = 'format' | 'paragraph' | 'insert' | 'note'
+
+export type MarkdownNoteAction = { id: string; label: string; disabled?: boolean }
 
 const menuSections: { id: MenuSection; label: string; items: { action: MarkdownMenuAction; label: string }[] }[] = [
   {
@@ -49,13 +51,19 @@ export function MarkdownContextMenu({
   left,
   top,
   opensLeft,
+  opensUp,
   onAction,
+  noteActions,
+  onNoteAction,
   onDismiss,
 }: {
   left: number
   top: number
   opensLeft: boolean
+  opensUp: boolean
   onAction: (action: MarkdownMenuAction) => void
+  noteActions?: MarkdownNoteAction[]
+  onNoteAction?: (id: string) => void
   onDismiss: () => void
 }) {
   const menuRef = useRef<HTMLDivElement>(null)
@@ -99,9 +107,23 @@ export function MarkdownContextMenu({
       >
         <span>{section.label}</span><span className="markdown-context-chevron">›</span>
       </button>
-      {activeSection === section.id && <div className={`markdown-context-submenu ${opensLeft ? 'opens-left' : ''}`} role="menu" aria-label={section.label}>
+      {activeSection === section.id && <div className={`markdown-context-submenu ${opensLeft ? 'opens-left' : ''} ${opensUp ? 'opens-up' : ''}`} role="menu" aria-label={section.label}>
         {section.items.map(item => <button type="button" role="menuitem" key={item.action} onClick={() => onAction(item.action)}>{item.label}</button>)}
       </div>}
     </div>)}
+    {noteActions?.length ? <div className="markdown-context-section">
+      <button
+        type="button"
+        role="menuitem"
+        className={`markdown-context-category ${activeSection === 'note' ? 'active' : ''}`}
+        aria-haspopup="menu"
+        aria-expanded={activeSection === 'note'}
+        onPointerEnter={() => setActiveSection('note')}
+        onClick={() => setActiveSection('note')}
+      ><span>Notatka</span><span className="markdown-context-chevron">›</span></button>
+      {activeSection === 'note' && <div className={`markdown-context-submenu ${opensLeft ? 'opens-left' : ''} ${opensUp ? 'opens-up' : ''}`} role="menu" aria-label="Akcje notatki">
+        {noteActions.map(item => <button type="button" role="menuitem" key={item.id} disabled={item.disabled} onClick={() => onNoteAction?.(item.id)}>{item.label}</button>)}
+      </div>}
+    </div> : null}
   </div>
 }
