@@ -4,7 +4,7 @@ No-Tie to aplikacja Tauri 2 do tworzenia notatek Markdown i prostych schematów 
 
 ## Wymagania
 
-- Node.js `^20.19.0` albo `>=22.12.0` i npm.
+- Node.js `>=22.13.0` i npm.
 - Rust 1.90 lub nowszy oraz Cargo.
 - Biblioteki wymagane przez Tauri dla danego systemu. Na Linuksie zobacz [oficjalne wymagania Tauri](https://v2.tauri.app/start/prerequisites/).
 
