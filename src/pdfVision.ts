@@ -15,13 +15,14 @@ function dataUrlBytes(dataUrl: string): Uint8Array {
   return bytes
 }
 
-export async function pdfAttachmentToVisionPages(dataUrl: string, pageLimit: number): Promise<PdfVisionResult> {
+export async function pdfAttachmentToVisionPages(dataUrl: string, pageLimit: number, pageStart = 1): Promise<PdfVisionResult> {
   const loadingTask = getDocument({ data: dataUrlBytes(dataUrl) })
   const document = await loadingTask.promise
   try {
-    const pageCount = Math.min(document.numPages, Math.max(0, pageLimit))
+    const firstPage = Math.min(document.numPages + 1, Math.max(1, Math.floor(pageStart)))
+    const lastPage = Math.min(document.numPages, firstPage + Math.max(0, Math.floor(pageLimit)) - 1)
     const pages: PdfVisionPage[] = []
-    for (let pageNumber = 1; pageNumber <= pageCount; pageNumber += 1) {
+    for (let pageNumber = firstPage; pageNumber <= lastPage; pageNumber += 1) {
       const page = await document.getPage(pageNumber)
       const baseViewport = page.getViewport({ scale: 1 })
       const scale = Math.min(1.6, 1600 / Math.max(baseViewport.width, baseViewport.height))

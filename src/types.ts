@@ -37,6 +37,9 @@ export type NoteAttachment = {
   size: number
   contentHash?: string
   transcript?: string
+  transcriptSegments?: { startMs: number; endMs?: number; text: string; speaker?: string }[]
+  extractedText?: string
+  pdfAnnotations?: { id: string; page: number; text: string; quote?: string; createdAt: number }[]
 }
 
 export type NoteAttachmentReference = Pick<NoteAttachment, 'fileName' | 'mimeType' | 'size' | 'contentHash'>

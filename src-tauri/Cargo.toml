@@ -1,6 +1,6 @@
 [package]
 name = "no-tie"
-version = "0.1.0"
+version = "0.1.1"
 description = "Lokalne notatki Markdown i schematy SVG"
 authors = ["No-Tie contributors"]
 edition = "2021"
@@ -16,7 +16,7 @@ tauri-build = { version = "2", features = [] }
 tauri = { version = "2", features = [] }
 tauri-plugin-dialog = { version = "2", default-features = false, features = ["xdg-portal"] }
 tauri-plugin-fs = "2"
-reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+reqwest = { version = "0.12", default-features = false, features = ["json", "multipart", "rustls-tls"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 futures-util = "0.3"

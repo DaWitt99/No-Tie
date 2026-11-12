@@ -8,6 +8,7 @@ const NOTE_VERSIONS_FILE = '.no-tie-versions.json'
 const WORKSPACE_BACKUP_FILE = '.no-tie-workspace.json'
 const ATTACHMENT_HISTORY_FILE = '.no-tie-attachment-history.json'
 const ATTACHMENT_TRANSCRIPTS_FILE = '.no-tie-attachment-transcripts.json'
+const ATTACHMENT_METADATA_FILE = '.no-tie-attachment-metadata.json'
 
 function safeFilePart(value: string): string {
   return value.normalize('NFKD').replace(/[\u0300-\u036f]/g, '').toLowerCase().replace(/[^a-z0-9-]+/g, '-').replace(/^-|-$/g, '').slice(0, 48) || 'notatka'
@@ -42,6 +43,8 @@ export function buildArchive(notes: Note[], assets: NoteAsset[], versions: NoteV
     })
     const transcripts = Object.fromEntries(attachments.filter(attachment => attachment.noteId === note.id && attachment.transcript?.trim()).map(attachment => [attachment.fileName, attachment.transcript]))
     if (Object.keys(transcripts).length) files[`${folder}/${ATTACHMENT_TRANSCRIPTS_FILE}`] = strToU8(JSON.stringify(transcripts, null, 2))
+    const attachmentMetadata = Object.fromEntries(attachments.filter(attachment => attachment.noteId === note.id && (attachment.extractedText || attachment.transcriptSegments?.length || attachment.pdfAnnotations?.length)).map(attachment => [attachment.fileName, { extractedText: attachment.extractedText, transcriptSegments: attachment.transcriptSegments, pdfAnnotations: attachment.pdfAnnotations }]))
+    if (Object.keys(attachmentMetadata).length) files[`${folder}/${ATTACHMENT_METADATA_FILE}`] = strToU8(JSON.stringify(attachmentMetadata, null, 2))
   })
   if (workspace) files[WORKSPACE_BACKUP_FILE] = strToU8(JSON.stringify(workspace, null, 2))
   if (attachmentHistory.length) files[ATTACHMENT_HISTORY_FILE] = strToU8(JSON.stringify(attachmentHistory, null, 2))
@@ -185,12 +188,20 @@ export function parseArchive(bytes: Uint8Array): { notes: Note[]; assets: NoteAs
     const baseDirectory = lastSlash < 0 ? '' : path.slice(0, lastSlash)
     const basePrefix = baseDirectory ? `${baseDirectory}/` : ''
     let attachmentTranscripts: Record<string, string> = {}
+    let attachmentMetadata: Record<string, Partial<Pick<NoteAttachment, 'extractedText' | 'transcriptSegments' | 'pdfAnnotations'>>> = {}
     const transcriptFile = files[`${basePrefix}${ATTACHMENT_TRANSCRIPTS_FILE}`]
     if (transcriptFile) {
       try {
         const parsed = JSON.parse(strFromU8(transcriptFile)) as unknown
         if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) attachmentTranscripts = Object.fromEntries(Object.entries(parsed).filter((entry): entry is [string, string] => typeof entry[0] === 'string' && typeof entry[1] === 'string'))
       } catch { /* An invalid optional transcript manifest does not block note import. */ }
+    }
+    const metadataFile = files[`${basePrefix}${ATTACHMENT_METADATA_FILE}`]
+    if (metadataFile) {
+      try {
+        const parsed = JSON.parse(strFromU8(metadataFile)) as unknown
+        if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) attachmentMetadata = parsed as typeof attachmentMetadata
+      } catch { /* Ignore optional attachment indexing metadata. */ }
     }
     const notesInSameDirectory = markdownPaths.filter(markdownPath => markdownPath.includes('/') ? markdownPath.slice(0, markdownPath.lastIndexOf('/')) === baseDirectory : !baseDirectory).length
     const externalPathMappings: [string, string][] = []
@@ -235,7 +246,7 @@ export function parseArchive(bytes: Uint8Array): { notes: Note[]; assets: NoteAs
       } else {
         const mimeType = supportedAttachment(fileName)
         if (mimeType) {
-          attachments.push({ id: `${note.id}:${fileName}`, noteId: note.id, fileName, mimeType, dataUrl: bytesToDataUrl(files[assetPath], mimeType), size: files[assetPath].byteLength, contentHash: fileFingerprint(files[assetPath]), transcript: attachmentTranscripts[fileName] })
+          attachments.push({ ...attachmentMetadata[fileName], id: `${note.id}:${fileName}`, noteId: note.id, fileName, mimeType, dataUrl: bytesToDataUrl(files[assetPath], mimeType), size: files[assetPath].byteLength, contentHash: fileFingerprint(files[assetPath]), transcript: attachmentTranscripts[fileName] })
           if (!noTieLayout) {
             const referenceNames = referencedFiles.get(assetPath) ?? [assetPath.startsWith(basePrefix) ? assetPath.slice(basePrefix.length) : assetPath]
             referenceNames.forEach(reference => externalPathMappings.push([reference, `./assets/${fileName}`]))

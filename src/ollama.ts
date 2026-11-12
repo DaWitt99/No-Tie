@@ -7,6 +7,44 @@ export type OllamaModel = {
   modified_at?: string
 }
 
+export async function transcribeLocalAudio(endpoint: string, fileName: string, mimeType: string, dataUrl: string): Promise<unknown> {
+  const comma = dataUrl.indexOf(',')
+  if (comma < 0) throw new Error('Plik audio ma nieprawidłowy format.')
+  const binary = atob(dataUrl.slice(comma + 1))
+  const bytes = new Uint8Array(binary.length)
+  for (let index = 0; index < binary.length; index += 1) bytes[index] = binary.charCodeAt(index)
+  if (isTauri()) return invoke<unknown>('transcribe_local_audio', { endpoint, fileName, mimeType, bytes })
+  const form = new FormData()
+  form.append('file', new Blob([bytes], { type: mimeType }), fileName)
+  form.append('model', 'whisper-1')
+  form.append('response_format', 'verbose_json')
+  const response = await fetch(endpoint, { method: 'POST', body: form, signal: AbortSignal.timeout(15 * 60_000) })
+  const result: unknown = await response.json().catch(() => undefined)
+  if (!response.ok) {
+    const detail = result && typeof result === 'object' && 'error' in result ? String((result as { error: unknown }).error) : `HTTP ${response.status}`
+    throw new Error(`Lokalna usługa transkrypcji odrzuciła plik (${detail}).`)
+  }
+  return result
+}
+
+export async function embedOllamaTexts(baseUrl: string, model: string, input: string[]): Promise<number[][]> {
+  if (!model.trim()) throw new Error('Wybierz model embeddingów Ollama.')
+  if (isTauri()) return invoke<number[][]>('ollama_embed', { baseUrl, model, input })
+  try {
+    const response = await fetch(apiUrl(baseUrl, 'embed'), {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ model, input }),
+      signal: AbortSignal.timeout(120_000),
+    })
+    const result = await readJson<{ embeddings?: number[][] }>(response)
+    if (!Array.isArray(result.embeddings)) throw new Error('Model nie zwrócił wektorów semantycznych.')
+    return result.embeddings
+  } catch (error) {
+    throw connectionError(error, baseUrl)
+  }
+}
+
 export type OllamaMessage = {
   role: 'system' | 'user' | 'assistant'
   content: string

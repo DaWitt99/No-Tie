@@ -15,6 +15,7 @@ const SAVED_SEARCHES_FILE = '.no-tie-saved-searches.json'
 const NOTE_TEMPLATES_FILE = '.no-tie-templates.json'
 const NOTE_ATTACHMENT_HISTORY_FILE = '.no-tie-attachment-history.json'
 const NOTE_ATTACHMENT_TRANSCRIPTS_FILE = '.no-tie-attachment-transcripts.json'
+const NOTE_ATTACHMENT_METADATA_FILE = '.no-tie-attachment-metadata.json'
 const ADVANCED_DATA_FILE = '.no-tie-advanced.json'
 const AUTO_BACKUP_FOLDER = '_kopie-zapasowe'
 const MAX_NOTE_VERSIONS = 80
@@ -725,6 +726,34 @@ async function readNativeAttachmentTranscripts(directory: string): Promise<Recor
   } catch { return {} }
 }
 
+type AttachmentExtraMetadata = Pick<NoteAttachment, 'extractedText' | 'transcriptSegments' | 'pdfAnnotations'>
+async function readNativeAttachmentMetadata(directory: string): Promise<Record<string, AttachmentExtraMetadata>> {
+  const path = await join(directory, NOTE_ATTACHMENT_METADATA_FILE)
+  if (!await exists(path)) return {}
+  try {
+    const value = JSON.parse(await readTextFile(path)) as unknown
+    if (!value || typeof value !== 'object' || Array.isArray(value)) return {}
+    return value as Record<string, AttachmentExtraMetadata>
+  } catch { return {} }
+}
+
+async function writeNativeAttachmentMetadata(directory: string, fileName: string, metadata: AttachmentExtraMetadata): Promise<void> {
+  const key = `${directory}\u0000${fileName}`
+  const previous = attachmentTranscriptQueues.get(key) ?? Promise.resolve()
+  const current = previous.catch(() => undefined).then(async () => {
+    const all = await readNativeAttachmentMetadata(directory)
+    const merged = { ...(all[fileName] ?? {}), ...metadata }
+    for (const [field, value] of Object.entries(merged)) if (value === undefined || value === '') delete merged[field as keyof typeof merged]
+    if (Object.keys(merged).length) all[fileName] = merged
+    else delete all[fileName]
+    const path = await join(directory, NOTE_ATTACHMENT_METADATA_FILE)
+    if (Object.keys(all).length) await writeTextFile(path, JSON.stringify(all, null, 2))
+    else if (await exists(path)) await remove(path)
+  })
+  attachmentTranscriptQueues.set(key, current)
+  try { await current } finally { if (attachmentTranscriptQueues.get(key) === current) attachmentTranscriptQueues.delete(key) }
+}
+
 async function writeNativeAttachmentTranscript(directory: string, fileName: string, transcript: string): Promise<void> {
   const key = `${directory}\u0000${fileName}`
   const previous = attachmentTranscriptQueues.get(key) ?? Promise.resolve()
@@ -752,13 +781,14 @@ async function readNativeAttachments(noteId: string, directory: string): Promise
   const assetsDirectory = await join(directory, 'assets')
   if (!await exists(assetsDirectory)) return []
   const transcripts = await readNativeAttachmentTranscripts(directory)
+  const metadata = await readNativeAttachmentMetadata(directory)
   const attachments: NoteAttachment[] = []
   for (const entry of await readDir(assetsDirectory)) {
     if (!entry.isFile || entry.name.toLowerCase().endsWith('.svg') || !attachmentMimeType(entry.name).startsWith('image/') && attachmentMimeType(entry.name) !== 'application/pdf' && !attachmentMimeType(entry.name).startsWith('audio/')) continue
     try {
       const bytes = await readFile(await join(assetsDirectory, entry.name))
       const mimeType = attachmentMimeType(entry.name)
-      attachments.push({ id: `${noteId}:${entry.name}`, noteId, fileName: entry.name, mimeType, dataUrl: `data:${mimeType};base64,${bytesToBase64(bytes)}`, size: bytes.byteLength, contentHash: fileFingerprint(bytes), transcript: transcripts[entry.name] })
+      attachments.push({ ...metadata[entry.name], id: `${noteId}:${entry.name}`, noteId, fileName: entry.name, mimeType, dataUrl: `data:${mimeType};base64,${bytesToBase64(bytes)}`, size: bytes.byteLength, contentHash: fileFingerprint(bytes), transcript: transcripts[entry.name] })
     } catch { /* Skip unreadable user attachments and keep the rest of the note library available. */ }
   }
   return attachments
@@ -800,6 +830,9 @@ function normalizeAttachmentHistory(value: unknown, noteId: string): NoteAttachm
       size: attachment.size,
       contentHash: typeof attachment.contentHash === 'string' ? attachment.contentHash : fileFingerprint(dataUrlBytes(attachment.dataUrl)),
       transcript: typeof attachment.transcript === 'string' ? attachment.transcript : undefined,
+      transcriptSegments: Array.isArray(attachment.transcriptSegments) ? attachment.transcriptSegments : undefined,
+      extractedText: typeof attachment.extractedText === 'string' ? attachment.extractedText : undefined,
+      pdfAnnotations: Array.isArray(attachment.pdfAnnotations) ? attachment.pdfAnnotations : undefined,
       deletedAt: attachment.deletedAt,
     }]
   }).sort((a, b) => b.deletedAt - a.deletedAt)
@@ -864,6 +897,19 @@ export async function saveAttachment(attachment: NoteAttachment): Promise<IDBVal
   const fileName = safeAttachmentFileName(attachment.fileName)
   await writeFile(await join(assetsDirectory, fileName), dataUrlBytes(attachment.dataUrl))
   if (attachment.transcript !== undefined) await writeNativeAttachmentTranscript(directory, fileName, attachment.transcript)
+  if (attachment.extractedText !== undefined || attachment.transcriptSegments !== undefined || attachment.pdfAnnotations !== undefined) await writeNativeAttachmentMetadata(directory, fileName, { extractedText: attachment.extractedText, transcriptSegments: attachment.transcriptSegments, pdfAnnotations: attachment.pdfAnnotations })
+}
+
+export async function saveAttachmentMetadata(attachment: NoteAttachment, metadata: AttachmentExtraMetadata): Promise<void> {
+  if (!usesNativeFiles) {
+    const existing = await withStore<NoteAttachment | undefined>('attachments', 'readonly', store => store.get(attachment.id))
+    if (!existing) throw new Error('Nie znaleziono załącznika do zapisania metadanych.')
+    await withStore<IDBValidKey>('attachments', 'readwrite', store => store.put({ ...existing, ...metadata }))
+    return
+  }
+  const directory = nativeNoteDirectories.get(attachment.noteId)
+  if (!directory) throw new Error('Nie znaleziono katalogu notatki dla załącznika.')
+  await writeNativeAttachmentMetadata(directory, safeAttachmentFileName(attachment.fileName), metadata)
 }
 
 export async function saveAttachmentTranscript(attachment: NoteAttachment, transcript: string): Promise<void> {
@@ -887,7 +933,10 @@ export async function removeAttachment(attachment: NoteAttachment): Promise<void
   const fileName = safeAttachmentFileName(attachment.fileName)
   const path = directory ? await join(directory, 'assets', fileName) : ''
   if (path && await exists(path)) await remove(path)
-  if (directory) await writeNativeAttachmentTranscript(directory, fileName, '')
+  if (directory) {
+    await writeNativeAttachmentTranscript(directory, fileName, '')
+    await writeNativeAttachmentMetadata(directory, fileName, { extractedText: undefined, transcriptSegments: undefined, pdfAnnotations: undefined })
+  }
 }
 
 export async function removeAttachmentsForNote(noteId: string): Promise<void> {
@@ -916,6 +965,8 @@ export async function removeAttachmentsForNote(noteId: string): Promise<void> {
   if (await exists(historyPath)) await remove(historyPath)
   const transcriptsPath = await join(directory, NOTE_ATTACHMENT_TRANSCRIPTS_FILE)
   if (await exists(transcriptsPath)) await remove(transcriptsPath)
+  const metadataPath = await join(directory, NOTE_ATTACHMENT_METADATA_FILE)
+  if (await exists(metadataPath)) await remove(metadataPath)
 }
 
 export async function saveAsset(asset: NoteAsset): Promise<IDBValidKey | void> {

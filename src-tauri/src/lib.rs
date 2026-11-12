@@ -88,6 +88,11 @@ struct OllamaTagsResponse {
     models: Vec<OllamaModel>,
 }
 
+#[derive(Deserialize)]
+struct OllamaEmbedResponse {
+    embeddings: Vec<Vec<f32>>,
+}
+
 #[derive(Clone, Deserialize, Serialize)]
 struct OllamaMessage {
     role: String,
@@ -145,6 +150,76 @@ async fn ollama_list_models(base_url: String) -> Result<Vec<OllamaModel>, String
         .await
         .map(|result| result.models)
         .map_err(|error| format!("Nie udało się odczytać listy modeli Ollama: {error}"))
+}
+
+#[tauri::command]
+async fn ollama_embed(base_url: String, model: String, input: Vec<String>) -> Result<Vec<Vec<f32>>, String> {
+    let model = model.trim();
+    if model.is_empty() || input.is_empty() {
+        return Err("Wybierz model embeddingów i podaj tekst do porównania.".into());
+    }
+    let url = ollama_api_url(&base_url, "embed")?;
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(120))
+        .build()
+        .map_err(|error| format!("Nie udało się przygotować połączenia: {error}"))?;
+    let response = client
+        .post(url)
+        .json(&serde_json::json!({ "model": model, "input": input }))
+        .send()
+        .await
+        .map_err(|_| format!("Nie można połączyć się z Ollama pod adresem {base_url}. Sprawdź, czy Ollama jest uruchomiona."))?
+        .error_for_status()
+        .map_err(|error| format!("Ollama zwróciła błąd embeddingów: {error}"))?;
+    response
+        .json::<OllamaEmbedResponse>()
+        .await
+        .map(|result| result.embeddings)
+        .map_err(|error| format!("Nie udało się odczytać wektorów semantycznych Ollama: {error}"))
+}
+
+#[tauri::command]
+async fn transcribe_local_audio(
+    endpoint: String,
+    file_name: String,
+    mime_type: String,
+    bytes: Vec<u8>,
+) -> Result<serde_json::Value, String> {
+    if bytes.is_empty() {
+        return Err("Plik audio jest pusty.".into());
+    }
+    let endpoint = endpoint.trim();
+    if !endpoint.starts_with("http://") && !endpoint.starts_with("https://") {
+        return Err("Adres serwera transkrypcji musi zaczynać się od http:// lub https://.".into());
+    }
+    let part = reqwest::multipart::Part::bytes(bytes)
+        .file_name(file_name)
+        .mime_str(&mime_type)
+        .map_err(|error| format!("Nieprawidłowy typ pliku audio: {error}"))?;
+    let form = reqwest::multipart::Form::new()
+        .text("model", "whisper-1")
+        .text("response_format", "verbose_json")
+        .part("file", part);
+    let response = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(15 * 60))
+        .build()
+        .map_err(|error| format!("Nie udało się przygotować połączenia: {error}"))?
+        .post(endpoint)
+        .multipart(form)
+        .send()
+        .await
+        .map_err(|error| format!("Nie można połączyć się z lokalnym serwerem transkrypcji: {error}"))?;
+    let status = response.status();
+    let body = response
+        .bytes()
+        .await
+        .map_err(|error| format!("Nie udało się odczytać odpowiedzi serwera transkrypcji: {error}"))?;
+    if !status.is_success() {
+        let detail = String::from_utf8_lossy(&body);
+        return Err(format!("Lokalny serwer transkrypcji zwrócił {status}: {detail}"));
+    }
+    serde_json::from_slice(&body)
+        .map_err(|error| format!("Serwer transkrypcji nie zwrócił JSON: {error}"))
 }
 
 fn forward_ollama_stream_line(
@@ -316,6 +391,8 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             save_archive_file,
             ollama_list_models,
+            ollama_embed,
+            transcribe_local_audio,
             ollama_chat_stream,
             ollama_chat_cancel
         ])
