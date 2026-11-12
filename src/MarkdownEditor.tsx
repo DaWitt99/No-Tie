@@ -104,6 +104,7 @@ export function MarkdownEditor({
   onChange,
   onSelectionChange,
   onOpenNote,
+  onOpenAttachment,
 }: {
   noteId: string
   markdown: string
@@ -113,6 +114,7 @@ export function MarkdownEditor({
   onChange: (markdown: string) => void
   onSelectionChange: (text: string) => void
   onOpenNote: (target: string) => void
+  onOpenAttachment: (fileName: string) => void
 }) {
   const root = useRef<HTMLDivElement>(null)
   const tableFilterStyle = useRef<HTMLStyleElement>(null)
@@ -124,6 +126,7 @@ export function MarkdownEditor({
   const onChangeRef = useRef(onChange)
   const onSelectionChangeRef = useRef(onSelectionChange)
   const onOpenNoteRef = useRef(onOpenNote)
+  const onOpenAttachmentRef = useRef(onOpenAttachment)
   const [contextMenu, setContextMenu] = useState<ContextMenuState | null>(null)
   const [hoverTable, setHoverTable] = useState<TableOverlayState | null>(null)
   const [tableContextMenu, setTableContextMenu] = useState<TableContextState | null>(null)
@@ -137,6 +140,7 @@ export function MarkdownEditor({
   useEffect(() => { onChangeRef.current = onChange }, [onChange])
   useEffect(() => { onSelectionChangeRef.current = onSelectionChange }, [onSelectionChange])
   useEffect(() => { onOpenNoteRef.current = onOpenNote }, [onOpenNote])
+  useEffect(() => { onOpenAttachmentRef.current = onOpenAttachment }, [onOpenAttachment])
   useEffect(() => {
     const style = document.createElement('style')
     style.dataset.noTieTableFilterStyle = ''
@@ -573,6 +577,12 @@ export function MarkdownEditor({
   function openWikiLink(event: ReactMouseEvent<HTMLDivElement>) {
     const target = event.target
     if (!(target instanceof Element)) return
+    const attachmentAnchor = target.closest<HTMLAnchorElement>('a[href^="no-tie-attachment:"]')
+    if (attachmentAnchor) {
+      event.preventDefault()
+      try { onOpenAttachmentRef.current(decodeURIComponent(attachmentAnchor.getAttribute('href')?.slice('no-tie-attachment:'.length) ?? '')) } catch { /* Ignore malformed attachment names. */ }
+      return
+    }
     const anchor = target.closest<HTMLAnchorElement>('a[href^="#no-tie-note/"], a[href^="notie-note:"]')
     if (!anchor) return
     const noteTarget = wikiNoteTargetFromHref(anchor.getAttribute('href') ?? '')

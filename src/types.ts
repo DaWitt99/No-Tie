@@ -36,6 +36,7 @@ export type NoteAttachment = {
   dataUrl: string
   size: number
   contentHash?: string
+  transcript?: string
 }
 
 export type NoteAttachmentReference = Pick<NoteAttachment, 'fileName' | 'mimeType' | 'size' | 'contentHash'>

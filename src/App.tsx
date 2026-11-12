@@ -1,7 +1,7 @@
 import { lazy, Suspense, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import type { CSSProperties } from 'react'
 import {
-  Archive, BookOpen, BookmarkPlus, Brain, CalendarDays, Check, CheckSquare2, Clock3, Eye, FilePlus2, FileText, Folder, Heart, History, Import, Lightbulb,
+  Archive, BookOpen, BookmarkPlus, Brain, CalendarDays, Check, CheckSquare2, ChevronDown, Clock3, Eye, FilePlus2, FileText, Folder, Heart, History, Import, Lightbulb,
   CircleHelp, Link2, Menu, MessageCircle, MoreVertical, Network, Palette, PanelLeft, Pencil, Plus, Repeat2, Search, Settings2, SlidersHorizontal, Sparkles, Star, Tag, Trash2, X,
 } from 'lucide-react'
 import { buildArchive, exportArchiveToFolder, parseArchive } from './archive'
@@ -17,6 +17,7 @@ import { TaskManagerDialog } from './TaskManagerDialog'
 import { SavedSearchDialog } from './SavedSearchDialog'
 import { TemplateManagerDialog } from './TemplateManagerDialog'
 import { NoteAttachmentsPanel } from './NoteAttachmentsPanel'
+import { AttachmentPreviewDialog } from './AttachmentPreviewDialog'
 import { HelpDialog } from './HelpDialog'
 import { BackupTrashDialog } from './BackupTrashDialog'
 import { FlashcardsDialog } from './FlashcardsDialog'
@@ -32,7 +33,7 @@ import { ReviewSessionDialog } from './ReviewSessionDialog'
 import { ReviewSessionView } from './ReviewSessionView'
 import { ReviewSessionsOverview } from './ReviewSessionsOverview'
 import { checkpointReviewSession } from './reviews'
-import { archiveAttachment, deleteAutoBackup, getAssets, getAttachmentHistory, getAttachments, getAutoBackups, getFlashcards, getFolderColors, getFolders, getNoteTemplates, getNoteVersions, getNotes, getReviewSessions, getSavedSearches, getTrashEntries, hasInitialized, markInitialized, readAutoBackup, removeAssetsForNote, removeAttachmentsForNote, removeAttachment, removeFolderFromDisk, removeNote, restoreArchivedAttachment, saveArchivedAttachment, saveAsset, saveAttachment, saveAutoBackup, saveFlashcards, saveFolderColors, saveFolders, saveNote, saveNoteTemplates, saveNoteVersion, saveNoteVersions, saveReviewSessions, saveSavedSearches, saveTrashEntries, storageLocationLabel, usesNativeFiles } from './storage'
+import { archiveAttachment, deleteAutoBackup, getAssets, getAttachmentHistory, getAttachments, getAutoBackups, getFlashcards, getFolderColors, getFolders, getNoteTemplates, getNoteVersions, getNotes, getReviewSessions, getSavedSearches, getTrashEntries, hasInitialized, markInitialized, readAutoBackup, removeAssetsForNote, removeAttachmentsForNote, removeAttachment, removeFolderFromDisk, removeNote, restoreArchivedAttachment, saveArchivedAttachment, saveAsset, saveAttachment, saveAttachmentTranscript as persistAttachmentTranscript, saveAutoBackup, saveFlashcards, saveFolderColors, saveFolders, saveNote, saveNoteTemplates, saveNoteVersion, saveNoteVersions, saveReviewSessions, saveSavedSearches, saveTrashEntries, storageLocationLabel, usesNativeFiles } from './storage'
 import type { AutoBackupInfo } from './storage'
 import type { Flashcard, Note, NoteAsset, NoteAttachment, NoteAttachmentReference, NoteTemplate, NoteVersion, ReviewSession, SavedSearch, TrashEntry } from './types'
 import { dispatchAiReplaceSelection, dispatchWikiEmbedInsert, dispatchWikiLinkInsert, replaceWikiLinkTarget } from './wikiLinks'
@@ -140,14 +141,16 @@ function markdownTableCells(line: string) {
 function markdownTextForPreview(markdown: string) {
   const lines = markdown.split(/\r?\n/)
   const textLines: string[] = []
-  let insideCodeFence = false
+  let codeFenceCharacter = ''
   for (let index = 0; index < lines.length;) {
-    if (/^\s{0,3}```/.test(lines[index])) {
-      insideCodeFence = !insideCodeFence
+    const codeFence = lines[index].match(/^\s{0,3}(`{3,}|~{3,})/)
+    if (codeFence && (!codeFenceCharacter || codeFenceCharacter === codeFence[1][0])) {
+      const character = codeFence[1][0]
+      codeFenceCharacter = codeFenceCharacter ? '' : character
       index++
       continue
     }
-    if (insideCodeFence) {
+    if (codeFenceCharacter) {
       textLines.push(lines[index++])
       continue
     }
@@ -175,6 +178,7 @@ function excerpt(content: string) {
     .replace(/^\s*[-*_]{3,}\s*$/gm, ' ')
     .replace(/<[^>]*>/g, ' ')
     .replace(/\\([*_`])/g, '$1')
+    .replace(/\|/g, ' ')
     .replace(/[>*_~`$]/g, '')
     .replace(/\s+/g, ' ')
     .trim()
@@ -278,6 +282,7 @@ function App() {
   const redoNoteAction = useRef<() => void>(() => {})
   const [assets, setAssets] = useState<NoteAsset[]>([])
   const [attachments, setAttachments] = useState<NoteAttachment[]>([])
+  const [previewAttachmentId, setPreviewAttachmentId] = useState('')
   const [savedSearches, setSavedSearches] = useState<SavedSearch[]>([])
   const [templates, setTemplates] = useState<NoteTemplate[]>(defaultTemplates)
   const [showDailyNotes, setShowDailyNotes] = useState(false)
@@ -327,6 +332,7 @@ function App() {
   const [showFolderDialog, setShowFolderDialog] = useState(false)
   const [folderDraft, setFolderDraft] = useState('')
   const [toast, setToast] = useState('')
+  const [showMainSidebar, setShowMainSidebar] = useState(() => localStorage.getItem('no-tie-main-sidebar-visible') !== 'false')
   const [showLibrary, setShowLibrary] = useState(() => localStorage.getItem('no-tie-library-visible') !== 'false')
   const [showChat, setShowChat] = useState(() => localStorage.getItem('no-tie-ollama-chat-open') === 'true')
   const [ollamaBaseUrl, setOllamaBaseUrl] = useState(() => localStorage.getItem('no-tie-ollama-url') || 'http://localhost:11434')
@@ -724,8 +730,8 @@ function App() {
     patchNote(noteId, { content: `${note.content}${separator}- [ ] ${title}${metadata}\n` })
   }
 
-  async function addAttachments(files: File[]) {
-    if (!selectedNote) return
+  async function addAttachments(files: File[]): Promise<NoteAttachment[]> {
+    if (!selectedNote) return []
     const note = selectedNote
     await saveNoteVersion(note)
     const additions: NoteAttachment[] = []
@@ -741,7 +747,7 @@ function App() {
       const attachment: NoteAttachment = { id: `${note.id}:${crypto.randomUUID()}`, noteId: note.id, fileName, mimeType, ...payload, size: file.size }
       await saveAttachment(attachment)
       additions.push(attachment)
-      if (mimeType.startsWith('image/')) content += `\n\n![${fileName}](./assets/${fileName})`
+      if (mimeType.startsWith('image/')) content += `\n\n![${fileName}](./assets/${encodeURIComponent(fileName)})`
     }
     if (additions.length) {
       setAttachments(current => [...current, ...additions])
@@ -751,6 +757,7 @@ function App() {
       setToast(`Dodano ${additions.length} ${additions.length === 1 ? 'załącznik' : 'załączniki'}.`)
       window.setTimeout(() => setToast(''), 2500)
     }
+    return additions
   }
 
   function insertTextIntoNote(text: string) {
@@ -758,6 +765,23 @@ function App() {
     const separator = selectedNote.content.endsWith('\n') ? '\n' : '\n\n'
     patchNote(selectedNote.id, { content: `${selectedNote.content}${separator}${text.trim()}\n` })
     setEditorRevision(value => value + 1)
+  }
+
+  function saveAttachmentTranscript(attachment: NoteAttachment, transcript: string) {
+    const updated = { ...attachment, transcript }
+    setAttachments(current => current.some(item => item.id === attachment.id)
+      ? current.map(item => item.id === attachment.id ? updated : item)
+      : [...current, updated])
+    void persistAttachmentTranscript(updated, transcript).catch(reportDiskSaveError)
+  }
+
+  function insertAttachmentLink(attachment: NoteAttachment) {
+    insertTextIntoNote(`[${attachment.fileName}](./assets/${encodeURIComponent(attachment.fileName)})`)
+  }
+
+  function openAttachment(fileName: string) {
+    const attachment = attachments.find(item => item.noteId === selectedId && item.fileName === fileName)
+    if (attachment) setPreviewAttachmentId(attachment.id)
   }
 
   async function recognizeAttachmentText(attachment: NoteAttachment): Promise<string> {
@@ -837,8 +861,8 @@ function App() {
     setAttachments(current => current.filter(item => item.id !== attachment.id))
     let content = note?.content
     if (note) {
-      const path = escapeRegExp(`./assets/${attachment.fileName}`)
-      content = note.content.replace(new RegExp(`!?\\[[^\\]]*\\]\\(${path}\\)`, 'g'), '').replace(/\n{3,}/g, '\n\n')
+      const paths = [...new Set([`./assets/${attachment.fileName}`, `./assets/${encodeURIComponent(attachment.fileName)}`])].map(escapeRegExp)
+      content = paths.reduce((value, path) => value.replace(new RegExp(`!?\\[[^\\]]*\\]\\(${path}(?:\\s+"[^"]*")?\\)`, 'g'), ''), note.content).replace(/\n{3,}/g, '\n\n')
       if (content !== note.content) patchNote(note.id, { content }, false)
       await saveNoteVersion({ ...note, content, updatedAt: currentTimestamp() })
     }
@@ -1445,6 +1469,46 @@ function App() {
     })
   }
 
+  function toggleMainSidebar() {
+    setShowMainSidebar(current => {
+      const next = !current
+      localStorage.setItem('no-tie-main-sidebar-visible', String(next))
+      return next
+    })
+  }
+
+  function isPhoneLayout() {
+    return window.matchMedia('(max-width: 700px)').matches
+  }
+
+  function toggleSidebarPanel() {
+    if (isPhoneLayout()) {
+      setMobileDrawer(current => current === 'sidebar' ? 'none' : 'sidebar')
+      return
+    }
+    toggleMainSidebar()
+  }
+
+  function sidebarPanelIsVisible() {
+    return isPhoneLayout() ? mobileDrawer === 'sidebar' : showMainSidebar
+  }
+
+  function toggleLibraryPanel() {
+    if (isPhoneLayout()) {
+      if (!showLibrary) {
+        localStorage.setItem('no-tie-library-visible', 'true')
+        setShowLibrary(true)
+      }
+      setMobileDrawer(current => current === 'notes' ? 'none' : 'notes')
+      return
+    }
+    toggleLibrary()
+  }
+
+  function libraryPanelIsVisible() {
+    return isPhoneLayout() ? mobileDrawer === 'notes' : showLibrary
+  }
+
   function openOllamaSettings() {
     setOllamaDraftUrl(ollamaBaseUrl)
     setOllamaDraftModel(ollamaModel)
@@ -1780,7 +1844,7 @@ function App() {
   }
 
   return (
-    <main className={`app-shell ${mobileDrawer !== 'none' ? 'drawer-open' : ''} ${showChat ? 'with-ollama-chat' : ''} ${showLibrary ? '' : 'library-hidden'}`}>
+    <main className={`app-shell ${mobileDrawer !== 'none' ? 'drawer-open' : ''} ${showChat ? 'with-ollama-chat' : ''} ${showLibrary ? '' : 'library-hidden'} ${showMainSidebar ? '' : 'sidebar-hidden'}`}>
       <aside className={`sidebar ${mobileDrawer === 'sidebar' ? 'mobile-visible' : ''}`}>
         <div className="sidebar-content">
           <div className="brand-row"><div className="brand-mark">N</div><span>No-Tie</span><button className="mobile-close icon-button" onClick={() => setMobileDrawer('none')} aria-label="Zamknij menu"><X size={18} /></button></div>
@@ -1841,20 +1905,35 @@ function App() {
           ))}
           {!visibleNotes.length && <div className="empty-state compact"><div className="empty-illustration"><Search size={22} /></div><strong>Brak pasujących notatek</strong><span>Spróbuj zmienić wyszukiwanie albo utwórz nową notatkę.</span><button className="button secondary" onClick={() => createNote()}><Plus size={15} />Nowa notatka</button></div>}
         </div>
-        <div className="notes-list-footer"><span><span className="online-dot" />{usesNativeFiles ? ' Pliki na tym urządzeniu' : ' Zapis na tym urządzeniu'}</span><button title="Ustawienia Ollama" aria-label="Ustawienia Ollama" onClick={openOllamaSettings}><Settings2 size={16} /></button></div>
+        <div className="notes-list-footer"><span><span className="online-dot" />{usesNativeFiles ? ' Pliki na tym urządzeniu' : ' Zapis na tym urządzeniu'}</span></div>
       </section>
 
       <section className="editor-panel">
         <header className="topbar">
-          <div className="mobile-actions"><button className="icon-button" onClick={() => setMobileDrawer('sidebar')} aria-label="Otwórz menu"><Menu size={19} /></button><button className="icon-button" onClick={() => { if (!showLibrary) { localStorage.setItem('no-tie-library-visible', 'true'); setShowLibrary(true) } setMobileDrawer('notes') }} aria-label={showLibrary ? 'Pokaż notatki' : 'Pokaż bibliotekę'}><PanelLeft size={18} /></button></div>
+          <div className="topbar-start">
+            <div className="mobile-actions"><button className="icon-button" onClick={() => setMobileDrawer('sidebar')} aria-label="Otwórz menu folderów i narzędzi"><Menu size={19} /></button><button className="icon-button" onClick={() => { if (!showLibrary) { localStorage.setItem('no-tie-library-visible', 'true'); setShowLibrary(true) } setMobileDrawer('notes') }} aria-label={showLibrary ? 'Pokaż notatki' : 'Pokaż bibliotekę'}><PanelLeft size={18} /></button></div>
+            <details className="topbar-dropdown topbar-dropdown-left" onBlur={event => { if (!event.currentTarget.contains(event.relatedTarget as Node | null)) event.currentTarget.removeAttribute('open') }}>
+              <summary className="topbar-dropdown-trigger" aria-label="Menu paneli i biblioteki"><MoreVertical size={16} /><span className="topbar-dropdown-label">Panele</span><ChevronDown size={13} /></summary>
+              <div className="topbar-dropdown-menu" role="group" aria-label="Panele i biblioteka">
+                <button type="button" onClick={event => { toggleSidebarPanel(); event.currentTarget.closest('details')?.removeAttribute('open') }}><PanelLeft size={15} /><span>{sidebarPanelIsVisible() ? 'Ukryj foldery i narzędzia' : 'Pokaż foldery i narzędzia'}</span>{sidebarPanelIsVisible() && <Check size={14} className="topbar-menu-check" />}</button>
+                <button type="button" onClick={event => { toggleLibraryPanel(); event.currentTarget.closest('details')?.removeAttribute('open') }}><BookOpen size={15} /><span>{libraryPanelIsVisible() ? 'Ukryj Twoją bibliotekę' : 'Pokaż Twoją bibliotekę'}</span>{libraryPanelIsVisible() && <Check size={14} className="topbar-menu-check" />}</button>
+                <div className="topbar-menu-separator" role="separator" />
+                <button type="button" onClick={event => { event.currentTarget.closest('details')?.removeAttribute('open'); exportNotesArchive() }}><Archive size={15} /><span>Eksportuj paczkę</span></button>
+                <button type="button" onClick={event => { event.currentTarget.closest('details')?.removeAttribute('open'); importInput.current?.click() }}><Import size={15} /><span>Importuj paczkę</span></button>
+              </div>
+            </details>
+          </div>
           <div className="breadcrumb"><span>{showingSavedSearchesPage || showingNoteTemplatesPage || showingReviewSessionsOverview || activeReviewSession ? 'Narzędzia' : 'Notatki'}</span><span className="crumb-slash">/</span><span>{showingSavedSearchesPage ? 'Zapisane widoki' : showingNoteTemplatesPage ? 'Szablony' : showingReviewSessionsOverview ? 'Wszystkie powtórki' : activeReviewSession?.title ?? selectedNote?.folder ?? 'Osobiste'}</span></div>
           <div className="topbar-actions">
             <span className={`save-indicator ${saved ? 'is-saved' : ''}`}><span className="save-dot" />{saved ? 'Zapisano' : 'Zapisywanie…'}</span>
             {selectedNote && <button className="icon-button note-history-button" onClick={() => void openNoteHistory()} title="Historia wersji notatki" aria-label="Historia wersji notatki"><History size={17} /></button>}
-            <button className={`icon-button library-toggle ${showLibrary ? 'active' : ''}`} onClick={toggleLibrary} title={showLibrary ? 'Ukryj bibliotekę' : 'Pokaż bibliotekę'} aria-label={showLibrary ? 'Ukryj bibliotekę' : 'Pokaż bibliotekę'} aria-pressed={showLibrary}><PanelLeft size={17} /></button>
-            <button className={`icon-button ollama-toggle ${showChat ? 'active' : ''}`} onClick={toggleChat} title={showChat ? 'Ukryj czat Ollama' : 'Pokaż czat Ollama'} aria-label={showChat ? 'Ukryj czat Ollama' : 'Pokaż czat Ollama'} aria-pressed={showChat}><MessageCircle size={17} /></button>
-            <button className="button secondary export-button" onClick={exportNotesArchive}><Archive size={15} /><span>Eksportuj</span></button>
-            <button className="icon-button import-icon" onClick={() => importInput.current?.click()} title="Importuj paczkę" aria-label="Importuj paczkę"><Import size={17} /></button>
+            <details className="topbar-dropdown topbar-dropdown-right" onBlur={event => { if (!event.currentTarget.contains(event.relatedTarget as Node | null)) event.currentTarget.removeAttribute('open') }}>
+              <summary className={`topbar-dropdown-trigger ollama-menu-trigger ${showChat ? 'active' : ''}`} aria-label="Menu Ollama" title="Ollama"><MessageCircle size={16} /><span className="topbar-dropdown-label">Ollama</span><ChevronDown size={13} /></summary>
+              <div className="topbar-dropdown-menu" role="group" aria-label="Czat i ustawienia Ollama">
+                <button type="button" onClick={event => { toggleChat(); event.currentTarget.closest('details')?.removeAttribute('open') }}><MessageCircle size={15} /><span>{showChat ? 'Ukryj czat Ollama' : 'Pokaż czat Ollama'}</span>{showChat && <Check size={14} className="topbar-menu-check" />}</button>
+                <button type="button" onClick={event => { openOllamaSettings(); event.currentTarget.closest('details')?.removeAttribute('open') }}><Settings2 size={15} /><span>Ustawienia modelu</span></button>
+              </div>
+            </details>
             <input ref={importInput} type="file" accept=".zip,.md,.markdown,application/zip,text/markdown" hidden onChange={handleImport} />
           </div>
         </header>
@@ -1904,10 +1983,10 @@ function App() {
                 <div className="editor-tools-left"><div className="view-mode-toggle" role="group" aria-label="Widok notatki"><button className={`view-mode-button ${editorMode === 'rendered' ? 'active' : ''}`} title="Widok wizualny" aria-label="Widok wizualny" aria-pressed={editorMode === 'rendered'} onClick={() => setEditorMode('rendered')}><Eye size={16} /></button><button className={`view-mode-button ${editorMode === 'source' ? 'active' : ''}`} title="Surowy Markdown" aria-label="Surowy Markdown" aria-pressed={editorMode === 'source'} onClick={() => setEditorMode('source')}><FileText size={16} /></button></div><span className="toolbar-separator" /><button className="inline-tool" onClick={() => { setEditingAsset(undefined); setShowDrawing(true) }}><Sparkles size={15} />Dodaj schemat</button><button className="inline-tool" onClick={() => setShowNoteLinkDialog(true)}><Link2 size={15} />Połącz notatkę</button><button className="inline-tool" onClick={() => setShowNoteEmbedDialog(true)}><BookOpen size={15} />Osadź notatkę</button>{selectionText && <button className="inline-tool" onClick={() => setShowAiEdit(true)} disabled={!ollamaModel}><Sparkles size={14} />Edytuj z AI</button>}{currentAssets.map(asset => <button className="inline-tool asset-tool" key={asset.id} onClick={() => { setEditingAsset(asset); setShowDrawing(true) }}><Lightbulb size={14} />{asset.fileName}</button>)}</div>
                 <div className="template-toolbar"><select className="template-select" defaultValue="" aria-label="Wstaw szablon" onChange={event => { const template = templates.find(item => item.id === event.target.value); if (template) { patchNote(selectedNote.id, { title: template.title, content: template.content, tags: [...new Set([...selectedNote.tags, ...template.tags])] }); setEditorRevision(value => value + 1) } event.target.value = '' }}><option value="" disabled>Szablon</option>{templates.map(template => <option key={template.id} value={template.id}>{template.title}</option>)}</select><button type="button" className="icon-button template-manage-button" title="Zarządzaj szablonami" aria-label="Zarządzaj szablonami" onClick={() => { setActiveReviewSessionId(NOTE_TEMPLATES_PAGE_ID); setMobileDrawer('none') }}><Pencil size={14} /></button><button type="button" className="icon-button template-manage-button" title="Eksportuj jako HTML" aria-label="Eksportuj jako HTML" onClick={() => exportCurrentAsHtml()}><FileText size={14} /></button><button type="button" className="icon-button template-manage-button" title="Drukuj / zapisz jako PDF" aria-label="Drukuj lub zapisz jako PDF" onClick={exportCurrentAsPdf}><Archive size={14} /></button></div>
               </div>
-              {editorMode === 'source' ? <MarkdownSourceEditor noteId={selectedNote.id} markdown={selectedNote.content} onChange={content => patchNote(selectedNote.id, { content })} onSelectionChange={text => setEditorSelection({ noteId: selectedNote.id, mode: 'source', text })} /> : <Suspense fallback={<div className="editor-loading">Otwieram edytor…</div>}><MarkdownEditor key={`${selectedNote.id}-${editorRevision}`} noteId={selectedNote.id} markdown={selectedNote.content} assets={currentAssets} attachments={currentAttachments} revision={editorRevision} onChange={content => patchNote(selectedNote.id, { content })} onSelectionChange={text => setEditorSelection({ noteId: selectedNote.id, mode: 'rendered', text })} onOpenNote={openLinkedNote} /></Suspense>}
+              {editorMode === 'source' ? <MarkdownSourceEditor noteId={selectedNote.id} markdown={selectedNote.content} onChange={content => patchNote(selectedNote.id, { content })} onSelectionChange={text => setEditorSelection({ noteId: selectedNote.id, mode: 'source', text })} /> : <Suspense fallback={<div className="editor-loading">Otwieram edytor…</div>}><MarkdownEditor key={`${selectedNote.id}-${editorRevision}`} noteId={selectedNote.id} markdown={selectedNote.content} assets={currentAssets} attachments={currentAttachments} revision={editorRevision} onChange={content => patchNote(selectedNote.id, { content })} onSelectionChange={text => setEditorSelection({ noteId: selectedNote.id, mode: 'rendered', text })} onOpenNote={openLinkedNote} onOpenAttachment={openAttachment} /></Suspense>}
       <NoteConnections note={selectedNote} notes={notes} onOpen={note => openLinkedNote(note.id)} onShowGraph={() => setShowKnowledgeGraph(true)} />
               <NoteEmbedsPanel note={selectedNote} notes={notes} onOpen={note => openLinkedNote(note.title || note.id)} />
-              <NoteAttachmentsPanel attachments={currentAttachments} onAdd={files => void addAttachments(files)} onRemove={attachment => void deleteAttachment(attachment)} onOcr={recognizeAttachmentText} onInsertText={insertTextIntoNote} />
+              <NoteAttachmentsPanel attachments={currentAttachments} onAdd={addAttachments} onRemove={attachment => void deleteAttachment(attachment)} onOcr={recognizeAttachmentText} onInsertText={insertTextIntoNote} onSaveTranscript={saveAttachmentTranscript} onInsertAttachmentLink={insertAttachmentLink} onPreview={attachment => setPreviewAttachmentId(attachment.id)} />
               <div className="editor-content-stats" aria-label="Statystyki dokumentu i zaznaczenia">
                 <span>Dokument: <strong>{polishCount(documentCounts.words, ['słowo', 'słowa', 'słów'])}</strong><i>·</i><strong>{polishCount(documentCounts.characters, ['znak', 'znaki', 'znaków'])}</strong></span>
                 <span className="editor-stats-divider" aria-hidden="true" />
@@ -1923,6 +2002,7 @@ function App() {
       </section>
       <ChatPanel open={showChat} baseUrl={ollamaBaseUrl} model={ollamaModel} note={selectedNote} notes={notes} assets={assets} attachments={attachments} onClose={closeChat} onOpenSettings={openOllamaSettings} />
       {showHelp && <HelpDialog onClose={() => setShowHelp(false)} />}
+      {attachments.find(attachment => attachment.id === previewAttachmentId) && <AttachmentPreviewDialog attachment={attachments.find(attachment => attachment.id === previewAttachmentId)!} onClose={() => setPreviewAttachmentId('')} />}
       {entryDragVisual && <div className="entry-drag-ghost" style={{ left: entryDragVisual.x, top: entryDragVisual.y }} aria-hidden="true"><div>{entryDragVisual.target.kind === 'folder' ? <Folder size={15} /> : <FileText size={15} />}<strong>{entryDragVisual.label}</strong></div><span>{entryDragVisual.dropFolder === null ? 'Upuść na folder' : entryDragVisual.dropFolder ? `Przenieś do: ${entryDragVisual.dropFolder}` : 'Przenieś do: Bez folderu'}</span></div>}
       {showDrawing && selectedNote && <Suspense fallback={<div className="modal-backdrop"><div className="loading-screen">Otwieram edytor SVG…</div></div>}><VectorEditor asset={editingAsset} onClose={() => { setShowDrawing(false); setEditingAsset(undefined) }} onSave={svg => void saveDrawing(svg)} /></Suspense>}
       {showReviewSessionDialog && <ReviewSessionDialog

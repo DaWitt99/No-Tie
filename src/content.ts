@@ -96,11 +96,21 @@ export function markdownForEditor(content: string, assets: NoteAsset[], attachme
     const path = `./assets/${asset.fileName}`
     return markdown.replaceAll(`](${path})`, `](${svgDataUrl(asset.svg)})`)
   }, content)
-  return attachments.reduce((markdown, attachment) => markdown.replaceAll(`]('./assets/${attachment.fileName}')`, `](${attachment.dataUrl})`).replaceAll(`](./assets/${attachment.fileName})`, `](${attachment.dataUrl})`), withSvg)
+  return withSvg.replace(/(!?)\[([^\]]*)\]\(([^)]+)\)/g, (whole, image: string, label: string, rawHref: string) => {
+    const href = rawHref.trim().split(/\s+/, 1)[0]
+    let decodedHref = href
+    try { decodedHref = decodeURIComponent(href) } catch { /* Keep malformed encodings unchanged. */ }
+    const attachment = attachments.find(item => decodedHref === `./assets/${item.fileName}` || href === `./assets/${encodeURIComponent(item.fileName)}`)
+    if (!attachment) return whole
+    if (image && attachment.mimeType.startsWith('image/')) return `![${label}](${attachment.dataUrl})`
+    return `[${label}](no-tie-attachment:${encodeURIComponent(attachment.fileName)})`
+  })
 }
 
 export function markdownFromEditor(content: string, assets: NoteAsset[], attachments: NoteAttachment[] = []): string {
-  const withAttachments = attachments.reduce((markdown, attachment) => markdown.replaceAll(`](${attachment.dataUrl})`, `](./assets/${attachment.fileName})`), content)
+  const withAttachments = attachments.reduce((markdown, attachment) => markdown
+    .replaceAll(`](${attachment.dataUrl})`, `](./assets/${encodeURIComponent(attachment.fileName)})`)
+    .replaceAll(`](no-tie-attachment:${encodeURIComponent(attachment.fileName)})`, `](./assets/${encodeURIComponent(attachment.fileName)})`), content)
   const markdown = assets.reduce((value, asset) => {
     return value.replaceAll(`](${svgDataUrl(asset.svg)})`, `](./assets/${asset.fileName})`)
   }, withAttachments)

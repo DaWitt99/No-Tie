@@ -14,6 +14,7 @@ const NOTE_VERSIONS_FILE = '.no-tie-versions.json'
 const SAVED_SEARCHES_FILE = '.no-tie-saved-searches.json'
 const NOTE_TEMPLATES_FILE = '.no-tie-templates.json'
 const NOTE_ATTACHMENT_HISTORY_FILE = '.no-tie-attachment-history.json'
+const NOTE_ATTACHMENT_TRANSCRIPTS_FILE = '.no-tie-attachment-transcripts.json'
 const ADVANCED_DATA_FILE = '.no-tie-advanced.json'
 const AUTO_BACKUP_FOLDER = '_kopie-zapasowe'
 const MAX_NOTE_VERSIONS = 80
@@ -22,6 +23,7 @@ let databasePromise: Promise<IDBDatabase> | undefined
 let nativeNotesRoot: Promise<string> | undefined
 const nativeNoteDirectories = new Map<string, string>()
 const noteVersionQueues = new Map<string, Promise<void>>()
+const attachmentTranscriptQueues = new Map<string, Promise<void>>()
 
 export const usesNativeFiles = isTauri()
 const isAndroidApp = usesNativeFiles && typeof navigator !== 'undefined' && /Android/i.test(navigator.userAgent)
@@ -452,23 +454,25 @@ async function collectMarkdownFiles(directory: string): Promise<string[]> {
 }
 
 async function getNativeNotes(): Promise<Note[]> {
-  nativeNoteDirectories.clear()
   const root = await getNativeNotesRoot()
   const files = await collectMarkdownFiles(root)
   const notes: Note[] = []
+  const directories = new Map<string, string>()
   for (const path of files) {
     try {
       const markdown = await readTextFile(path)
       const parentDirectory = path.slice(0, Math.max(path.lastIndexOf('/'), path.lastIndexOf('\\')))
       const fallbackId = parentDirectory.split(/[\\/]/).at(-1) ?? crypto.randomUUID()
       const note = markdownToNote(markdown, fallbackId)
-      if (nativeNoteDirectories.has(note.id)) continue
-      nativeNoteDirectories.set(note.id, parentDirectory)
+      if (directories.has(note.id)) continue
+      directories.set(note.id, parentDirectory)
       notes.push(note)
     } catch {
       // Keep malformed files on disk; valid notes should still open normally.
     }
   }
+  nativeNoteDirectories.clear()
+  for (const [noteId, directory] of directories) nativeNoteDirectories.set(noteId, directory)
   return notes
 }
 
@@ -711,6 +715,31 @@ function bytesToBase64(bytes: Uint8Array) {
   return btoa(binary)
 }
 
+async function readNativeAttachmentTranscripts(directory: string): Promise<Record<string, string>> {
+  const path = await join(directory, NOTE_ATTACHMENT_TRANSCRIPTS_FILE)
+  if (!await exists(path)) return {}
+  try {
+    const value = JSON.parse(await readTextFile(path)) as unknown
+    if (!value || typeof value !== 'object' || Array.isArray(value)) return {}
+    return Object.fromEntries(Object.entries(value).filter((entry): entry is [string, string] => typeof entry[0] === 'string' && typeof entry[1] === 'string'))
+  } catch { return {} }
+}
+
+async function writeNativeAttachmentTranscript(directory: string, fileName: string, transcript: string): Promise<void> {
+  const key = `${directory}\u0000${fileName}`
+  const previous = attachmentTranscriptQueues.get(key) ?? Promise.resolve()
+  const current = previous.catch(() => undefined).then(async () => {
+    const transcripts = await readNativeAttachmentTranscripts(directory)
+    if (transcript.trim()) transcripts[fileName] = transcript
+    else delete transcripts[fileName]
+    const path = await join(directory, NOTE_ATTACHMENT_TRANSCRIPTS_FILE)
+    if (Object.keys(transcripts).length) await writeTextFile(path, JSON.stringify(transcripts, null, 2))
+    else if (await exists(path)) await remove(path)
+  })
+  attachmentTranscriptQueues.set(key, current)
+  try { await current } finally { if (attachmentTranscriptQueues.get(key) === current) attachmentTranscriptQueues.delete(key) }
+}
+
 function dataUrlBytes(dataUrl: string) {
   const base64 = dataUrl.slice(dataUrl.indexOf(',') + 1)
   const binary = atob(base64)
@@ -722,13 +751,14 @@ function dataUrlBytes(dataUrl: string) {
 async function readNativeAttachments(noteId: string, directory: string): Promise<NoteAttachment[]> {
   const assetsDirectory = await join(directory, 'assets')
   if (!await exists(assetsDirectory)) return []
+  const transcripts = await readNativeAttachmentTranscripts(directory)
   const attachments: NoteAttachment[] = []
   for (const entry of await readDir(assetsDirectory)) {
     if (!entry.isFile || entry.name.toLowerCase().endsWith('.svg') || !attachmentMimeType(entry.name).startsWith('image/') && attachmentMimeType(entry.name) !== 'application/pdf' && !attachmentMimeType(entry.name).startsWith('audio/')) continue
     try {
       const bytes = await readFile(await join(assetsDirectory, entry.name))
       const mimeType = attachmentMimeType(entry.name)
-      attachments.push({ id: `${noteId}:${entry.name}`, noteId, fileName: entry.name, mimeType, dataUrl: `data:${mimeType};base64,${bytesToBase64(bytes)}`, size: bytes.byteLength, contentHash: fileFingerprint(bytes) })
+      attachments.push({ id: `${noteId}:${entry.name}`, noteId, fileName: entry.name, mimeType, dataUrl: `data:${mimeType};base64,${bytesToBase64(bytes)}`, size: bytes.byteLength, contentHash: fileFingerprint(bytes), transcript: transcripts[entry.name] })
     } catch { /* Skip unreadable user attachments and keep the rest of the note library available. */ }
   }
   return attachments
@@ -769,6 +799,7 @@ function normalizeAttachmentHistory(value: unknown, noteId: string): NoteAttachm
       dataUrl: attachment.dataUrl,
       size: attachment.size,
       contentHash: typeof attachment.contentHash === 'string' ? attachment.contentHash : fileFingerprint(dataUrlBytes(attachment.dataUrl)),
+      transcript: typeof attachment.transcript === 'string' ? attachment.transcript : undefined,
       deletedAt: attachment.deletedAt,
     }]
   }).sort((a, b) => b.deletedAt - a.deletedAt)
@@ -830,7 +861,21 @@ export async function saveAttachment(attachment: NoteAttachment): Promise<IDBVal
   if (!directory) throw new Error('Najpierw zapisz notatkę, do której dodajesz plik.')
   const assetsDirectory = await join(directory, 'assets')
   await mkdir(assetsDirectory, { recursive: true })
-  await writeFile(await join(assetsDirectory, safeAttachmentFileName(attachment.fileName)), dataUrlBytes(attachment.dataUrl))
+  const fileName = safeAttachmentFileName(attachment.fileName)
+  await writeFile(await join(assetsDirectory, fileName), dataUrlBytes(attachment.dataUrl))
+  if (attachment.transcript !== undefined) await writeNativeAttachmentTranscript(directory, fileName, attachment.transcript)
+}
+
+export async function saveAttachmentTranscript(attachment: NoteAttachment, transcript: string): Promise<void> {
+  if (!usesNativeFiles) {
+    const existing = await withStore<NoteAttachment | undefined>('attachments', 'readonly', store => store.get(attachment.id))
+    if (!existing) throw new Error('Nie znaleziono załącznika, do którego należy transkrypcja.')
+    await withStore<IDBValidKey>('attachments', 'readwrite', store => store.put({ ...existing, transcript }))
+    return
+  }
+  const directory = nativeNoteDirectories.get(attachment.noteId)
+  if (!directory) throw new Error('Nie znaleziono katalogu notatki dla transkrypcji.')
+  await writeNativeAttachmentTranscript(directory, safeAttachmentFileName(attachment.fileName), transcript)
 }
 
 export async function removeAttachment(attachment: NoteAttachment): Promise<void> {
@@ -839,8 +884,10 @@ export async function removeAttachment(attachment: NoteAttachment): Promise<void
     return
   }
   const directory = nativeNoteDirectories.get(attachment.noteId)
-  const path = directory ? await join(directory, 'assets', attachment.fileName) : ''
+  const fileName = safeAttachmentFileName(attachment.fileName)
+  const path = directory ? await join(directory, 'assets', fileName) : ''
   if (path && await exists(path)) await remove(path)
+  if (directory) await writeNativeAttachmentTranscript(directory, fileName, '')
 }
 
 export async function removeAttachmentsForNote(noteId: string): Promise<void> {
@@ -867,6 +914,8 @@ export async function removeAttachmentsForNote(noteId: string): Promise<void> {
   if (!directory) return
   const historyPath = await join(directory, NOTE_ATTACHMENT_HISTORY_FILE)
   if (await exists(historyPath)) await remove(historyPath)
+  const transcriptsPath = await join(directory, NOTE_ATTACHMENT_TRANSCRIPTS_FILE)
+  if (await exists(transcriptsPath)) await remove(transcriptsPath)
 }
 
 export async function saveAsset(asset: NoteAsset): Promise<IDBValidKey | void> {
