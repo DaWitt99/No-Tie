@@ -10,4 +10,4 @@ Install:
 2. Open the APK on the tablet and allow installation from this source if Android asks.
 3. Tap Install. Leave the previous No-Tie app installed when updating.
 
-APK: No-Tie-0.1.2-android-arm64-full-debug.apk
+APK: No-Tie-0.1.2-android-arm64-full-signed.apk
