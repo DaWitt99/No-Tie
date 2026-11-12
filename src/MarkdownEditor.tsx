@@ -28,7 +28,7 @@ import { MarkdownContextMenu, type MarkdownMenuAction } from './MarkdownContextM
 import { MarkdownTableMenu, type MarkdownTableAction } from './MarkdownTableMenu'
 import { highlightSchema, markdownMarkupPlugins, noteCommentSchema, underlineSchema } from './markdownMarkup'
 import { applyTableColumnWidths, markdownWithTableColumnWidths, parseTableColumnWidths, stripTableWidthMetadata } from './markdownTableWidths'
-import { WIKI_LINK_INSERT_EVENT, markdownToWikiLinks, wikiLinksToMarkdown, wikiNoteHref, wikiNoteTargetFromHref, type WikiLinkInsertDetail } from './wikiLinks'
+import { AI_REPLACE_SELECTION_EVENT, WIKI_EMBED_INSERT_EVENT, WIKI_LINK_INSERT_EVENT, markdownToWikiLinks, wikiLinksToMarkdown, wikiNoteHref, wikiNoteTargetFromHref, type AiReplaceSelectionDetail, type WikiEmbedInsertDetail, type WikiLinkInsertDetail } from './wikiLinks'
 import type { NoteAsset, NoteAttachment } from './types'
 
 type ContextMenuState = { left: number; top: number; opensLeft: boolean }
@@ -118,6 +118,7 @@ export function MarkdownEditor({
   const tableFilterStyle = useRef<HTMLStyleElement>(null)
   const editorRef = useRef<Editor | null>(null)
   const contextRange = useRef({ from: 0, to: 0 })
+  const selectedRange = useRef({ from: 0, to: 0 })
   const activeTableElement = useRef<HTMLTableElement | null>(null)
   const tableToolbarDismissTimer = useRef<number | null>(null)
   const onChangeRef = useRef(onChange)
@@ -197,13 +198,47 @@ export function MarkdownEditor({
   }, [noteId])
 
   useEffect(() => {
+    const insertEmbed = (event: Event) => {
+      const detail = (event as CustomEvent<WikiEmbedInsertDetail>).detail
+      if (detail?.noteId !== noteId) return
+      const editor = editorRef.current
+      if (!editor) return
+      const view = editor.ctx.get(editorViewCtx)
+      const { from, to } = selectedRange.current
+      view.dispatch(view.state.tr.insertText(`![[${detail.target}]]`, from, to))
+      view.focus()
+    }
+    window.addEventListener(WIKI_EMBED_INSERT_EVENT, insertEmbed)
+    return () => window.removeEventListener(WIKI_EMBED_INSERT_EVENT, insertEmbed)
+  }, [noteId])
+
+  useEffect(() => {
+    const replaceSelection = (event: Event) => {
+      const detail = (event as CustomEvent<AiReplaceSelectionDetail>).detail
+      if (detail?.noteId !== noteId) return
+      const editor = editorRef.current
+      if (!editor) return
+      const view = editor.ctx.get(editorViewCtx)
+      const { from, to } = selectedRange.current
+      view.dispatch(view.state.tr.insertText(detail.replacement, from, to))
+      view.focus()
+    }
+    window.addEventListener(AI_REPLACE_SELECTION_EVENT, replaceSelection)
+    return () => window.removeEventListener(AI_REPLACE_SELECTION_EVENT, replaceSelection)
+  }, [noteId])
+
+  useEffect(() => {
     function updateSelection() {
       const activeElement = document.activeElement
       if (activeElement instanceof Element && activeElement.closest('.markdown-table-tools')) return
       const selection = window.getSelection()
       const container = root.current
-      if (selection && container?.contains(selection.anchorNode)) onSelectionChangeRef.current(selection.toString())
-      else onSelectionChangeRef.current('')
+      const editor = editorRef.current
+      if (selection && container?.contains(selection.anchorNode) && editor) {
+        const range = editor.ctx.get(editorViewCtx).state.selection
+        selectedRange.current = { from: range.from, to: range.to }
+        onSelectionChangeRef.current(selection.toString())
+      } else onSelectionChangeRef.current('')
     }
     document.addEventListener('selectionchange', updateSelection)
     return () => document.removeEventListener('selectionchange', updateSelection)

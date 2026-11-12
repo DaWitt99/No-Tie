@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState, type MouseEvent as ReactMouseEvent } from 'react'
 import { MarkdownContextMenu, type MarkdownMenuAction } from './MarkdownContextMenu'
-import { WIKI_LINK_INSERT_EVENT, type WikiLinkInsertDetail } from './wikiLinks'
+import { AI_REPLACE_SELECTION_EVENT, WIKI_EMBED_INSERT_EVENT, WIKI_LINK_INSERT_EVENT, type AiReplaceSelectionDetail, type WikiEmbedInsertDetail, type WikiLinkInsertDetail } from './wikiLinks'
 
 type ContextMenuPosition = { left: number; top: number; opensLeft: boolean }
 
@@ -30,6 +30,7 @@ export function MarkdownSourceEditor({
 }) {
   const textareaRef = useRef<HTMLTextAreaElement>(null)
   const contextRange = useRef({ from: 0, to: 0 })
+  const selectionRange = useRef({ from: 0, to: 0 })
   const [contextMenu, setContextMenu] = useState<ContextMenuPosition | null>(null)
 
   useEffect(() => {
@@ -38,8 +39,7 @@ export function MarkdownSourceEditor({
       if (detail?.noteId !== noteId || !detail.target) return
       const input = textareaRef.current
       if (!input) return
-      const from = input.selectionStart
-      const to = input.selectionEnd
+      const { from, to } = selectionRange.current
       const selected = input.value.slice(from, to)
       const wikiLink = selected ? `[[${detail.target}|${selected}]]` : `[[${detail.target}]]`
       const next = input.value.slice(0, from) + wikiLink + input.value.slice(to)
@@ -54,6 +54,38 @@ export function MarkdownSourceEditor({
     }
     window.addEventListener(WIKI_LINK_INSERT_EVENT, insertWikiLink)
     return () => window.removeEventListener(WIKI_LINK_INSERT_EVENT, insertWikiLink)
+  }, [noteId, onChange, onSelectionChange])
+
+  useEffect(() => {
+    const insertEmbed = (event: Event) => {
+      const detail = (event as CustomEvent<WikiEmbedInsertDetail>).detail
+      const input = textareaRef.current
+      if (detail?.noteId !== noteId || !input) return
+      const from = input.selectionStart
+      const to = input.selectionEnd
+      const macro = `![[${detail.target}]]`
+      const next = input.value.slice(0, from) + macro + input.value.slice(to)
+      onChange(next)
+      requestAnimationFrame(() => { input.focus(); input.setSelectionRange(from + macro.length, from + macro.length) })
+    }
+    window.addEventListener(WIKI_EMBED_INSERT_EVENT, insertEmbed)
+    return () => window.removeEventListener(WIKI_EMBED_INSERT_EVENT, insertEmbed)
+  }, [noteId, onChange])
+
+  useEffect(() => {
+    const replaceSelection = (event: Event) => {
+      const detail = (event as CustomEvent<AiReplaceSelectionDetail>).detail
+      if (detail?.noteId !== noteId) return
+      const input = textareaRef.current
+      if (!input) return
+      const { from, to } = selectionRange.current
+      const next = input.value.slice(0, from) + detail.replacement + input.value.slice(to)
+      onChange(next)
+      onSelectionChange(detail.replacement)
+      requestAnimationFrame(() => { input.focus(); input.setSelectionRange(from, from + detail.replacement.length) })
+    }
+    window.addEventListener(AI_REPLACE_SELECTION_EVENT, replaceSelection)
+    return () => window.removeEventListener(AI_REPLACE_SELECTION_EVENT, replaceSelection)
   }, [noteId, onChange, onSelectionChange])
 
   function showContextMenu(event: ReactMouseEvent<HTMLTextAreaElement>) {
@@ -172,10 +204,12 @@ export function MarkdownSourceEditor({
       onContextMenu={showContextMenu}
       onSelect={event => {
         const input = event.currentTarget
+        selectionRange.current = { from: input.selectionStart, to: input.selectionEnd }
         onSelectionChange(input.value.slice(input.selectionStart, input.selectionEnd))
       }}
       onChange={event => {
         const input = event.currentTarget
+        selectionRange.current = { from: input.selectionStart, to: input.selectionEnd }
         onChange(input.value)
         onSelectionChange(input.value.slice(input.selectionStart, input.selectionEnd))
       }}

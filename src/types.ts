@@ -4,6 +4,8 @@ export type Note = {
   content: string
   folder: string
   color?: string
+  aliases?: string[]
+  properties?: Record<string, string>
   tags: string[]
   favorite: boolean
   createdAt: number
@@ -42,6 +44,28 @@ export type NoteAttachmentHistory = NoteAttachment & {
   deletedAt: number
 }
 
+export type TrashEntry = {
+  id: string
+  batchId: string
+  deletedAt: number
+  note: Note
+  assets: NoteAsset[]
+  attachments: NoteAttachment[]
+}
+
+export type Flashcard = {
+  id: string
+  noteId: string
+  question: string
+  answer: string
+  dueAt: number
+  intervalDays: number
+  ease: number
+  repetitions: number
+  lapses: number
+  lastReviewedAt?: number
+}
+
 export type SavedSearch = {
   id: string
   name: string
@@ -77,4 +101,6 @@ export type WorkspaceBackup = {
   savedSearches: SavedSearch[]
   noteTemplates: NoteTemplate[]
   folderColors: Record<string, string>
+  flashcards?: Flashcard[]
+  trash?: TrashEntry[]
 }

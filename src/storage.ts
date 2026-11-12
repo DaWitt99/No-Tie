@@ -1,9 +1,9 @@
 import { isTauri } from '@tauri-apps/api/core'
 import { documentDir, join } from '@tauri-apps/api/path'
-import { exists, mkdir, readDir, readFile, readTextFile, remove, rename, writeFile, writeTextFile } from '@tauri-apps/plugin-fs'
+import { exists, mkdir, readDir, readFile, readTextFile, remove, rename, stat, writeFile, writeTextFile } from '@tauri-apps/plugin-fs'
 import { markdownToNote, noteToMarkdown, sanitizeSvg } from './content'
 import { fileFingerprint } from './fileFingerprint'
-import type { Note, NoteAsset, NoteAttachment, NoteAttachmentHistory, NoteAttachmentReference, NoteTemplate, NoteVersion, ReviewSession, ReviewSessionStatus, SavedSearch } from './types'
+import type { Flashcard, Note, NoteAsset, NoteAttachment, NoteAttachmentHistory, NoteAttachmentReference, NoteTemplate, NoteVersion, ReviewSession, ReviewSessionStatus, SavedSearch, TrashEntry } from './types'
 
 const DATABASE = 'no-tie-notes'
 const DATABASE_VERSION = 4
@@ -14,6 +14,8 @@ const NOTE_VERSIONS_FILE = '.no-tie-versions.json'
 const SAVED_SEARCHES_FILE = '.no-tie-saved-searches.json'
 const NOTE_TEMPLATES_FILE = '.no-tie-templates.json'
 const NOTE_ATTACHMENT_HISTORY_FILE = '.no-tie-attachment-history.json'
+const ADVANCED_DATA_FILE = '.no-tie-advanced.json'
+const AUTO_BACKUP_FOLDER = '_kopie-zapasowe'
 const MAX_NOTE_VERSIONS = 80
 
 let databasePromise: Promise<IDBDatabase> | undefined
@@ -22,7 +24,8 @@ const nativeNoteDirectories = new Map<string, string>()
 const noteVersionQueues = new Map<string, Promise<void>>()
 
 export const usesNativeFiles = isTauri()
-export const storageLocationLabel = usesNativeFiles ? 'Dokumenty/No-Tie' : 'Ta przeglądarka'
+const isAndroidApp = usesNativeFiles && typeof navigator !== 'undefined' && /Android/i.test(navigator.userAgent)
+export const storageLocationLabel = !usesNativeFiles ? 'Ta przeglądarka' : isAndroidApp ? 'Dokumenty aplikacji' : 'Dokumenty/No-Tie'
 
 function openDatabase(): Promise<IDBDatabase> {
   if (databasePromise) return databasePromise
@@ -302,6 +305,136 @@ export async function saveNoteTemplates(templates: NoteTemplate[]): Promise<void
   await writeTextFile(await join(await getNativeNotesRoot(), NOTE_TEMPLATES_FILE), JSON.stringify(normalized, null, 2))
 }
 
+function normalizeTrashEntries(value: unknown): TrashEntry[] {
+  if (!Array.isArray(value)) return []
+  return value.flatMap((item): TrashEntry[] => {
+    if (!item || typeof item !== 'object') return []
+    const entry = item as Partial<TrashEntry>
+    const note = entry.note
+    if (typeof entry.id !== 'string' || typeof entry.batchId !== 'string' || typeof entry.deletedAt !== 'number' || !note || typeof note.id !== 'string') return []
+    return [{
+      id: entry.id,
+      batchId: entry.batchId,
+      deletedAt: entry.deletedAt,
+      note,
+      assets: Array.isArray(entry.assets) ? entry.assets.filter(asset => asset && asset.noteId === note.id && typeof asset.svg === 'string') : [],
+      attachments: Array.isArray(entry.attachments) ? entry.attachments.filter(attachment => attachment && attachment.noteId === note.id && typeof attachment.dataUrl === 'string') : [],
+    }]
+  }).sort((a, b) => b.deletedAt - a.deletedAt)
+}
+
+function normalizeFlashcards(value: unknown): Flashcard[] {
+  if (!Array.isArray(value)) return []
+  return value.flatMap((item): Flashcard[] => {
+    if (!item || typeof item !== 'object') return []
+    const card = item as Partial<Flashcard>
+    if (typeof card.id !== 'string' || typeof card.noteId !== 'string' || typeof card.question !== 'string' || typeof card.answer !== 'string') return []
+    return [{
+      id: card.id,
+      noteId: card.noteId,
+      question: card.question,
+      answer: card.answer,
+      dueAt: typeof card.dueAt === 'number' ? card.dueAt : Date.now(),
+      intervalDays: typeof card.intervalDays === 'number' ? Math.max(0, card.intervalDays) : 0,
+      ease: typeof card.ease === 'number' ? Math.max(1.3, card.ease) : 2.5,
+      repetitions: typeof card.repetitions === 'number' ? Math.max(0, card.repetitions) : 0,
+      lapses: typeof card.lapses === 'number' ? Math.max(0, card.lapses) : 0,
+      lastReviewedAt: typeof card.lastReviewedAt === 'number' ? card.lastReviewedAt : undefined,
+    }]
+  })
+}
+
+type AdvancedData = { trash: TrashEntry[]; flashcards: Flashcard[] }
+
+async function getAdvancedData(): Promise<AdvancedData> {
+  if (!usesNativeFiles) {
+    const data = await withStore<unknown>('settings', 'readonly', store => store.get('advancedData'))
+    if (!data || typeof data !== 'object') return { trash: [], flashcards: [] }
+    const record = data as Partial<AdvancedData>
+    return { trash: normalizeTrashEntries(record.trash), flashcards: normalizeFlashcards(record.flashcards) }
+  }
+  const path = await join(await getNativeNotesRoot(), ADVANCED_DATA_FILE)
+  if (!await exists(path)) return { trash: [], flashcards: [] }
+  try {
+    const data = JSON.parse(await readTextFile(path)) as Partial<AdvancedData>
+    return { trash: normalizeTrashEntries(data.trash), flashcards: normalizeFlashcards(data.flashcards) }
+  } catch { return { trash: [], flashcards: [] } }
+}
+
+async function saveAdvancedData(data: AdvancedData): Promise<void> {
+  const normalized = { trash: normalizeTrashEntries(data.trash), flashcards: normalizeFlashcards(data.flashcards) }
+  if (!usesNativeFiles) {
+    await withStore<IDBValidKey>('settings', 'readwrite', store => store.put(normalized, 'advancedData'))
+    return
+  }
+  await writeTextFile(await join(await getNativeNotesRoot(), ADVANCED_DATA_FILE), JSON.stringify(normalized, null, 2))
+}
+
+export async function getTrashEntries(): Promise<TrashEntry[]> { return (await getAdvancedData()).trash }
+export async function saveTrashEntries(trash: TrashEntry[]): Promise<void> { const current = await getAdvancedData(); return saveAdvancedData({ ...current, trash }) }
+export async function getFlashcards(): Promise<Flashcard[]> { return (await getAdvancedData()).flashcards }
+export async function saveFlashcards(flashcards: Flashcard[]): Promise<void> { const current = await getAdvancedData(); return saveAdvancedData({ ...current, flashcards }) }
+
+export type AutoBackupInfo = { fileName: string; createdAt: number; size: number }
+type StoredAutoBackup = AutoBackupInfo & { bytes: Uint8Array }
+const AUTO_BACKUPS_KEY = 'automaticBackups'
+
+export async function getAutoBackups(): Promise<AutoBackupInfo[]> {
+  if (!usesNativeFiles) {
+    const stored = await withStore<StoredAutoBackup[] | undefined>('settings', 'readonly', store => store.get(AUTO_BACKUPS_KEY))
+    return (stored ?? []).map(({ fileName, createdAt, size }) => ({ fileName, createdAt, size })).sort((a, b) => b.createdAt - a.createdAt)
+  }
+  const directory = await join(await getNativeNotesRoot(), AUTO_BACKUP_FOLDER)
+  if (!await exists(directory)) return []
+  const entries = await readDir(directory)
+  return Promise.all(entries.filter(entry => entry.isFile && /^no-tie-auto-\d{8}-\d{6}\.zip$/.test(entry.name)).map(async entry => {
+    const stamp = entry.name.match(/no-tie-auto-(\d{4})(\d{2})(\d{2})-(\d{2})(\d{2})(\d{2})\.zip$/)
+    const createdAt = stamp ? new Date(Number(stamp[1]), Number(stamp[2]) - 1, Number(stamp[3]), Number(stamp[4]), Number(stamp[5]), Number(stamp[6])).getTime() : 0
+    const file = await stat(await join(directory, entry.name)).catch(() => undefined)
+    return { fileName: entry.name, createdAt, size: file?.size ?? 0 }
+  })).then(items => items.sort((a, b) => b.createdAt - a.createdAt))
+}
+
+export async function saveAutoBackup(bytes: Uint8Array, keep = 7): Promise<AutoBackupInfo> {
+  const now = new Date()
+  const stamp = `${now.getFullYear()}${String(now.getMonth() + 1).padStart(2, '0')}${String(now.getDate()).padStart(2, '0')}-${String(now.getHours()).padStart(2, '0')}${String(now.getMinutes()).padStart(2, '0')}${String(now.getSeconds()).padStart(2, '0')}`
+  const fileName = `no-tie-auto-${stamp}.zip`
+  if (!usesNativeFiles) {
+    const current = await withStore<StoredAutoBackup[] | undefined>('settings', 'readonly', store => store.get(AUTO_BACKUPS_KEY)) ?? []
+    const saved = [{ fileName, createdAt: now.getTime(), size: bytes.byteLength, bytes: bytes.slice() }, ...current.filter(item => item.fileName !== fileName)].slice(0, keep)
+    await withStore<IDBValidKey>('settings', 'readwrite', store => store.put(saved, AUTO_BACKUPS_KEY))
+  } else {
+    const directory = await join(await getNativeNotesRoot(), AUTO_BACKUP_FOLDER)
+    await mkdir(directory, { recursive: true })
+    await writeFile(await join(directory, fileName), bytes)
+    const files = (await getAutoBackups()).sort((a, b) => b.createdAt - a.createdAt)
+    for (const outdated of files.slice(keep)) await remove(await join(directory, outdated.fileName))
+  }
+  return { fileName, createdAt: now.getTime(), size: bytes.byteLength }
+}
+
+export async function readAutoBackup(fileName: string): Promise<Uint8Array> {
+  if (!/^no-tie-auto-\d{8}-\d{6}\.zip$/.test(fileName)) throw new Error('Nieprawidłowa nazwa kopii zapasowej.')
+  if (!usesNativeFiles) {
+    const backups = await withStore<StoredAutoBackup[] | undefined>('settings', 'readonly', store => store.get(AUTO_BACKUPS_KEY)) ?? []
+    const backup = backups.find(item => item.fileName === fileName)
+    if (!backup) throw new Error('Nie znaleziono tej kopii zapasowej.')
+    return backup.bytes
+  }
+  return readFile(await join(await getNativeNotesRoot(), AUTO_BACKUP_FOLDER, fileName))
+}
+
+export async function deleteAutoBackup(fileName: string): Promise<void> {
+  if (!/^no-tie-auto-\d{8}-\d{6}\.zip$/.test(fileName)) return
+  if (!usesNativeFiles) {
+    const backups = await withStore<StoredAutoBackup[] | undefined>('settings', 'readonly', store => store.get(AUTO_BACKUPS_KEY)) ?? []
+    await withStore<IDBValidKey>('settings', 'readwrite', store => store.put(backups.filter(item => item.fileName !== fileName), AUTO_BACKUPS_KEY))
+    return
+  }
+  const path = await join(await getNativeNotesRoot(), AUTO_BACKUP_FOLDER, fileName)
+  if (await exists(path)) await remove(path)
+}
+
 export async function removeFolderFromDisk(folder: string): Promise<void> {
   if (!usesNativeFiles || !folder.trim()) return
   const directory = await folderDirectory(folder)
@@ -414,6 +547,8 @@ function normalizeNoteVersions(value: unknown, noteId: string): NoteVersion[] {
         content: snapshot.content,
         folder: snapshot.folder,
         color: typeof snapshot.color === 'string' && /^#[\da-f]{6}$/i.test(snapshot.color) ? snapshot.color : undefined,
+        aliases: Array.isArray(snapshot.aliases) ? snapshot.aliases.filter((alias): alias is string => typeof alias === 'string') : [],
+        properties: snapshot.properties && typeof snapshot.properties === 'object' && !Array.isArray(snapshot.properties) ? Object.fromEntries(Object.entries(snapshot.properties).filter((entry): entry is [string, string] => typeof entry[0] === 'string' && typeof entry[1] === 'string')) : {},
         tags: Array.isArray(snapshot.tags) ? snapshot.tags.filter((tag): tag is string => typeof tag === 'string') : [],
         favorite: snapshot.favorite === true,
         createdAt: typeof snapshot.createdAt === 'number' ? snapshot.createdAt : record.createdAt,
@@ -563,7 +698,7 @@ export async function getAssetsForNote(noteId: string): Promise<NoteAsset[]> {
 
 const attachmentTypes: Record<string, string> = {
   png: 'image/png', jpg: 'image/jpeg', jpeg: 'image/jpeg', gif: 'image/gif', webp: 'image/webp', avif: 'image/avif',
-  pdf: 'application/pdf',
+  pdf: 'application/pdf', mp3: 'audio/mpeg', m4a: 'audio/mp4', wav: 'audio/wav', ogg: 'audio/ogg', webm: 'audio/webm', aac: 'audio/aac', flac: 'audio/flac', opus: 'audio/opus', '3gp': 'audio/3gpp', amr: 'audio/amr',
 }
 
 function attachmentMimeType(fileName: string) {
@@ -589,7 +724,7 @@ async function readNativeAttachments(noteId: string, directory: string): Promise
   if (!await exists(assetsDirectory)) return []
   const attachments: NoteAttachment[] = []
   for (const entry of await readDir(assetsDirectory)) {
-    if (!entry.isFile || entry.name.toLowerCase().endsWith('.svg') || !attachmentMimeType(entry.name).startsWith('image/') && attachmentMimeType(entry.name) !== 'application/pdf') continue
+    if (!entry.isFile || entry.name.toLowerCase().endsWith('.svg') || !attachmentMimeType(entry.name).startsWith('image/') && attachmentMimeType(entry.name) !== 'application/pdf' && !attachmentMimeType(entry.name).startsWith('audio/')) continue
     try {
       const bytes = await readFile(await join(assetsDirectory, entry.name))
       const mimeType = attachmentMimeType(entry.name)

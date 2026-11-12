@@ -1,12 +1,12 @@
 import { lazy, Suspense, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import type { CSSProperties } from 'react'
 import {
-  Archive, BookOpen, BookmarkPlus, CalendarDays, Check, CheckSquare2, Clock3, Eye, FilePlus2, FileText, Folder, Heart, History, Import, Lightbulb,
+  Archive, BookOpen, BookmarkPlus, Brain, CalendarDays, Check, CheckSquare2, Clock3, Eye, FilePlus2, FileText, Folder, Heart, History, Import, Lightbulb,
   CircleHelp, Link2, Menu, MessageCircle, MoreVertical, Network, Palette, PanelLeft, Pencil, Plus, Repeat2, Search, Settings2, SlidersHorizontal, Sparkles, Star, Tag, Trash2, X,
 } from 'lucide-react'
-import { exportArchiveToFolder, parseArchive } from './archive'
+import { buildArchive, exportArchiveToFolder, parseArchive } from './archive'
 import { ChatPanel } from './ChatPanel'
-import { starterAssets, starterNotes } from './content'
+import { markdownToNote, starterAssets, starterNotes } from './content'
 import { NoteHistoryDialog } from './NoteHistoryDialog'
 import { NoteLinkDialog } from './NoteLinkDialog'
 import { NoteSearchDialog } from './NoteSearchDialog'
@@ -18,23 +18,45 @@ import { SavedSearchDialog } from './SavedSearchDialog'
 import { TemplateManagerDialog } from './TemplateManagerDialog'
 import { NoteAttachmentsPanel } from './NoteAttachmentsPanel'
 import { HelpDialog } from './HelpDialog'
+import { BackupTrashDialog } from './BackupTrashDialog'
+import { FlashcardsDialog } from './FlashcardsDialog'
+import { AiSelectionEditDialog } from './AiSelectionEditDialog'
+import { NotePropertiesEditor } from './NotePropertiesEditor'
+import { NoteEmbedsPanel } from './NoteEmbedsPanel'
 import { MarkdownSourceEditor } from './MarkdownSourceEditor'
 import { searchNotes } from './noteSearch'
-import { parseTasks, updateTaskLine, type ParsedTask } from './knowledge'
-import { listOllamaModels, type OllamaModel } from './ollama'
+import { nextTaskDate, parseTasks, updateTaskLine, type ParsedTask, type TaskPatch } from './knowledge'
+import { resolveWikiTarget } from './knowledge'
+import { imageAttachmentToPngBase64, listOllamaModels, streamOllamaMessage, type OllamaModel } from './ollama'
 import { ReviewSessionDialog } from './ReviewSessionDialog'
 import { ReviewSessionView } from './ReviewSessionView'
 import { ReviewSessionsOverview } from './ReviewSessionsOverview'
 import { checkpointReviewSession } from './reviews'
-import { archiveAttachment, getAssets, getAttachmentHistory, getAttachments, getFolderColors, getFolders, getNoteTemplates, getNoteVersions, getNotes, getReviewSessions, getSavedSearches, hasInitialized, markInitialized, removeAssetsForNote, removeAttachmentsForNote, removeAttachment, removeFolderFromDisk, removeNote, restoreArchivedAttachment, saveArchivedAttachment, saveAsset, saveAttachment, saveFolderColors, saveFolders, saveNote, saveNoteTemplates, saveNoteVersion, saveNoteVersions, saveReviewSessions, saveSavedSearches, storageLocationLabel, usesNativeFiles } from './storage'
-import type { Note, NoteAsset, NoteAttachment, NoteAttachmentReference, NoteTemplate, NoteVersion, ReviewSession, SavedSearch } from './types'
-import { dispatchWikiLinkInsert, replaceWikiLinkTarget } from './wikiLinks'
+import { archiveAttachment, deleteAutoBackup, getAssets, getAttachmentHistory, getAttachments, getAutoBackups, getFlashcards, getFolderColors, getFolders, getNoteTemplates, getNoteVersions, getNotes, getReviewSessions, getSavedSearches, getTrashEntries, hasInitialized, markInitialized, readAutoBackup, removeAssetsForNote, removeAttachmentsForNote, removeAttachment, removeFolderFromDisk, removeNote, restoreArchivedAttachment, saveArchivedAttachment, saveAsset, saveAttachment, saveAutoBackup, saveFlashcards, saveFolderColors, saveFolders, saveNote, saveNoteTemplates, saveNoteVersion, saveNoteVersions, saveReviewSessions, saveSavedSearches, saveTrashEntries, storageLocationLabel, usesNativeFiles } from './storage'
+import type { AutoBackupInfo } from './storage'
+import type { Flashcard, Note, NoteAsset, NoteAttachment, NoteAttachmentReference, NoteTemplate, NoteVersion, ReviewSession, SavedSearch, TrashEntry } from './types'
+import { dispatchAiReplaceSelection, dispatchWikiEmbedInsert, dispatchWikiLinkInsert, replaceWikiLinkTarget } from './wikiLinks'
 import { fileFingerprint } from './fileFingerprint'
+import { reviewFlashcard, type FlashcardGrade } from './flashcards'
 import './App.css'
 
 type Filter = 'all' | 'favorites' | string
 type NoteDisplayMode = 'full' | 'names-tags' | 'names'
 type EntryTarget = { kind: 'folder'; path: string } | { kind: 'note'; id: string }
+
+function errorMessage(error: unknown, fallback: string): string {
+  if (error instanceof Error && error.message) return error.message
+  if (typeof error === 'string' && error.trim()) return error
+  if (error && typeof error === 'object') {
+    const message = (error as { message?: unknown }).message
+    if (typeof message === 'string' && message.trim()) return message
+    try {
+      const serialized = JSON.stringify(error)
+      if (serialized && serialized !== '{}') return serialized
+    } catch { /* use the fallback when a plugin error is not serializable */ }
+  }
+  return fallback
+}
 type DeleteTarget = EntryTarget & { label: string; noteCount: number }
 type EntryColor = { value: string; label: string }
 type EntryPointerDrag = { target: EntryTarget; label: string; pointerId: number; startX: number; startY: number; started: boolean }
@@ -260,6 +282,7 @@ function App() {
   const [templates, setTemplates] = useState<NoteTemplate[]>(defaultTemplates)
   const [showDailyNotes, setShowDailyNotes] = useState(false)
   const [showTaskManager, setShowTaskManager] = useState(false)
+  const [showAiEdit, setShowAiEdit] = useState(false)
   const [showKnowledgeGraph, setShowKnowledgeGraph] = useState(false)
   const [showHelp, setShowHelp] = useState(false)
   const [selectedId, setSelectedId] = useState('')
@@ -271,6 +294,7 @@ function App() {
   const [showQuickSearch, setShowQuickSearch] = useState(false)
   const [quickSearchActiveIndex, setQuickSearchActiveIndex] = useState(0)
   const [showNoteLinkDialog, setShowNoteLinkDialog] = useState(false)
+  const [showNoteEmbedDialog, setShowNoteEmbedDialog] = useState(false)
   const [showNoteHistory, setShowNoteHistory] = useState(false)
   const [noteVersions, setNoteVersions] = useState<NoteVersion[]>([])
   const [noteVersionsLoading, setNoteVersionsLoading] = useState(false)
@@ -287,6 +311,13 @@ function App() {
   const [folderRegistry, setFolderRegistry] = useState<string[]>([])
   const [folderColors, setFolderColors] = useState<Record<string, string>>({})
   const [reviewSessions, setReviewSessions] = useState<ReviewSession[]>([])
+  const [trashEntries, setTrashEntries] = useState<TrashEntry[]>([])
+  const [flashcards, setFlashcards] = useState<Flashcard[]>([])
+  const [autoBackups, setAutoBackups] = useState<AutoBackupInfo[]>([])
+  const [showBackupTrash, setShowBackupTrash] = useState(false)
+  const [showFlashcards, setShowFlashcards] = useState(false)
+  const [backupBusy, setBackupBusy] = useState(false)
+  const automaticBackupRunning = useRef(false)
   const [activeReviewSessionId, setActiveReviewSessionId] = useState('')
   const [showReviewSessionDialog, setShowReviewSessionDialog] = useState(false)
   const [editingReviewSessionId, setEditingReviewSessionId] = useState('')
@@ -328,7 +359,7 @@ function App() {
 
   function reportDiskSaveError(error: unknown) {
     setSaved(false)
-    const detail = error instanceof Error ? error.message : 'Spróbuj ponownie.'
+    const detail = errorMessage(error, 'Spróbuj ponownie.')
     setToast(`Nie udało się zapisać zmian: ${detail}`)
     window.setTimeout(() => setToast(''), 5000)
   }
@@ -345,6 +376,9 @@ function App() {
         let storedFolders = await getFolders()
         const storedFolderColors = await getFolderColors()
         const storedReviewSessions = await getReviewSessions()
+        const storedTrash = await getTrashEntries()
+        const storedFlashcards = await getFlashcards()
+        const storedBackups = await getAutoBackups()
         if (!await hasInitialized()) {
           if (!storedNotes.length) {
             await Promise.all(starterNotes.map(saveNote))
@@ -359,6 +393,9 @@ function App() {
           setFolderRegistry(storedFolders)
           setFolderColors(storedFolderColors)
           setReviewSessions(storedReviewSessions)
+          setTrashEntries(storedTrash.filter(entry => Date.now() - entry.deletedAt < 30 * 86_400_000))
+          setFlashcards(storedFlashcards)
+          setAutoBackups(storedBackups)
           setAttachments(storedAttachments)
           setSavedSearches(storedSearches)
           setTemplates(storedTemplates.length ? storedTemplates : defaultTemplates)
@@ -372,7 +409,7 @@ function App() {
         }
       } catch (error) {
         if (!cancelled) {
-          setLoadError(error instanceof Error ? error.message : 'Nie udało się otworzyć plików notatek.')
+          setLoadError(errorMessage(error, 'Nie udało się otworzyć plików notatek.'))
           setReady(true)
         }
       }
@@ -399,6 +436,8 @@ function App() {
   useEffect(() => {
     if (ready) void saveReviewSessions(reviewSessions).catch(reportDiskSaveError)
   }, [ready, reviewSessions])
+  useEffect(() => { if (ready) void saveFlashcards(flashcards).catch(reportDiskSaveError) }, [ready, flashcards])
+  useEffect(() => { if (ready) void saveTrashEntries(trashEntries).catch(reportDiskSaveError) }, [ready, trashEntries])
   useEffect(() => { if (ready) void saveSavedSearches(savedSearches).catch(reportDiskSaveError) }, [ready, savedSearches])
   useEffect(() => { if (ready) void saveNoteTemplates(templates).catch(reportDiskSaveError) }, [ready, templates])
   useEffect(() => {
@@ -497,7 +536,11 @@ function App() {
   const showingNoteTemplatesPage = activeReviewSessionId === NOTE_TEMPLATES_PAGE_ID
   const showingWorkspacePage = showingReviewSessionsOverview || showingSavedSearchesPage || showingNoteTemplatesPage || Boolean(activeReviewSession)
   const notesRef = useRef<Note[]>([])
-  useLayoutEffect(() => { notesRef.current = notes }, [notes])
+  const backupSnapshotRef = useRef({ notes, assets, attachments, reviewSessions, savedSearches, templates, folderColors, flashcards, trashEntries })
+  useLayoutEffect(() => {
+    notesRef.current = notes
+    backupSnapshotRef.current = { notes, assets, attachments, reviewSessions, savedSearches, templates, folderColors, flashcards, trashEntries }
+  }, [notes, assets, attachments, reviewSessions, savedSearches, templates, folderColors, flashcards, trashEntries])
   useLayoutEffect(() => {
     const note = notesRef.current.find(item => item.id === selectedId)
     if (!note) return
@@ -518,6 +561,25 @@ function App() {
   const currentAssets = assets.filter(asset => asset.noteId === selectedId)
   const currentAttachments = attachments.filter(attachment => attachment.noteId === selectedId)
   const parsedTasks = useMemo(() => parseTasks(notes), [notes])
+  useEffect(() => {
+    const notifyDueTasks = () => {
+      const now = new Date()
+      const localMinute = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(now.getDate()).padStart(2, '0')}T${String(now.getHours()).padStart(2, '0')}:${String(now.getMinutes()).padStart(2, '0')}`
+      parsedTasks.filter(task => !task.done && task.remindAt && task.remindAt <= localMinute).forEach(task => {
+        const key = `no-tie-reminder:${task.id}:${task.remindAt}`
+        if (localStorage.getItem(key)) return
+        localStorage.setItem(key, '1')
+        if ('Notification' in window && Notification.permission === 'granted') new Notification(`Przypomnienie: ${task.text}`, { body: task.noteTitle || 'No-Tie' })
+        else {
+          setToast(`Przypomnienie: ${task.text}`)
+          window.setTimeout(() => setToast(''), 5000)
+        }
+      })
+    }
+    notifyDueTasks()
+    const timer = window.setInterval(notifyDueTasks, 30_000)
+    return () => window.clearInterval(timer)
+  }, [parsedTasks])
   const documentCounts = selectedNote ? countMarkdownDocument(selectedNote.content) : { words: 0, characters: 0 }
   const selectionText = selectedNote && editorSelection.noteId === selectedNote.id && editorSelection.mode === editorMode ? editorSelection.text : ''
   const selectionCounts = countEditorText(selectionText)
@@ -575,8 +637,7 @@ function App() {
   }
 
   function openLinkedNote(target: string) {
-    const needle = target.trim().normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLocaleLowerCase('pl')
-    const note = notes.find(item => item.id === target || item.title.trim().normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLocaleLowerCase('pl') === needle)
+    const note = resolveWikiTarget(notes, target)
     if (!note) {
       setToast(`Nie znaleziono notatki „${target}”.`)
       window.setTimeout(() => setToast(''), 2800)
@@ -633,16 +694,32 @@ function App() {
     setMobileDrawer('none')
   }
 
-  function updateTask(task: ParsedTask, patch: Partial<Pick<ParsedTask, 'done' | 'dueDate' | 'priority'>>) {
+  function updateTask(task: ParsedTask, patch: TaskPatch) {
     const note = notes.find(item => item.id === task.noteId)
     if (!note) return
-    patchNote(note.id, { content: updateTaskLine(note.content, task, patch) })
+    const completing = patch.done === true || patch.status === 'done'
+    const blocker = completing && task.dependency ? parsedTasks.find(item => item.id === task.dependency && !item.done) : undefined
+    if (blocker) {
+      setToast(`Najpierw ukończ zadanie: ${blocker.text}`)
+      window.setTimeout(() => setToast(''), 3000)
+      return
+    }
+    let content = updateTaskLine(note.content, task, patch)
+    if (completing && !task.done && task.repeat) {
+      const nextDate = nextTaskDate(task.dueDate, task.repeat)
+      const repeatId = crypto.randomUUID()
+      const reminderTime = task.remindAt ? task.remindAt.slice(11, 16) : ''
+      const nextReminder = reminderTime ? ` remind=${encodeURIComponent(`${nextDate}T${reminderTime}`)}` : ''
+      content += `${content.endsWith('\n') ? '' : '\n'}- [ ] ${task.text} <!-- no-tie-task id=${repeatId} due=${nextDate} priority=${task.priority} repeat=${task.repeat}${nextReminder} -->\n`
+    }
+    patchNote(note.id, { content })
   }
 
-  function createTask(noteId: string, title: string, dueDate: string, priority: ParsedTask['priority']) {
+  function createTask(noteId: string, title: string, dueDate: string, priority: ParsedTask['priority'], repeat: ParsedTask['repeat'] = '', remindAt = '', dependency = '') {
     const note = notes.find(item => item.id === noteId)
     if (!note) return
-    const metadata = dueDate || priority !== 'normal' ? ` <!-- no-tie-task${dueDate ? ` due=${dueDate}` : ''}${priority !== 'normal' ? ` priority=${priority}` : ''} -->` : ''
+    const fields = [`id=${crypto.randomUUID()}`, dueDate ? `due=${dueDate}` : '', priority !== 'normal' ? `priority=${priority}` : '', repeat ? `repeat=${repeat}` : '', remindAt ? `remind=${encodeURIComponent(remindAt)}` : '', dependency ? `depends=${encodeURIComponent(dependency)}` : ''].filter(Boolean)
+    const metadata = ` <!-- no-tie-task ${fields.join(' ')} -->`
     const separator = note.content.endsWith('\n') ? '' : '\n'
     patchNote(noteId, { content: `${note.content}${separator}- [ ] ${title}${metadata}\n` })
   }
@@ -656,8 +733,8 @@ function App() {
     let content = note.content
     for (const file of files) {
       const extension = file.name.split('.').at(-1)?.toLowerCase() ?? ''
-      const mimeType = ({ jpg: 'image/jpeg', jpeg: 'image/jpeg', png: 'image/png', gif: 'image/gif', webp: 'image/webp', avif: 'image/avif', pdf: 'application/pdf' } as Record<string, string>)[extension] || ''
-      if (!mimeType || (file.type && file.type !== mimeType)) { setToast(`Typ pliku „${file.name}” nie jest obsługiwany.`); window.setTimeout(() => setToast(''), 3000); continue }
+      const mimeType = ({ jpg: 'image/jpeg', jpeg: 'image/jpeg', png: 'image/png', gif: 'image/gif', webp: 'image/webp', avif: 'image/avif', pdf: 'application/pdf', mp3: 'audio/mpeg', m4a: 'audio/mp4', wav: 'audio/wav', ogg: 'audio/ogg', webm: 'audio/webm', aac: 'audio/aac', flac: 'audio/flac', opus: 'audio/opus', '3gp': 'audio/3gpp', amr: 'audio/amr' } as Record<string, string>)[extension] || ''
+      if (!mimeType || (file.type && file.type !== mimeType && !file.type.startsWith(`${mimeType};`))) { setToast(`Typ pliku „${file.name}” nie jest obsługiwany.`); window.setTimeout(() => setToast(''), 3000); continue }
       if (file.size > 15 * 1024 * 1024) { setToast(`Plik „${file.name}” przekracza limit 15 MB.`); window.setTimeout(() => setToast(''), 3000); continue }
       const fileName = uniqueAttachmentName(safeAttachmentName(file.name), usedNames)
       const payload = await dataUrlFromFile(file, mimeType)
@@ -674,6 +751,82 @@ function App() {
       setToast(`Dodano ${additions.length} ${additions.length === 1 ? 'załącznik' : 'załączniki'}.`)
       window.setTimeout(() => setToast(''), 2500)
     }
+  }
+
+  function insertTextIntoNote(text: string) {
+    if (!selectedNote || !text.trim()) return
+    const separator = selectedNote.content.endsWith('\n') ? '\n' : '\n\n'
+    patchNote(selectedNote.id, { content: `${selectedNote.content}${separator}${text.trim()}\n` })
+    setEditorRevision(value => value + 1)
+  }
+
+  async function recognizeAttachmentText(attachment: NoteAttachment): Promise<string> {
+    if (!ollamaModel.trim()) throw new Error('Ustaw model obsługujący obrazy w ustawieniach Ollama.')
+    let images: string[]
+    if (attachment.mimeType === 'application/pdf') {
+      const { pdfAttachmentToVisionPages } = await import('./pdfVision')
+      images = (await pdfAttachmentToVisionPages(attachment.dataUrl, 4)).pages.map(page => page.base64)
+    } else images = [await imageAttachmentToPngBase64(attachment.dataUrl)]
+    if (!images.length) throw new Error('Nie udało się wczytać stron dokumentu.')
+    let result = ''
+    await streamOllamaMessage(ollamaBaseUrl, ollamaModel, [{ role: 'user', content: 'Odczytaj dokładnie cały widoczny tekst z załączonego obrazu. Zachowaj kolejność, podziały na akapity i tabelaryczny układ w Markdown. Zwróć wyłącznie rozpoznany tekst.', images }], chunk => { result += chunk })
+    if (!result.trim()) throw new Error('Model nie rozpoznał tekstu.')
+    return result.trim()
+  }
+
+  function exportCurrentAsHtml(renderedReady = false) {
+    if (!selectedNote) return
+    if (!renderedReady && editorMode === 'source') {
+      setEditorMode('rendered')
+      const deadline = Date.now() + 3000
+      const waitForEditor = () => {
+        if (document.querySelector('.note-editor .markdown-editor .milkdown') || Date.now() >= deadline) {
+          exportCurrentAsHtml(true)
+          setEditorMode('source')
+        } else window.setTimeout(waitForEditor, 50)
+      }
+      window.setTimeout(waitForEditor, 50)
+      return
+    }
+    const safeTitle = selectedNote.title.replace(/[&<>"']/g, character => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[character]!)
+    const rendered = document.querySelector('.note-editor .markdown-editor .milkdown')
+    let body = rendered?.innerHTML ?? `<pre>${selectedNote.content.replace(/[&<>]/g, character => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;' })[character]!)}</pre>`
+    const template = document.createElement('template')
+    template.innerHTML = body
+    template.content.querySelectorAll('script, iframe, object, embed').forEach(node => node.remove())
+    template.content.querySelectorAll('*').forEach(element => {
+      for (const attribute of [...element.attributes]) if (attribute.name.toLowerCase().startsWith('on') || /javascript:/i.test(attribute.value)) element.removeAttribute(attribute.name)
+    })
+    body = `${template.innerHTML}${document.querySelector('.note-editor .note-embeds-panel')?.innerHTML ?? ''}`
+    const html = `<!doctype html><html lang="pl"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>${safeTitle}</title><style>body{max-width:850px;margin:48px auto;padding:0 24px;color:#273047;font:16px/1.7 system-ui,sans-serif}h1,h2,h3{line-height:1.25}img{max-width:100%;height:auto}table{border-collapse:collapse;width:100%}td,th{border:1px solid #d9deea;padding:7px 10px}blockquote{margin-left:0;padding-left:16px;border-left:3px solid #8391df;color:#626d83}pre{overflow:auto;padding:12px;background:#f4f5f8;border-radius:8px}code{font-family:ui-monospace,monospace}.note-embed-card{margin:18px 0;border-left:3px solid #7586df;padding:8px 14px;background:#fafbff}.note-embed-card header{font-weight:bold;color:#596998}.note-embed-card pre{white-space:pre-wrap}</style></head><body><h1>${safeTitle}</h1>${body}</body></html>`
+    const url = URL.createObjectURL(new Blob([html], { type: 'text/html;charset=utf-8' }))
+    const anchor = document.createElement('a'); anchor.href = url; anchor.download = `${safeAttachmentName(selectedNote.title || 'notatka')}.html`; anchor.click(); window.setTimeout(() => URL.revokeObjectURL(url), 1000)
+  }
+
+  function exportCurrentAsPdf() {
+    if (!selectedNote) return
+    const previousTitle = document.title
+    document.title = selectedNote.title || 'Notatka'
+    const print = () => {
+      let restored = false
+      const restore = () => {
+        if (restored) return
+        restored = true
+        document.title = previousTitle
+        if (editorMode === 'source') setEditorMode('source')
+      }
+      window.addEventListener('afterprint', restore, { once: true })
+      window.print()
+      window.setTimeout(restore, 3000)
+    }
+    if (editorMode === 'source') {
+      setEditorMode('rendered')
+      const deadline = Date.now() + 3000
+      const waitForEditor = () => document.querySelector('.note-editor .markdown-editor .milkdown') || Date.now() >= deadline
+        ? print()
+        : window.setTimeout(waitForEditor, 50)
+      window.setTimeout(waitForEditor, 50)
+    } else print()
   }
 
   async function deleteAttachment(attachment: NoteAttachment) {
@@ -721,10 +874,26 @@ function App() {
     historyDialogNoteIdRef.current = ''
   }
 
-  async function restoreNoteVersion(version: NoteVersion) {
+  async function restoreNoteVersion(version: NoteVersion, fields: ('content' | 'title' | 'folder' | 'tags' | 'aliases' | 'properties')[] = ['content', 'title', 'folder', 'tags', 'aliases', 'properties']) {
     if (!selectedNote || selectedNote.id !== version.noteId) return
     const snapshot = version.note
     await saveNoteVersion(selectedNote)
+    if (!fields.includes('content')) {
+      const restoredNote = {
+        ...selectedNote,
+        ...(fields.includes('title') ? { title: snapshot.title } : {}),
+        ...(fields.includes('folder') ? { folder: snapshot.folder } : {}),
+        ...(fields.includes('tags') ? { tags: [...snapshot.tags] } : {}),
+        ...(fields.includes('aliases') ? { aliases: [...(snapshot.aliases ?? [])] } : {}),
+        ...(fields.includes('properties') ? { properties: { ...(snapshot.properties ?? {}) } } : {}),
+        updatedAt: currentTimestamp(),
+      }
+      patchNote(selectedNote.id, restoredNote, false)
+      await saveNoteVersion(restoredNote)
+      setToast('Przywrócono wybrane właściwości notatki.')
+      window.setTimeout(() => setToast(''), 2800)
+      return
+    }
     const currentAttachments = attachments.filter(attachment => attachment.noteId === version.noteId)
     const historicalAttachments = await getAttachmentHistory(version.noteId)
     const legacyNames = version.attachments === undefined
@@ -779,12 +948,14 @@ function App() {
     }
     const restoredNote = {
       ...selectedNote,
-      title: snapshot.title,
+      title: fields.includes('title') ? snapshot.title : selectedNote.title,
       content: restoredContent,
-      folder: snapshot.folder,
-      color: snapshot.color,
-      tags: [...snapshot.tags],
-      favorite: snapshot.favorite,
+      folder: fields.includes('folder') ? snapshot.folder : selectedNote.folder,
+      color: selectedNote.color,
+      tags: fields.includes('tags') ? [...snapshot.tags] : selectedNote.tags,
+      aliases: fields.includes('aliases') ? [...(snapshot.aliases ?? [])] : selectedNote.aliases,
+      properties: fields.includes('properties') ? { ...(snapshot.properties ?? {}) } : selectedNote.properties,
+      favorite: selectedNote.favorite,
       updatedAt: currentTimestamp(),
     }
     patchNote(selectedNote.id, restoredNote, false)
@@ -981,7 +1152,7 @@ function App() {
           if (content !== note.content) patchNote(note.id, { content })
         })
       }
-      patchNote(renameTarget.id, { title: value })
+      patchNote(renameTarget.id, { title: value, aliases: renamed && renamed.title !== value ? [...new Set([...(renamed.aliases ?? []), renamed.title].filter(Boolean))] : renamed?.aliases })
     } else {
       if (value.includes('/') || value.includes('\\')) {
         setToast('Nazwa folderu nie może zawierać ukośnika')
@@ -1018,12 +1189,17 @@ function App() {
   }
 
   async function removeNoteFromLibrary(id: string) {
+    const entries = trashNoteData(new Set([id]))
+    const nextTrash = [...entries, ...trashEntries].filter(entry => Date.now() - entry.deletedAt < 30 * 86_400_000)
+    await saveTrashEntries(nextTrash)
+    setTrashEntries(nextTrash)
     await removeAssetsForNote(id)
     await removeAttachmentsForNote(id)
     await removeNote(id)
     setAssets(current => current.filter(asset => asset.noteId !== id))
     setAttachments(current => current.filter(attachment => attachment.noteId !== id))
     setNotes(current => current.filter(note => note.id !== id))
+    setFlashcards(current => current.filter(card => card.noteId !== id))
     removeNotesFromReviewSessions(new Set([id]))
     if (selectedId === id) selectNote(notes.find(note => note.id !== id)?.id ?? '')
     setSaved(true)
@@ -1037,6 +1213,10 @@ function App() {
         await removeNoteFromLibrary(target.id)
       } else {
         const removedNotes = notes.filter(note => note.folder === target.path || note.folder.startsWith(`${target.path}/`))
+        const removedIdsForTrash = new Set(removedNotes.map(note => note.id))
+        const nextTrash = [...trashNoteData(removedIdsForTrash), ...trashEntries].filter(entry => Date.now() - entry.deletedAt < 30 * 86_400_000)
+        await saveTrashEntries(nextTrash)
+        setTrashEntries(nextTrash)
         await Promise.all(removedNotes.map(async note => {
           await removeAssetsForNote(note.id)
           await removeAttachmentsForNote(note.id)
@@ -1047,6 +1227,7 @@ function App() {
         setAssets(current => current.filter(asset => !removedIds.has(asset.noteId)))
         setAttachments(current => current.filter(attachment => !removedIds.has(attachment.noteId)))
         setNotes(current => current.filter(note => !removedIds.has(note.id)))
+        setFlashcards(current => current.filter(card => !removedIds.has(card.noteId)))
         if (selectedId && removedIds.has(selectedId)) selectNote(notes.find(note => !removedIds.has(note.id))?.id ?? '')
         const nextFolders = folders.filter(folder => folder !== target.path && !folder.startsWith(`${target.path}/`))
         setFolderRegistry(nextFolders)
@@ -1056,7 +1237,7 @@ function App() {
         if (activeFilter === target.path || activeFilter.startsWith(`${target.path}/`)) setActiveFilter('all')
       }
       setDeleteTarget(null)
-      setToast(`Usunięto „${target.label}”`)
+      setToast(`Przeniesiono „${target.label}” do kosza`)
     } catch (error) {
       setToast(error instanceof Error ? error.message : 'Nie udało się usunąć elementu')
     }
@@ -1307,12 +1488,115 @@ function App() {
     setShowOllamaSettings(false)
   }
 
+  async function createAutomaticBackup(silent = true) {
+    if (automaticBackupRunning.current) return
+    const snapshot = backupSnapshotRef.current
+    if (!snapshot.notes.length) return
+    automaticBackupRunning.current = true
+    setBackupBusy(true)
+    try {
+      await Promise.all(snapshot.notes.map(note => flushNoteVersion(note.id, note)))
+      const versions = (await Promise.all(snapshot.notes.map(note => getNoteVersions(note.id)))).flat()
+      const attachmentHistory = (await Promise.all(snapshot.notes.map(note => getAttachmentHistory(note.id)))).flat()
+      const workspace = { reviewSessions: snapshot.reviewSessions, savedSearches: snapshot.savedSearches, noteTemplates: snapshot.templates, folderColors: snapshot.folderColors, flashcards: snapshot.flashcards, trash: snapshot.trashEntries }
+      const info = await saveAutoBackup(buildArchive(snapshot.notes, snapshot.assets, versions, snapshot.attachments, workspace, attachmentHistory))
+      localStorage.setItem('no-tie-last-automatic-backup', String(info.createdAt))
+      setAutoBackups(await getAutoBackups())
+      if (!silent) setToast(`Utworzono kopię zapasową: ${info.fileName}`)
+    } catch (error) {
+      reportDiskSaveError(error)
+    } finally {
+      automaticBackupRunning.current = false
+      setBackupBusy(false)
+    }
+  }
+
+  useEffect(() => {
+    if (!ready) return
+    const checkBackupSchedule = () => {
+      const previous = Number(localStorage.getItem('no-tie-last-automatic-backup') ?? '0')
+      if (Date.now() - previous >= 86_400_000) void createAutomaticBackup(true)
+    }
+    checkBackupSchedule()
+    const interval = window.setInterval(checkBackupSchedule, 60 * 60_000)
+    return () => window.clearInterval(interval)
+  }, [ready])
+
+  async function downloadAutomaticBackup(fileName: string) {
+    try {
+      const bytes = await readAutoBackup(fileName)
+      const buffer = new ArrayBuffer(bytes.byteLength)
+      new Uint8Array(buffer).set(bytes)
+      const url = URL.createObjectURL(new Blob([buffer], { type: 'application/zip' }))
+      const anchor = document.createElement('a')
+      anchor.href = url
+      anchor.download = fileName
+      anchor.click()
+      window.setTimeout(() => URL.revokeObjectURL(url), 1000)
+    } catch (error) { reportDiskSaveError(error) }
+  }
+
+  async function removeAutomaticBackup(fileName: string) {
+    try { await deleteAutoBackup(fileName); setAutoBackups(await getAutoBackups()) } catch (error) { reportDiskSaveError(error) }
+  }
+
+  function createFlashcard(noteId: string, question: string, answer: string) {
+    const now = Date.now()
+    setFlashcards(current => [{ id: crypto.randomUUID(), noteId, question, answer, dueAt: now, intervalDays: 0, ease: 2.5, repetitions: 0, lapses: 0 }, ...current])
+  }
+
+  function rateFlashcard(id: string, grade: FlashcardGrade) {
+    setFlashcards(current => current.map(card => card.id === id ? reviewFlashcard(card, grade) : card))
+  }
+
+  function trashNoteData(noteIds: Set<string>, batchId = crypto.randomUUID()) {
+    const deletedAt = Date.now()
+    return notes.filter(note => noteIds.has(note.id)).map(note => ({
+      id: crypto.randomUUID(), batchId, deletedAt, note: copyNote(note),
+      assets: assets.filter(asset => asset.noteId === note.id).map(asset => ({ ...asset })),
+      attachments: attachments.filter(attachment => attachment.noteId === note.id).map(attachment => ({ ...attachment })),
+    }))
+  }
+
+  async function restoreTrashEntry(entryId: string) {
+    const entry = trashEntries.find(item => item.id === entryId)
+    if (!entry) return
+    const restoredNote = notes.some(note => note.id === entry.note.id) ? { ...entry.note, id: crypto.randomUUID() } : entry.note
+    const restoredAssets = entry.assets.map(asset => ({ ...asset, id: `${restoredNote.id}:${asset.fileName}`, noteId: restoredNote.id }))
+    const restoredAttachments = entry.attachments.map(attachment => ({ ...attachment, id: `${restoredNote.id}:${attachment.fileName}`, noteId: restoredNote.id }))
+    try {
+      await saveNote(restoredNote)
+      await Promise.all(restoredAssets.map(saveAsset))
+      await Promise.all(restoredAttachments.map(saveAttachment))
+      const remainingTrash = trashEntries.filter(item => item.id !== entryId)
+      await saveTrashEntries(remainingTrash)
+      setTrashEntries(remainingTrash)
+      setNotes(current => [restoredNote, ...current])
+      setAssets(current => [...current.filter(asset => asset.noteId !== restoredNote.id), ...restoredAssets])
+      setAttachments(current => [...current.filter(attachment => attachment.noteId !== restoredNote.id), ...restoredAttachments])
+      setFolderRegistry(current => [...new Set([...current, ...folderParents(restoredNote.folder)])])
+      selectNote(restoredNote.id)
+      setShowBackupTrash(false)
+    } catch (error) { reportDiskSaveError(error) }
+  }
+
+  async function deleteTrashEntry(entryId: string) {
+    const remainingTrash = trashEntries.filter(item => item.id !== entryId)
+    await saveTrashEntries(remainingTrash)
+    setTrashEntries(remainingTrash)
+  }
+
+  async function emptyTrash() {
+    await saveTrashEntries([])
+    setTrashEntries([])
+  }
+
   async function exportNotesArchive() {
     try {
       await Promise.all(notes.map(note => flushNoteVersion(note.id, note)))
       const versions = (await Promise.all(notes.map(note => getNoteVersions(note.id)))).flat()
       const attachmentHistory = (await Promise.all(notes.map(note => getAttachmentHistory(note.id)))).flat()
-      const workspace = { reviewSessions, savedSearches, noteTemplates: templates, folderColors }
+      const workspace = { reviewSessions, savedSearches, noteTemplates: templates, folderColors, flashcards, trash: trashEntries }
       const savedPath = await exportArchiveToFolder(notes, assets, versions, attachments, workspace, attachmentHistory)
       if (!savedPath) return
       setToast(`Paczka została zapisana: ${savedPath}`)
@@ -1378,52 +1662,85 @@ function App() {
     const file = event.target.files?.[0]
     if (!file) return
     try {
-      const imported = parseArchive(new Uint8Array(await file.arrayBuffer()))
-      setSaved(false)
-      await Promise.all(imported.notes.map(async note => {
-        await removeAssetsForNote(note.id)
-        await removeAttachmentsForNote(note.id)
-        await saveNote(note)
-        const versions = imported.versions.filter(version => version.noteId === note.id)
-        await saveNoteVersions(note.id, versions)
-        if (!versions.length) await saveNoteVersion(note)
-      }))
-      await Promise.all(imported.assets.map(saveAsset))
-      await Promise.all(imported.attachments.map(saveAttachment))
-      await Promise.all(imported.attachmentHistory.map(saveArchivedAttachment))
-      setFolderRegistry(current => [...new Set([...current, ...imported.notes.flatMap(note => folderParents(note.folder))])])
-      setNotes(current => {
-        const byId = new Map(current.map(note => [note.id, note]))
-        imported.notes.forEach(note => byId.set(note.id, note))
-        return [...byId.values()].sort((a, b) => b.updatedAt - a.updatedAt)
-      })
-      setAssets(current => {
-        const importedIds = new Set(imported.notes.map(note => note.id))
-        return [...current.filter(asset => !importedIds.has(asset.noteId)), ...imported.assets]
-      })
-      setAttachments(current => {
-        const importedIds = new Set(imported.notes.map(note => note.id))
-        return [...current.filter(attachment => !importedIds.has(attachment.noteId)), ...imported.attachments]
-      })
-      if (imported.workspace) {
-        const availableNoteIds = new Set([...notes.map(note => note.id), ...imported.notes.map(note => note.id)])
-        setReviewSessions(imported.workspace.reviewSessions.map(session => {
-          const noteIds = session.noteIds.filter(id => availableNoteIds.has(id))
-          const noteTimesMs = Object.fromEntries(Object.entries(session.noteTimesMs).filter(([id]) => noteIds.includes(id)))
-          return { ...session, noteIds, noteTimesMs, activeNoteId: session.activeNoteId && noteIds.includes(session.activeNoteId) ? session.activeNoteId : noteIds[0] ?? null }
-        }))
-        setSavedSearches(imported.workspace.savedSearches)
-        setTemplates(imported.workspace.noteTemplates.length ? imported.workspace.noteTemplates : defaultTemplates)
-        setFolderColors(imported.workspace.folderColors)
-      }
-      selectNote(imported.notes[0].id)
-      setActiveFilter('all')
-      setEditorRevision(value => value + 1)
-      window.alert(`Zaimportowano ${imported.notes.length} notatek.`)
+      const imported = file.name.toLowerCase().endsWith('.md') || file.name.toLowerCase().endsWith('.markdown')
+        ? (() => {
+          const source = file
+          return source.text().then(markdown => {
+            const note = markdownToNote(markdown, crypto.randomUUID())
+            const heading = note.content.match(/^\s*#\s+(.+)$/m)?.[1]?.trim()
+            if (!note.title || note.title === 'Importowana notatka') note.title = heading || source.name.replace(/\.(?:md|markdown)$/i, '').replace(/[-_]+/g, ' ')
+            note.folder = 'Importowane'
+            return { notes: [note], assets: [], versions: [], attachments: [], attachmentHistory: [] }
+          })
+        })()
+        : parseArchive(new Uint8Array(await file.arrayBuffer()))
+      const parsed = await imported
+      await applyParsedArchive(parsed)
     } catch (error) {
-      window.alert(error instanceof Error ? error.message : 'Nie udało się zaimportować paczki.')
+      setToast(error instanceof Error ? error.message : 'Nie udało się zaimportować pliku.')
+      window.setTimeout(() => setToast(''), 4000)
     }
     event.target.value = ''
+  }
+
+  async function applyParsedArchive(imported: ReturnType<typeof parseArchive>, replaceExisting = false) {
+    setSaved(false)
+    if (replaceExisting) {
+      await Promise.all(notes.map(async note => {
+        await removeAssetsForNote(note.id)
+        await removeAttachmentsForNote(note.id)
+        await removeNote(note.id)
+      }))
+    }
+    await Promise.all(imported.notes.map(async note => {
+      if (!replaceExisting && notes.some(existing => existing.id === note.id)) {
+        await removeAssetsForNote(note.id)
+        await removeAttachmentsForNote(note.id)
+      }
+      await saveNote(note)
+      const versions = imported.versions.filter(version => version.noteId === note.id)
+      await saveNoteVersions(note.id, versions)
+      if (!versions.length) await saveNoteVersion(note)
+    }))
+    await Promise.all(imported.assets.map(saveAsset))
+    await Promise.all(imported.attachments.map(saveAttachment))
+    await Promise.all(imported.attachmentHistory.map(saveArchivedAttachment))
+    const importedIds = new Set(imported.notes.map(note => note.id))
+    const nextNotes = (replaceExisting ? imported.notes : [...notes.filter(note => !importedIds.has(note.id)), ...imported.notes]).sort((a, b) => b.updatedAt - a.updatedAt)
+    setNotes(nextNotes)
+    setAssets(current => [...(replaceExisting ? [] : current.filter(asset => !importedIds.has(asset.noteId))), ...imported.assets])
+    setAttachments(current => [...(replaceExisting ? [] : current.filter(attachment => !importedIds.has(attachment.noteId))), ...imported.attachments])
+    const nextFolders = [...new Set([...(!replaceExisting ? folders : []), ...imported.notes.flatMap(note => folderParents(note.folder))])]
+    setFolderRegistry(nextFolders)
+    if (imported.workspace) {
+      const availableNoteIds = new Set(nextNotes.map(note => note.id))
+      setReviewSessions(imported.workspace.reviewSessions.map(session => {
+        const noteIds = session.noteIds.filter(id => availableNoteIds.has(id))
+        const noteTimesMs = Object.fromEntries(Object.entries(session.noteTimesMs).filter(([id]) => noteIds.includes(id)))
+        return { ...session, noteIds, noteTimesMs, activeNoteId: session.activeNoteId && noteIds.includes(session.activeNoteId) ? session.activeNoteId : noteIds[0] ?? null }
+      }))
+      setSavedSearches(imported.workspace.savedSearches)
+      setTemplates(imported.workspace.noteTemplates.length ? imported.workspace.noteTemplates : defaultTemplates)
+      setFolderColors(imported.workspace.folderColors)
+      if (imported.workspace.flashcards) setFlashcards(imported.workspace.flashcards.filter(card => availableNoteIds.has(card.noteId)))
+      if (imported.workspace.trash) setTrashEntries(imported.workspace.trash)
+    }
+    if (replaceExisting) setActiveFilter('all')
+    if (imported.notes[0]) selectNote(imported.notes[0].id)
+    setActiveReviewSessionId('')
+    setEditorRevision(value => value + 1)
+    setSaved(true)
+    setToast(`${replaceExisting ? 'Przywrócono' : 'Zaimportowano'} ${imported.notes.length} notatek.`)
+    window.setTimeout(() => setToast(''), 3000)
+  }
+
+  async function restoreAutomaticBackup(fileName: string) {
+    setBackupBusy(true)
+    try {
+      const imported = parseArchive(await readAutoBackup(fileName))
+      await applyParsedArchive(imported, true)
+      setShowBackupTrash(false)
+    } catch (error) { reportDiskSaveError(error) } finally { setBackupBusy(false) }
   }
 
   async function deleteSelected() {
@@ -1478,6 +1795,8 @@ function App() {
             <div className="section-heading"><span className="section-label">NARZĘDZIA</span></div>
             <button className="nav-item" onClick={() => setShowDailyNotes(true)}><CalendarDays size={16} /><span>Notatki dzienne</span></button>
             <button className="nav-item" onClick={() => setShowTaskManager(true)}><CheckSquare2 size={16} /><span>Zadania</span><span className="nav-count">{parsedTasks.filter(task => !task.done).length}</span></button>
+            <button className="nav-item" onClick={() => setShowFlashcards(true)}><Brain size={16} /><span>Fiszki</span><span className="nav-count">{flashcards.filter(card => card.dueAt <= Date.now()).length}</span></button>
+            <button className="nav-item" onClick={() => setShowBackupTrash(true)}><Archive size={16} /><span>Kopie i kosz</span><span className="nav-count">{trashEntries.length}</span></button>
             <button className="nav-item" onClick={() => setShowKnowledgeGraph(true)}><Network size={16} /><span>Mapa powiązań</span></button>
             <button className={`nav-item ${showingSavedSearchesPage ? 'active' : ''}`} onClick={() => { setActiveReviewSessionId(SAVED_SEARCHES_PAGE_ID); setMobileDrawer('none') }}><BookmarkPlus size={16} /><span>Zapisane widoki</span><span className="nav-count">{savedSearches.length}</span></button>
             <button className={`nav-item ${showingNoteTemplatesPage ? 'active' : ''}`} onClick={() => { setActiveReviewSessionId(NOTE_TEMPLATES_PAGE_ID); setMobileDrawer('none') }}><FilePlus2 size={16} /><span>Szablony</span><span className="nav-count">{templates.length}</span></button>
@@ -1536,7 +1855,7 @@ function App() {
             <button className={`icon-button ollama-toggle ${showChat ? 'active' : ''}`} onClick={toggleChat} title={showChat ? 'Ukryj czat Ollama' : 'Pokaż czat Ollama'} aria-label={showChat ? 'Ukryj czat Ollama' : 'Pokaż czat Ollama'} aria-pressed={showChat}><MessageCircle size={17} /></button>
             <button className="button secondary export-button" onClick={exportNotesArchive}><Archive size={15} /><span>Eksportuj</span></button>
             <button className="icon-button import-icon" onClick={() => importInput.current?.click()} title="Importuj paczkę" aria-label="Importuj paczkę"><Import size={17} /></button>
-            <input ref={importInput} type="file" accept=".zip,application/zip" hidden onChange={handleImport} />
+            <input ref={importInput} type="file" accept=".zip,.md,.markdown,application/zip,text/markdown" hidden onChange={handleImport} />
           </div>
         </header>
 
@@ -1580,13 +1899,15 @@ function App() {
               <div className="note-meta-line"><span className="meta-dot" /><select className="folder-select" value={selectedNote.folder} onChange={event => moveNoteToFolder(selectedNote.id, event.target.value)} aria-label="Folder notatki"><option value="">Bez folderu</option>{folders.map(folder => <option key={folder} value={folder}>{folder}</option>)}</select><span className="meta-divider">·</span>Utworzono {dateLabel(selectedNote.createdAt)}</div>
               <input className="note-title-input" value={selectedNote.title} onChange={event => patchNote(selectedNote.id, { title: event.target.value })} placeholder="Tytuł notatki" aria-label="Tytuł notatki" />
               <div className="tags-row"><Tag size={15} /><div className="tag-list">{selectedNote.tags.map(tag => <button className="editable-tag" key={tag} onClick={() => patchNote(selectedNote.id, { tags: selectedNote.tags.filter(item => item !== tag) })} title="Usuń tag">{tag}<X size={11} /></button>)}<input className="tag-input" value={tagInput} onChange={event => setTagInput(event.target.value)} onKeyDown={event => { if (event.key === 'Enter') { event.preventDefault(); addTag() } }} placeholder={selectedNote.tags.length ? 'Dodaj tag…' : 'Dodaj tag'} aria-label="Dodaj tag" />{tagInput && <button className="tag-add-button" onClick={addTag}>Dodaj</button>}</div></div>
+              <NotePropertiesEditor key={`${selectedNote.id}:${(selectedNote.aliases ?? []).join('|')}`} note={selectedNote} onChange={patch => patchNote(selectedNote.id, patch)} />
               <div className="editor-tools-row">
-                <div className="editor-tools-left"><div className="view-mode-toggle" role="group" aria-label="Widok notatki"><button className={`view-mode-button ${editorMode === 'rendered' ? 'active' : ''}`} title="Widok wizualny" aria-label="Widok wizualny" aria-pressed={editorMode === 'rendered'} onClick={() => setEditorMode('rendered')}><Eye size={16} /></button><button className={`view-mode-button ${editorMode === 'source' ? 'active' : ''}`} title="Surowy Markdown" aria-label="Surowy Markdown" aria-pressed={editorMode === 'source'} onClick={() => setEditorMode('source')}><FileText size={16} /></button></div><span className="toolbar-separator" /><button className="inline-tool" onClick={() => { setEditingAsset(undefined); setShowDrawing(true) }}><Sparkles size={15} />Dodaj schemat</button><button className="inline-tool" onClick={() => setShowNoteLinkDialog(true)}><Link2 size={15} />Połącz notatkę</button>{currentAssets.map(asset => <button className="inline-tool asset-tool" key={asset.id} onClick={() => { setEditingAsset(asset); setShowDrawing(true) }}><Lightbulb size={14} />{asset.fileName}</button>)}</div>
-                <div className="template-toolbar"><select className="template-select" defaultValue="" aria-label="Wstaw szablon" onChange={event => { const template = templates.find(item => item.id === event.target.value); if (template) { patchNote(selectedNote.id, { title: template.title, content: template.content, tags: [...new Set([...selectedNote.tags, ...template.tags])] }); setEditorRevision(value => value + 1) } event.target.value = '' }}><option value="" disabled>Szablon</option>{templates.map(template => <option key={template.id} value={template.id}>{template.title}</option>)}</select><button type="button" className="icon-button template-manage-button" title="Zarządzaj szablonami" aria-label="Zarządzaj szablonami" onClick={() => { setActiveReviewSessionId(NOTE_TEMPLATES_PAGE_ID); setMobileDrawer('none') }}><Pencil size={14} /></button></div>
+                <div className="editor-tools-left"><div className="view-mode-toggle" role="group" aria-label="Widok notatki"><button className={`view-mode-button ${editorMode === 'rendered' ? 'active' : ''}`} title="Widok wizualny" aria-label="Widok wizualny" aria-pressed={editorMode === 'rendered'} onClick={() => setEditorMode('rendered')}><Eye size={16} /></button><button className={`view-mode-button ${editorMode === 'source' ? 'active' : ''}`} title="Surowy Markdown" aria-label="Surowy Markdown" aria-pressed={editorMode === 'source'} onClick={() => setEditorMode('source')}><FileText size={16} /></button></div><span className="toolbar-separator" /><button className="inline-tool" onClick={() => { setEditingAsset(undefined); setShowDrawing(true) }}><Sparkles size={15} />Dodaj schemat</button><button className="inline-tool" onClick={() => setShowNoteLinkDialog(true)}><Link2 size={15} />Połącz notatkę</button><button className="inline-tool" onClick={() => setShowNoteEmbedDialog(true)}><BookOpen size={15} />Osadź notatkę</button>{selectionText && <button className="inline-tool" onClick={() => setShowAiEdit(true)} disabled={!ollamaModel}><Sparkles size={14} />Edytuj z AI</button>}{currentAssets.map(asset => <button className="inline-tool asset-tool" key={asset.id} onClick={() => { setEditingAsset(asset); setShowDrawing(true) }}><Lightbulb size={14} />{asset.fileName}</button>)}</div>
+                <div className="template-toolbar"><select className="template-select" defaultValue="" aria-label="Wstaw szablon" onChange={event => { const template = templates.find(item => item.id === event.target.value); if (template) { patchNote(selectedNote.id, { title: template.title, content: template.content, tags: [...new Set([...selectedNote.tags, ...template.tags])] }); setEditorRevision(value => value + 1) } event.target.value = '' }}><option value="" disabled>Szablon</option>{templates.map(template => <option key={template.id} value={template.id}>{template.title}</option>)}</select><button type="button" className="icon-button template-manage-button" title="Zarządzaj szablonami" aria-label="Zarządzaj szablonami" onClick={() => { setActiveReviewSessionId(NOTE_TEMPLATES_PAGE_ID); setMobileDrawer('none') }}><Pencil size={14} /></button><button type="button" className="icon-button template-manage-button" title="Eksportuj jako HTML" aria-label="Eksportuj jako HTML" onClick={() => exportCurrentAsHtml()}><FileText size={14} /></button><button type="button" className="icon-button template-manage-button" title="Drukuj / zapisz jako PDF" aria-label="Drukuj lub zapisz jako PDF" onClick={exportCurrentAsPdf}><Archive size={14} /></button></div>
               </div>
               {editorMode === 'source' ? <MarkdownSourceEditor noteId={selectedNote.id} markdown={selectedNote.content} onChange={content => patchNote(selectedNote.id, { content })} onSelectionChange={text => setEditorSelection({ noteId: selectedNote.id, mode: 'source', text })} /> : <Suspense fallback={<div className="editor-loading">Otwieram edytor…</div>}><MarkdownEditor key={`${selectedNote.id}-${editorRevision}`} noteId={selectedNote.id} markdown={selectedNote.content} assets={currentAssets} attachments={currentAttachments} revision={editorRevision} onChange={content => patchNote(selectedNote.id, { content })} onSelectionChange={text => setEditorSelection({ noteId: selectedNote.id, mode: 'rendered', text })} onOpenNote={openLinkedNote} /></Suspense>}
       <NoteConnections note={selectedNote} notes={notes} onOpen={note => openLinkedNote(note.id)} onShowGraph={() => setShowKnowledgeGraph(true)} />
-              <NoteAttachmentsPanel attachments={currentAttachments} onAdd={files => void addAttachments(files)} onRemove={attachment => void deleteAttachment(attachment)} />
+              <NoteEmbedsPanel note={selectedNote} notes={notes} onOpen={note => openLinkedNote(note.title || note.id)} />
+              <NoteAttachmentsPanel attachments={currentAttachments} onAdd={files => void addAttachments(files)} onRemove={attachment => void deleteAttachment(attachment)} onOcr={recognizeAttachmentText} onInsertText={insertTextIntoNote} />
               <div className="editor-content-stats" aria-label="Statystyki dokumentu i zaznaczenia">
                 <span>Dokument: <strong>{polishCount(documentCounts.words, ['słowo', 'słowa', 'słów'])}</strong><i>·</i><strong>{polishCount(documentCounts.characters, ['znak', 'znaki', 'znaków'])}</strong></span>
                 <span className="editor-stats-divider" aria-hidden="true" />
@@ -1612,11 +1933,13 @@ function App() {
       />}
       {showFolderDialog && <div className="modal-backdrop" role="presentation" onMouseDown={event => { if (event.target === event.currentTarget) setShowFolderDialog(false) }}><section className="folder-dialog" role="dialog" aria-modal="true" aria-labelledby="folder-dialog-title"><div className="folder-dialog-mark"><Folder size={20} /></div><h2 id="folder-dialog-title">Utwórz folder</h2><p>Foldery możesz później układać, przeciągając je na siebie w panelu po lewej.</p><form onSubmit={event => { event.preventDefault(); void createFolder() }}><label htmlFor="new-folder-name">Nazwa folderu</label><input id="new-folder-name" autoFocus value={folderDraft} onChange={event => setFolderDraft(event.target.value)} placeholder="np. Projekty" /><div className="folder-dialog-actions"><button type="button" className="button secondary" onClick={() => setShowFolderDialog(false)}>Anuluj</button><button type="submit" className="button primary" disabled={!folderDraft.trim()}>Utwórz folder</button></div></form></section></div>}
       {renameTarget && <div className="modal-backdrop" role="presentation" onMouseDown={event => { if (event.target === event.currentTarget) setRenameTarget(null) }}><section className="folder-dialog action-dialog" role="dialog" aria-modal="true" aria-labelledby="rename-dialog-title"><div className="folder-dialog-mark"><Pencil size={19} /></div><h2 id="rename-dialog-title">Zmień nazwę</h2><p>{renameTarget.kind === 'folder' ? 'Zmienisz nazwę folderu wraz z jego podfolderami.' : 'Zmienisz nazwę notatki i zapisany plik Markdown.'}</p><form onSubmit={event => { event.preventDefault(); commitRename() }}><label htmlFor="entry-rename">Nowa nazwa</label><input id="entry-rename" autoFocus value={renameDraft} onChange={event => setRenameDraft(event.target.value)} onKeyDown={event => { if (event.key === 'Escape') setRenameTarget(null) }} /><div className="folder-dialog-actions"><button type="button" className="button secondary" onClick={() => setRenameTarget(null)}>Anuluj</button><button type="submit" className="button primary" disabled={!renameDraft.trim()}>Zapisz nazwę</button></div></form></section></div>}
-      {deleteTarget && <div className="modal-backdrop" role="presentation" onMouseDown={event => { if (event.target === event.currentTarget) setDeleteTarget(null) }}><section className="folder-dialog confirm-dialog" role="dialog" aria-modal="true" aria-labelledby="delete-dialog-title"><div className="danger-mark"><Trash2 size={19} /></div><h2 id="delete-dialog-title">{deleteTarget.kind === 'folder' ? 'Usuń folder?' : 'Usuń notatkę?'}</h2><p>{deleteTarget.kind === 'folder' ? <>Folder <strong>„{deleteTarget.label}”</strong> i jego zawartość zostaną trwale usunięte. {deleteTarget.noteCount ? `Usunięte zostanie też ${deleteTarget.noteCount} ${deleteTarget.noteCount === 1 ? 'notatka' : 'notatek'} wraz z załącznikami SVG.` : 'Folder jest pusty.'}</> : <>Notatka <strong>„{deleteTarget.label}”</strong> i dołączone do niej schematy SVG zostaną trwale usunięte.</>}</p><div className="folder-dialog-actions"><button className="button secondary" onClick={() => setDeleteTarget(null)}>Anuluj</button><button className="button danger-button" onClick={() => void confirmDelete()}><Trash2 size={14} />Usuń</button></div></section></div>}
+      {deleteTarget && <div className="modal-backdrop" role="presentation" onMouseDown={event => { if (event.target === event.currentTarget) setDeleteTarget(null) }}><section className="folder-dialog confirm-dialog" role="dialog" aria-modal="true" aria-labelledby="delete-dialog-title"><div className="danger-mark"><Trash2 size={19} /></div><h2 id="delete-dialog-title">{deleteTarget.kind === 'folder' ? 'Usuń folder?' : 'Usuń notatkę?'}</h2><p>{deleteTarget.kind === 'folder' ? <>Folder <strong>„{deleteTarget.label}”</strong> zostanie usunięty. {deleteTarget.noteCount ? `${deleteTarget.noteCount} ${deleteTarget.noteCount === 1 ? 'notatka trafi' : 'notatki trafią'} do kosza i będzie można je odzyskać przez 30 dni.` : 'Folder jest pusty.'}</> : <>Notatka <strong>„{deleteTarget.label}”</strong>, jej schematy SVG i załączniki trafią do kosza. Możesz je odzyskać przez 30 dni.</>}</p><div className="folder-dialog-actions"><button className="button secondary" onClick={() => setDeleteTarget(null)}>Anuluj</button><button className="button danger-button" onClick={() => void confirmDelete()}><Trash2 size={14} />Przenieś do kosza</button></div></section></div>}
       {colorTarget && <div className="modal-backdrop" role="presentation" onMouseDown={event => { if (event.target === event.currentTarget) setColorTarget(null) }}><section className="folder-dialog entry-color-dialog" role="dialog" aria-modal="true" aria-labelledby="entry-color-title"><div className="folder-dialog-mark"><Palette size={19} /></div><h2 id="entry-color-title">Ustaw kolor</h2><p>{colorTarget.kind === 'folder' ? <>Kolor folderu <strong>„{colorTarget.path.split('/').at(-1)}”</strong> będzie widoczny po lewej i na kartach jego notatek w bibliotece.</> : <>Kolor pliku <strong>„{notes.find(note => note.id === colorTarget.id)?.title ?? 'notatka'}”</strong> będzie widoczny po lewej i w bibliotece.</>}</p><div className="entry-color-grid">{entryColors.map(color => <button key={color.value} className="entry-color-option" type="button" aria-label={`Ustaw kolor: ${color.label}`} aria-pressed={(colorTarget.kind === 'note' ? notes.find(note => note.id === colorTarget.id)?.color : folderColors[colorTarget.path]) === color.value} onClick={() => applyEntryColor(color.value)}><span className="entry-color-swatch" style={{ backgroundColor: color.value }} /><span>{color.label}</span></button>)}</div><div className="folder-dialog-actions"><button className="button secondary" onClick={() => applyEntryColor(undefined)}>Domyślny / kolor folderu</button><button className="button secondary" onClick={() => setColorTarget(null)}>Zamknij</button></div></section></div>}
       {showOllamaSettings && <div className="modal-backdrop" role="presentation" onMouseDown={event => { if (event.target === event.currentTarget) setShowOllamaSettings(false) }}><section className="folder-dialog ollama-settings-dialog" role="dialog" aria-modal="true" aria-labelledby="ollama-settings-title"><div className="folder-dialog-mark"><MessageCircle size={19} /></div><h2 id="ollama-settings-title">Lokalny model Ollama</h2><p>Podłącz uruchomiony serwer Ollama. Domyślny adres lokalny to <code>http://localhost:11434</code>.</p><form onSubmit={event => { event.preventDefault(); saveOllamaSettings() }}><label htmlFor="ollama-base-url">Adres serwera</label><input id="ollama-base-url" autoFocus type="url" value={ollamaDraftUrl} onChange={event => { setOllamaDraftUrl(event.target.value); setOllamaModels([]); setOllamaSettingsMessage('') }} placeholder="http://localhost:11434" /><div className="ollama-model-label"><label htmlFor="ollama-model-name">Model</label><button type="button" className="link-button" onClick={() => void discoverOllamaModels()} disabled={checkingOllama}><span>{checkingOllama ? 'Łączenie…' : 'Pobierz listę modeli'}</span></button></div><input id="ollama-model-name" list="ollama-model-options" value={ollamaDraftModel} onChange={event => setOllamaDraftModel(event.target.value)} placeholder="np. llama3.2" /><datalist id="ollama-model-options">{ollamaModels.map(model => <option key={model.name} value={model.name} />)}</datalist>{ollamaSettingsMessage && <p className="ollama-settings-status" role="status">{ollamaSettingsMessage}</p>}{ollamaSettingsError && <p className="ollama-settings-error" role="alert">{ollamaSettingsError}</p>}<p className="ollama-settings-help">Modele pobierzesz poleceniem <code>ollama pull llama3.2</code>. Rozmowy są obsługiwane przez lokalny serwer.</p><div className="folder-dialog-actions"><button type="button" className="button secondary" onClick={() => setShowOllamaSettings(false)}>Anuluj</button><button type="submit" className="button primary">Zapisz ustawienia</button></div></form></section></div>}
       {showDailyNotes && <DailyNotesDialog notes={notes} onSelect={openDailyNote} onClose={() => setShowDailyNotes(false)} />}
       {showTaskManager && <TaskManagerDialog notes={notes} tasks={parsedTasks} onUpdate={updateTask} onOpenNote={noteId => { setShowTaskManager(false); openLinkedNote(noteId) }} onCreate={createTask} onClose={() => setShowTaskManager(false)} />}
+      {showBackupTrash && <BackupTrashDialog backups={autoBackups} trash={trashEntries} busy={backupBusy} onCreateBackup={() => void createAutomaticBackup(false)} onDownloadBackup={fileName => void downloadAutomaticBackup(fileName)} onRestoreBackup={fileName => void restoreAutomaticBackup(fileName)} onDeleteBackup={fileName => void removeAutomaticBackup(fileName)} onRestoreTrash={entryId => void restoreTrashEntry(entryId)} onDeleteTrash={entryId => void deleteTrashEntry(entryId)} onEmptyTrash={() => void emptyTrash()} onClose={() => setShowBackupTrash(false)} />}
+      {showFlashcards && <FlashcardsDialog cards={flashcards} notes={notes} onCreate={createFlashcard} onReview={rateFlashcard} onDelete={id => setFlashcards(current => current.filter(card => card.id !== id))} onOpenNote={noteId => { setShowFlashcards(false); openLinkedNote(noteId) }} onClose={() => setShowFlashcards(false)} />}
       {showKnowledgeGraph && <KnowledgeGraphDialog notes={notes} onOpen={note => { setShowKnowledgeGraph(false); openLinkedNote(note.id) }} onClose={() => setShowKnowledgeGraph(false)} />}
       {showQuickSearch && <NoteSearchDialog
         query={query}
@@ -1642,6 +1965,8 @@ function App() {
         }}
         onClose={() => setShowNoteLinkDialog(false)}
       />}
+      {showNoteEmbedDialog && selectedNote && <NoteLinkDialog notes={notes} currentNoteId={selectedNote.id} purpose="embed" onSelect={note => { dispatchWikiEmbedInsert({ noteId: selectedNote.id, target: note.title || note.id }); setShowNoteEmbedDialog(false) }} onClose={() => setShowNoteEmbedDialog(false)} />}
+      {showAiEdit && selectedNote && <AiSelectionEditDialog selectedText={selectionText} model={ollamaModel} baseUrl={ollamaBaseUrl} onApply={replacement => dispatchAiReplaceSelection({ noteId: selectedNote.id, replacement })} onClose={() => setShowAiEdit(false)} />}
       {showNoteHistory && selectedNote && historyDialogNoteId === selectedNote.id && <NoteHistoryDialog note={selectedNote} attachments={currentAttachments} versions={noteVersions} loading={noteVersionsLoading} onRestore={restoreNoteVersion} onClose={closeNoteHistory} />}
       {toast && <div className="app-toast" role="status"><Check size={16} />{toast}</div>}
       {mobileDrawer !== 'none' && <button className="drawer-scrim" aria-label="Zamknij menu" onClick={() => setMobileDrawer('none')} />}

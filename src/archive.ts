@@ -2,7 +2,7 @@ import { invoke, isTauri } from '@tauri-apps/api/core'
 import { strFromU8, strToU8, unzipSync, zipSync } from 'fflate'
 import { markdownToNote, noteToMarkdown, sanitizeSvg } from './content'
 import { fileFingerprint } from './fileFingerprint'
-import type { Note, NoteAsset, NoteAttachment, NoteAttachmentHistory, NoteAttachmentReference, NoteTemplate, NoteVersion, ReviewSession, SavedSearch, WorkspaceBackup } from './types'
+import type { Flashcard, Note, NoteAsset, NoteAttachment, NoteAttachmentHistory, NoteAttachmentReference, NoteTemplate, NoteVersion, ReviewSession, SavedSearch, TrashEntry, WorkspaceBackup } from './types'
 
 const NOTE_VERSIONS_FILE = '.no-tie-versions.json'
 const WORKSPACE_BACKUP_FILE = '.no-tie-workspace.json'
@@ -69,6 +69,8 @@ function archivedNoteVersions(value: unknown, noteId: string): NoteVersion[] {
         content: snapshot.content,
         folder: snapshot.folder,
         color: typeof snapshot.color === 'string' && /^#[\da-f]{6}$/i.test(snapshot.color) ? snapshot.color : undefined,
+        aliases: Array.isArray(snapshot.aliases) ? snapshot.aliases.filter((alias): alias is string => typeof alias === 'string') : [],
+        properties: snapshot.properties && typeof snapshot.properties === 'object' && !Array.isArray(snapshot.properties) ? Object.fromEntries(Object.entries(snapshot.properties).filter((entry): entry is [string, string] => typeof entry[0] === 'string' && typeof entry[1] === 'string')) : {},
         tags: Array.isArray(snapshot.tags) ? snapshot.tags.filter((tag): tag is string => typeof tag === 'string') : [],
         favorite: snapshot.favorite === true,
         createdAt: typeof snapshot.createdAt === 'number' ? snapshot.createdAt : version.createdAt,
@@ -116,7 +118,19 @@ function parseWorkspaceBackup(bytes: Uint8Array): WorkspaceBackup {
   const folderColors = source.folderColors && typeof source.folderColors === 'object' && !Array.isArray(source.folderColors)
     ? Object.fromEntries(Object.entries(source.folderColors).filter(([path, color]) => path.trim() && typeof color === 'string' && /^#[\da-f]{6}$/i.test(color))) as Record<string, string>
     : {}
-  return { reviewSessions, savedSearches, noteTemplates, folderColors }
+  const flashcards: Flashcard[] = Array.isArray(source.flashcards) ? source.flashcards.flatMap(item => {
+    if (!item || typeof item !== 'object') return []
+    const card = item as Partial<Flashcard>
+    if (typeof card.id !== 'string' || typeof card.noteId !== 'string' || typeof card.question !== 'string' || typeof card.answer !== 'string') return []
+    return [{ id: card.id, noteId: card.noteId, question: card.question, answer: card.answer, dueAt: typeof card.dueAt === 'number' ? card.dueAt : Date.now(), intervalDays: typeof card.intervalDays === 'number' ? card.intervalDays : 0, ease: typeof card.ease === 'number' ? card.ease : 2.5, repetitions: typeof card.repetitions === 'number' ? card.repetitions : 0, lapses: typeof card.lapses === 'number' ? card.lapses : 0, lastReviewedAt: typeof card.lastReviewedAt === 'number' ? card.lastReviewedAt : undefined }]
+  }) : []
+  const trash: TrashEntry[] = Array.isArray(source.trash) ? source.trash.flatMap(item => {
+    if (!item || typeof item !== 'object') return []
+    const entry = item as Partial<TrashEntry>
+    if (typeof entry.id !== 'string' || typeof entry.batchId !== 'string' || typeof entry.deletedAt !== 'number' || !entry.note || typeof entry.note.id !== 'string') return []
+    return [{ id: entry.id, batchId: entry.batchId, deletedAt: entry.deletedAt, note: entry.note, assets: Array.isArray(entry.assets) ? entry.assets : [], attachments: Array.isArray(entry.attachments) ? entry.attachments : [] }]
+  }) : []
+  return { reviewSessions, savedSearches, noteTemplates, folderColors, flashcards, trash }
 }
 
 function parseAttachmentHistory(bytes: Uint8Array): NoteAttachmentHistory[] {
@@ -145,33 +159,82 @@ export function parseArchive(bytes: Uint8Array): { notes: Note[]; assets: NoteAs
     try { workspace = parseWorkspaceBackup(files[WORKSPACE_BACKUP_FILE]) } catch { /* Ignore an invalid optional workspace file. */ }
   }
   const markdownPaths = Object.keys(files).filter(path => path.toLowerCase().endsWith('.md'))
+  const noTieLayout = Boolean(files[WORKSPACE_BACKUP_FILE]) || markdownPaths.some(path => /^notatki\/[^/]+\/notatka\.md$/i.test(path))
+  const supportedAttachment = (name: string) => {
+    const ext = name.toLowerCase().split('.').at(-1)
+    return ({ pdf: 'application/pdf', png: 'image/png', jpg: 'image/jpeg', jpeg: 'image/jpeg', gif: 'image/gif', webp: 'image/webp', avif: 'image/avif', mp3: 'audio/mpeg', m4a: 'audio/mp4', wav: 'audio/wav', ogg: 'audio/ogg', webm: 'audio/webm', aac: 'audio/aac', flac: 'audio/flac', opus: 'audio/opus', '3gp': 'audio/3gpp', amr: 'audio/amr' } as Record<string, string>)[ext ?? ''] ?? ''
+  }
 
   for (const path of markdownPaths) {
     const markdown = strFromU8(files[path])
-    const idFromPath = path.split('/').at(-2) ?? crypto.randomUUID()
+    const baseName = path.split('/').at(-1)?.replace(/\.md$/i, '') || 'Notatka'
+    const idFromPath = noTieLayout ? path.split('/').at(-2) ?? crypto.randomUUID() : crypto.randomUUID()
     const note = markdownToNote(markdown, idFromPath)
+    if (!noTieLayout) {
+      const firstHeading = note.content.match(/^\s*#\s+(.+)$/m)?.[1]?.trim()
+      if (!note.title || note.title === 'Importowana notatka') note.title = firstHeading || baseName.replace(/[-_]+/g, ' ').replace(/\s+[0-9a-f]{6,}$/i, '')
+      const relativeParent = path.slice(0, Math.max(0, path.lastIndexOf('/'))).split('/').filter(Boolean).filter(part => !/^(?:assets?|attachments?|media)$/i.test(part))
+      note.folder = ['Importowane', ...relativeParent].join('/')
+      note.id = idFromPath
+    }
     notes.push(note)
-    const baseDirectory = path.slice(0, path.lastIndexOf('/'))
-    const versionsFile = files[`${baseDirectory}/${NOTE_VERSIONS_FILE}`]
+    const lastSlash = path.lastIndexOf('/')
+    const baseDirectory = lastSlash < 0 ? '' : path.slice(0, lastSlash)
+    const basePrefix = baseDirectory ? `${baseDirectory}/` : ''
+    const notesInSameDirectory = markdownPaths.filter(markdownPath => markdownPath.includes('/') ? markdownPath.slice(0, markdownPath.lastIndexOf('/')) === baseDirectory : !baseDirectory).length
+    const externalPathMappings: [string, string][] = []
+    const referencedFiles = new Map<string, string[]>()
+    if (!noTieLayout) {
+      for (const match of note.content.matchAll(/!?\[[^\]]*\]\(([^)]+)\)/g)) {
+        const raw = match[1].trim().split(/[?#]/, 1)[0]
+        if (!raw || /^(?:[a-z]+:|\/\/|\/)/i.test(raw)) continue
+        let decoded = raw
+        try { decoded = decodeURIComponent(raw) } catch { /* Keep literal spaces in legacy Markdown paths. */ }
+        const segments = `${baseDirectory}/${decoded}`.replace(/\\/g, '/').split('/')
+        const normalized: string[] = []
+        for (const segment of segments) {
+          if (!segment || segment === '.') continue
+          if (segment === '..') normalized.pop()
+          else normalized.push(segment)
+        }
+        if (normalized.length) {
+          const canonical = normalized.join('/')
+          referencedFiles.set(canonical, [...(referencedFiles.get(canonical) ?? []), raw])
+        }
+      }
+    }
+    const versionsFile = files[`${basePrefix}${NOTE_VERSIONS_FILE}`]
     if (versionsFile) {
       try { versions.push(...archivedNoteVersions(JSON.parse(strFromU8(versionsFile)), note.id)) } catch { /* Ignore an invalid optional history sidecar. */ }
     }
     for (const assetPath of Object.keys(files)) {
-      const prefix = `${baseDirectory}/assets/`
-      if (!assetPath.startsWith(prefix)) continue
-      const fileName = assetPath.slice(prefix.length).split('/').at(-1)
+      const prefix = `${basePrefix}assets/`
+      const attachmentPrefix = `${basePrefix}attachments/`
+      const isLegacyExternal = !noTieLayout && (referencedFiles.has(assetPath) || notesInSameDirectory === 1 && assetPath.startsWith(basePrefix) && !markdownPaths.includes(assetPath) && assetPath !== path)
+      const matchingPrefix = assetPath.startsWith(prefix) ? prefix : assetPath.startsWith(attachmentPrefix) ? attachmentPrefix : assetPath.startsWith(basePrefix) && Boolean(basePrefix) ? basePrefix : ''
+      if (!matchingPrefix && !isLegacyExternal) continue
+      const fileName = assetPath.slice(matchingPrefix.length).split('/').at(-1)
       if (!fileName) continue
       if (fileName.toLowerCase().endsWith('.svg')) {
         assets.push({ id: `${note.id}:${fileName}`, noteId: note.id, fileName, svg: sanitizeSvg(strFromU8(files[assetPath])) })
+        if (!noTieLayout) {
+          const referenceNames = referencedFiles.get(assetPath) ?? [assetPath.startsWith(basePrefix) ? assetPath.slice(basePrefix.length) : assetPath]
+          referenceNames.forEach(reference => externalPathMappings.push([reference, `./assets/${fileName}`]))
+        }
       } else {
-        const mimeType = fileName.toLowerCase().endsWith('.pdf') ? 'application/pdf'
-          : fileName.toLowerCase().endsWith('.png') ? 'image/png'
-            : fileName.toLowerCase().endsWith('.jpg') || fileName.toLowerCase().endsWith('.jpeg') ? 'image/jpeg'
-              : fileName.toLowerCase().endsWith('.gif') ? 'image/gif'
-                : fileName.toLowerCase().endsWith('.webp') ? 'image/webp'
-                  : fileName.toLowerCase().endsWith('.avif') ? 'image/avif' : ''
-        if (mimeType) attachments.push({ id: `${note.id}:${fileName}`, noteId: note.id, fileName, mimeType, dataUrl: bytesToDataUrl(files[assetPath], mimeType), size: files[assetPath].byteLength, contentHash: fileFingerprint(files[assetPath]) })
+        const mimeType = supportedAttachment(fileName)
+        if (mimeType) {
+          attachments.push({ id: `${note.id}:${fileName}`, noteId: note.id, fileName, mimeType, dataUrl: bytesToDataUrl(files[assetPath], mimeType), size: files[assetPath].byteLength, contentHash: fileFingerprint(files[assetPath]) })
+          if (!noTieLayout) {
+            const referenceNames = referencedFiles.get(assetPath) ?? [assetPath.startsWith(basePrefix) ? assetPath.slice(basePrefix.length) : assetPath]
+            referenceNames.forEach(reference => externalPathMappings.push([reference, `./assets/${fileName}`]))
+          }
+        }
       }
+    }
+    if (!noTieLayout) for (const [externalPath, internalPath] of externalPathMappings) {
+      const escaped = externalPath.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+      note.content = note.content.replace(new RegExp(`\\((?:\\./)?${escaped}(?:#[^)]*)?\\)`, 'g'), `(${internalPath})`)
     }
   }
   if (!notes.length) throw new Error('W paczce nie znaleziono plików Markdown.')

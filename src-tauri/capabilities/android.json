@@ -1,0 +1,30 @@
+{
+  "$schema": "../gen/schemas/android-schema.json",
+  "identifier": "android",
+  "description": "Dostęp No-Tie do własnego katalogu Dokumenty na Androidzie.",
+  "windows": ["main"],
+  "platforms": ["android"],
+  "permissions": [
+    "core:default",
+    "core:path:default",
+    "fs:allow-exists",
+    "fs:allow-stat",
+    "fs:allow-mkdir",
+    "fs:allow-read-dir",
+    "fs:allow-read-file",
+    "fs:allow-read-text-file",
+    "fs:allow-remove",
+    "fs:allow-rename",
+    "fs:allow-write-text-file",
+    "fs:allow-write-file",
+    {
+      "identifier": "fs:scope",
+      "allow": [
+        { "path": "$DOCUMENT/No-Tie/Notatki" },
+        { "path": "$DOCUMENT/No-Tie/Notatki/**/*" },
+        { "path": "$DOCUMENT/No-Tie/Notatki/.*" },
+        { "path": "$DOCUMENT/No-Tie/Notatki/**/.*" }
+      ]
+    }
+  ]
+}

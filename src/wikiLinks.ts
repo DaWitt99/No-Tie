@@ -1,7 +1,11 @@
 export const WIKI_LINK_INSERT_EVENT = 'no-tie:insert-wiki-link'
+export const WIKI_EMBED_INSERT_EVENT = 'no-tie:insert-wiki-embed'
+export const AI_REPLACE_SELECTION_EVENT = 'no-tie:replace-selection'
 const NOTE_LINK_PREFIX = '#no-tie-note/'
 
 export type WikiLinkInsertDetail = { noteId: string; target: string }
+export type WikiEmbedInsertDetail = { noteId: string; target: string }
+export type AiReplaceSelectionDetail = { noteId: string; replacement: string }
 
 export function wikiNoteHref(target: string): string {
   const encoded = encodeURIComponent(target).replace(/[!'()*]/g, character => `%${character.charCodeAt(0).toString(16).toUpperCase()}`)
@@ -17,7 +21,7 @@ export function wikiNoteTargetFromHref(href: string): string | null {
 }
 
 export function wikiLinksToMarkdown(markdown: string): string {
-  return markdown.replace(/\[\[([^\]\n]+)\]\]/g, (_whole, raw: string) => {
+  return markdown.replace(/(?<!!)\[\[([^\]\n]+)\]\]/g, (_whole, raw: string) => {
     const [rawTarget, rawLabel] = raw.split('|', 2)
     const target = rawTarget.trim()
     const label = (rawLabel ?? rawTarget).trim()
@@ -48,4 +52,12 @@ export function replaceWikiLinkTarget(markdown: string, oldTitle: string, newTit
 
 export function dispatchWikiLinkInsert(detail: WikiLinkInsertDetail) {
   window.dispatchEvent(new CustomEvent<WikiLinkInsertDetail>(WIKI_LINK_INSERT_EVENT, { detail }))
+}
+
+export function dispatchWikiEmbedInsert(detail: WikiEmbedInsertDetail) {
+  window.dispatchEvent(new CustomEvent<WikiEmbedInsertDetail>(WIKI_EMBED_INSERT_EVENT, { detail }))
+}
+
+export function dispatchAiReplaceSelection(detail: AiReplaceSelectionDetail) {
+  window.dispatchEvent(new CustomEvent<AiReplaceSelectionDetail>(AI_REPLACE_SELECTION_EVENT, { detail }))
 }

@@ -54,6 +54,8 @@ export function noteToMarkdown(note: Note): string {
     updatedAt: note.updatedAt,
   }
   if (typeof note.color === 'string' && /^#[\da-f]{6}$/i.test(note.color)) metadata.color = note.color
+  if (note.aliases?.length) metadata.aliases = note.aliases
+  if (note.properties && Object.keys(note.properties).length) metadata.properties = note.properties
   if (typeof note.dailyDate === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(note.dailyDate)) metadata.dailyDate = note.dailyDate
   return `---\n${stringifyYaml(metadata).trimEnd()}\n---\n\n${note.content.trimStart()}\n`
 }
@@ -69,6 +71,10 @@ export function markdownToNote(markdown: string, fallbackId: string, now = Date.
     title: typeof metadata.title === 'string' ? metadata.title : 'Importowana notatka',
     folder: typeof metadata.folder === 'string' ? metadata.folder : 'Importowane',
     color: typeof metadata.color === 'string' && /^#[\da-f]{6}$/i.test(metadata.color) ? metadata.color : undefined,
+    aliases: Array.isArray(metadata.aliases) ? metadata.aliases.filter((alias): alias is string => typeof alias === 'string').map(alias => alias.trim()).filter(Boolean) : [],
+    properties: metadata.properties && typeof metadata.properties === 'object' && !Array.isArray(metadata.properties)
+      ? Object.fromEntries(Object.entries(metadata.properties as Record<string, unknown>).filter((entry): entry is [string, string] => typeof entry[0] === 'string' && typeof entry[1] === 'string'))
+      : {},
     tags,
     favorite: metadata.favorite === true,
     createdAt: typeof metadata.createdAt === 'number' ? metadata.createdAt : now,
@@ -95,9 +101,10 @@ export function markdownForEditor(content: string, assets: NoteAsset[], attachme
 
 export function markdownFromEditor(content: string, assets: NoteAsset[], attachments: NoteAttachment[] = []): string {
   const withAttachments = attachments.reduce((markdown, attachment) => markdown.replaceAll(`](${attachment.dataUrl})`, `](./assets/${attachment.fileName})`), content)
-  return assets.reduce((markdown, asset) => {
-    return markdown.replaceAll(`](${svgDataUrl(asset.svg)})`, `](./assets/${asset.fileName})`)
+  const markdown = assets.reduce((value, asset) => {
+    return value.replaceAll(`](${svgDataUrl(asset.svg)})`, `](./assets/${asset.fileName})`)
   }, withAttachments)
+  return markdown.replace(/!\\?\[\\?\[([^\]\n]+)\]\]/g, (_whole, target: string) => `![[${target}]]`)
 }
 
 export function sanitizeSvg(source: string): string {

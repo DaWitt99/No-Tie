@@ -35,7 +35,7 @@ export function searchNotes(notes: Note[], { query, tag = '', folder = '' }: Not
     if (!fields.folder.every(needle => noteFolder.includes(needle))) return false
     if (!fields.title.every(needle => title.includes(needle))) return false
     if (!fields.content.every(needle => content.includes(needle))) return false
-    const searchable = normalize(`${note.title} ${note.content} ${note.folder} ${note.tags.join(' ')}`)
+    const searchable = normalize(`${note.title} ${note.aliases?.join(' ') ?? ''} ${note.content} ${note.folder} ${note.tags.join(' ')}`)
     return terms.every(needle => searchable.includes(needle))
   }).sort((a, b) => b.updatedAt - a.updatedAt)
 }

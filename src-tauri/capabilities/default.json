@@ -3,10 +3,12 @@
   "identifier": "default",
   "description": "Dostęp aplikacji do katalogu notatek No-Tie w Dokumentach.",
   "windows": ["main"],
+  "platforms": ["linux", "macOS", "windows"],
   "permissions": [
     "core:default",
     "core:path:default",
     "fs:allow-exists",
+    "fs:allow-stat",
     "fs:allow-mkdir",
     "fs:allow-read-dir",
     "fs:allow-read-file",
@@ -19,7 +21,9 @@
       "identifier": "fs:scope",
       "allow": [
         { "path": "$DOCUMENT/No-Tie" },
-        { "path": "$DOCUMENT/No-Tie/**/*" }
+        { "path": "$DOCUMENT/No-Tie/**/*" },
+        { "path": "$DOCUMENT/No-Tie/.*" },
+        { "path": "$DOCUMENT/No-Tie/**/.*" }
       ]
     }
   ]
