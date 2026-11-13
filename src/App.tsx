@@ -2182,10 +2182,20 @@ function App() {
       const batch = cardsToCompare.slice(start, start + 64)
       try { vectors.push(...await embedOllamaTexts(ollamaBaseUrl, embeddingModel, batch.map(card => card.question))) }
       catch (error) {
-        const detail = error instanceof Error ? error.message : ''
-        if (/model.*not found|model.*nie znaleziono/i.test(detail)) throw new Error(`Nie znaleziono modelu embeddingów „${embeddingModel}”. Pobierz go poleceniem: ollama pull ${embeddingModel}`)
+        const detail = error instanceof Error ? error.message : typeof error === 'string' ? error : ''
+        if (/model.{0,120}(not found|does not exist|nie znaleziono|nie istnieje)|(not found|does not exist|nie znaleziono|nie istnieje).{0,120}model/i.test(detail)) {
+          if (/ollama pull/i.test(detail)) throw new Error(detail)
+          throw new Error(`Nie znaleziono modelu embeddingów „${embeddingModel}”. Pobierz go poleceniem: ollama pull ${embeddingModel}. Szczegóły: ${detail}`)
+        }
         throw error
       }
+    }
+    if (vectors.length !== cardsToCompare.length) {
+      throw new Error(`Ollama zwróciła ${vectors.length} wektorów dla ${cardsToCompare.length} fiszek. Sprawdź kompatybilność serwera i modelu embeddingów.`)
+    }
+    const dimensions = vectors[0]?.length ?? 0
+    if (!dimensions || vectors.some(vector => vector.length !== dimensions || vector.some(value => !Number.isFinite(value)))) {
+      throw new Error('Model Ollama zwrócił nieprawidłowe wektory embeddingów. Sprawdź, czy wybrany model obsługuje embeddingi.')
     }
     const normalizedVectors = vectors.map(vector => {
       const norm = Math.sqrt(vector.reduce((sum, value) => sum + value * value, 0)) || 1

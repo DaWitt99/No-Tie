@@ -168,12 +168,25 @@ async fn ollama_embed(base_url: String, model: String, input: Vec<String>) -> Re
         .json(&serde_json::json!({ "model": model, "input": input }))
         .send()
         .await
-        .map_err(|_| format!("Nie można połączyć się z Ollama pod adresem {base_url}. Sprawdź, czy Ollama jest uruchomiona."))?
-        .error_for_status()
-        .map_err(|error| format!("Ollama zwróciła błąd embeddingów: {error}"))?;
-    response
-        .json::<OllamaEmbedResponse>()
+        .map_err(|error| format!("Nie można połączyć się z Ollama pod adresem {base_url}. Sprawdź, czy Ollama jest uruchomiona. Szczegóły: {error}"))?;
+    let status = response.status();
+    let body = response
+        .bytes()
         .await
+        .map_err(|error| format!("Nie udało się odczytać odpowiedzi Ollama: {error}"))?;
+    if !status.is_success() {
+        let detail = serde_json::from_slice::<serde_json::Value>(&body)
+            .ok()
+            .and_then(|value| value.get("error").and_then(serde_json::Value::as_str).map(str::to_owned))
+            .unwrap_or_else(|| String::from_utf8_lossy(&body).trim().to_owned());
+        let detail = if detail.is_empty() { status.to_string() } else { detail };
+        let lowered = detail.to_lowercase();
+        if lowered.contains("model") && (lowered.contains("not found") || lowered.contains("does not exist")) {
+            return Err(format!("Nie znaleziono modelu embeddingów „{model}”. Pobierz go poleceniem: ollama pull {model}. Szczegóły: {detail}"));
+        }
+        return Err(format!("Ollama zwróciła błąd embeddingów ({status}): {detail}"));
+    }
+    serde_json::from_slice::<OllamaEmbedResponse>(&body)
         .map(|result| result.embeddings)
         .map_err(|error| format!("Nie udało się odczytać wektorów semantycznych Ollama: {error}"))
 }

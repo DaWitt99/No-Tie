@@ -29,7 +29,14 @@ export async function transcribeLocalAudio(endpoint: string, fileName: string, m
 
 export async function embedOllamaTexts(baseUrl: string, model: string, input: string[]): Promise<number[][]> {
   if (!model.trim()) throw new Error('Wybierz model embeddingów Ollama.')
-  if (isTauri()) return invoke<number[][]>('ollama_embed', { baseUrl, model, input })
+  if (isTauri()) {
+    try { return await invoke<number[][]>('ollama_embed', { baseUrl, model, input }) }
+    catch (error) {
+      if (error instanceof Error) throw error
+      if (typeof error === 'string' && error.trim()) throw new Error(error)
+      throw new Error('Nie udało się uzyskać wektorów semantycznych z Ollama.')
+    }
+  }
   try {
     const response = await fetch(apiUrl(baseUrl, 'embed'), {
       method: 'POST',

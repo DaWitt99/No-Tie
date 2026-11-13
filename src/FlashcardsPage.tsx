@@ -15,6 +15,8 @@ export type FlashcardAiAction = 'evaluate' | 'distractors' | 'quality' | 'covera
 type FlashcardEdit = Partial<Flashcard>
 type RegeneratedContent = { question: string; answer: string }
 type SimilarFlashcardMatch = { firstId: string; secondId: string; score: number }
+type FlashcardCardAiAction = Extract<FlashcardAiAction, 'distractors' | 'example' | 'mnemonic' | 'difficulty'>
+type FlashcardCardAiResult = { action: FlashcardCardAiAction; state: 'running' | 'done' | 'error'; message: string; items?: string[]; content?: string; question?: string; answer?: string }
 
 const DECK_STORAGE_KEY = 'no-tie-flashcard-decks'
 const FLASHCARD_REMINDER_KEY = 'no-tie-flashcard-reminder'
@@ -28,6 +30,31 @@ const FLASHCARD_TEMPLATE_PROMPTS: Record<FlashcardTemplate, string> = {
   vocabulary: 'Co oznacza termin …?',
   process: 'Jak przebiega proces …?',
   formula: 'Jaki wzór opisuje …?',
+}
+const FLASHCARD_AI_TASK_LABELS: Record<FlashcardAiAction, string> = {
+  evaluate: 'Ocena odpowiedzi',
+  distractors: 'Generowanie wariantów odpowiedzi',
+  quality: 'Kontrola jakości fiszek',
+  coverage: 'Analiza pokrycia tematów',
+  tags: 'Nadawanie tagów fiszkom',
+  example: 'Generowanie przykładu i kontrprzykładu',
+  mnemonic: 'Generowanie skojarzenia',
+  difficulty: 'Dostosowanie poziomu trudności',
+}
+const FLASHCARD_DIFFICULTY_LABELS: Record<NonNullable<Flashcard['difficulty']>, string> = {
+  beginner: 'Początkujący',
+  intermediate: 'Średni',
+  advanced: 'Zaawansowany',
+}
+
+type FlashcardAiTaskNotice = { id: number; label: string; startedAt: number; finishedAt?: number; state: 'running' | 'done' | 'error' }
+
+function formatAiDuration(milliseconds: number) {
+  const totalSeconds = Math.max(0, Math.floor(milliseconds / 1000))
+  const seconds = String(totalSeconds % 60).padStart(2, '0')
+  const minutes = String(Math.floor(totalSeconds / 60) % 60).padStart(2, '0')
+  const hours = Math.floor(totalSeconds / 3600)
+  return hours ? `${hours}:${minutes}:${seconds}` : `${minutes}:${seconds}`
 }
 
 function readDecks(): FlashcardDeck[] {
@@ -106,6 +133,16 @@ function markdownToSafeHtml(value: string) {
 
 function RichCardContent({ value, className = '' }: { value: string; className?: string }) {
   return <div className={`flashcard-rich-content ${className}`} dangerouslySetInnerHTML={{ __html: markdownToSafeHtml(value) }} />
+}
+
+function FlashcardCardAiResultView({ result, onDismiss }: { result: FlashcardCardAiResult; onDismiss: () => void }) {
+  return <aside className={`flashcard-card-ai-result is-${result.state}`} role={result.state === 'error' ? 'alert' : 'status'} aria-live="polite">
+    <header>{result.state === 'running' ? <Sparkles className="spin" size={14} /> : result.state === 'done' ? <Check size={14} /> : <X size={14} />}<strong>{FLASHCARD_AI_TASK_LABELS[result.action]}</strong><button type="button" className="icon-button" aria-label="Ukryj wynik AI" title="Ukryj wynik" onClick={onDismiss}><X size={14} /></button></header>
+    <p>{result.message}</p>
+    {result.items && <ol>{result.items.map((item, index) => <li key={`${index}-${item}`}>{item}</li>)}</ol>}
+    {result.content && <RichCardContent value={result.content} className="flashcard-card-ai-result-content" />}
+    {result.question && <div className="flashcard-card-ai-result-field"><strong>Nowe pytanie</strong><RichCardContent value={result.question} />{result.answer && <><strong>Nowa odpowiedź</strong><RichCardContent value={result.answer} /></>}</div>}
+  </aside>
 }
 
 function FlashcardContentField({ label, value, onChange, rows = 3 }: { label: string; value: string; onChange: (value: string) => void; rows?: number }) {
@@ -291,6 +328,8 @@ export function FlashcardsPage({ cards, notes, attachments = [], trash = [], onC
   const [cardKind, setCardKind] = useState<FlashcardKind>('basic')
   const [studyModeDraft, setStudyModeDraft] = useState<FlashcardStudyMode>('flip')
   const [trueFalseAnswerDraft, setTrueFalseAnswerDraft] = useState(true)
+  const [answerOptionsDraft, setAnswerOptionsDraft] = useState(['', '', '', ''])
+  const [correctAnswerOption, setCorrectAnswerOption] = useState(0)
   const [cardOcclusion, setCardOcclusion] = useState<FlashcardImageOcclusion | undefined>()
   const [tagsDraft, setTagsDraft] = useState('')
   const [templateDraft, setTemplateDraft] = useState<FlashcardTemplate>('definition')
@@ -346,6 +385,9 @@ export function FlashcardsPage({ cards, notes, attachments = [], trash = [], onC
   const [examExpired, setExamExpired] = useState(false)
   const [aiEvaluation, setAiEvaluation] = useState('')
   const [aiBusy, setAiBusy] = useState('')
+  const [aiTaskNotices, setAiTaskNotices] = useState<FlashcardAiTaskNotice[]>([])
+  const [cardAiResults, setCardAiResults] = useState<Record<string, FlashcardCardAiResult>>({})
+  const nextAiTaskId = useRef(0)
   const [aiReport, setAiReport] = useState('')
   const [aiReportExpanded, setAiReportExpanded] = useState(false)
   const [aiError, setAiError] = useState('')
@@ -376,7 +418,8 @@ export function FlashcardsPage({ cards, notes, attachments = [], trash = [], onC
     try { const value: unknown = JSON.parse(localStorage.getItem('no-tie-flashcard-mastery-rules') ?? '{}'); return value && typeof value === 'object' ? value as Record<string, number> : {} } catch { return {} }
   })
 
-  useEffect(() => { const timer = window.setInterval(() => setNow(Date.now()), examDeadline || breakDeadline ? 1000 : 60_000); return () => window.clearInterval(timer) }, [examDeadline, breakDeadline])
+  const hasRunningAiTask = aiTaskNotices.some(task => task.state === 'running')
+  useEffect(() => { const interval = examDeadline || breakDeadline || hasRunningAiTask ? 1000 : 60_000; const timer = window.setInterval(() => setNow(Date.now()), interval); return () => window.clearInterval(timer) }, [examDeadline, breakDeadline, hasRunningAiTask])
   useEffect(() => { try { localStorage.setItem(DECK_STORAGE_KEY, JSON.stringify(decks)) } catch { /* Decks remain available in memory if storage is full. */ } }, [decks])
   useEffect(() => { try { localStorage.setItem(FLASHCARD_GOAL_KEY, String(dailyGoal)) } catch { /* Keep the goal in memory if storage is unavailable. */ } }, [dailyGoal])
   useEffect(() => {
@@ -503,8 +546,10 @@ export function FlashcardsPage({ cards, notes, attachments = [], trash = [], onC
   }, [current?.id, current?.studyMode, current?.trueFalseAnswer, current?.answer, cards])
   const choiceOptions = useMemo(() => {
     if (!current) return []
-    const answers = [current.answer, ...(current.answerVariants ?? []), ...(current.aiDistractors ?? []), ...cards.filter(card => card.id !== current.id).map(card => card.answer)]
-    const unique = [...new Map(answers.filter(value => value.trim()).map(value => [normalizeQuestion(value), value])).values()].slice(0, 4)
+    const answers = current.studyMode === 'multiple-choice'
+      ? [current.answer, ...(current.aiDistractors?.length ? current.aiDistractors : current.answerVariants ?? [])]
+      : [current.answer, ...(current.answerVariants ?? []), ...(current.aiDistractors ?? []), ...cards.filter(card => card.id !== current.id).map(card => card.answer)]
+    const unique = [...new Map(answers.filter(value => value.trim()).map(value => [normalizeQuestion(value), value])).values()].slice(0, current.studyMode === 'multiple-choice' ? 8 : 4)
     for (let index = unique.length - 1; index > 0; index -= 1) {
       const swap = (current.id.charCodeAt(index % current.id.length) + index * 7) % (index + 1)
       ;[unique[index], unique[swap]] = [unique[swap]!, unique[index]!]
@@ -536,21 +581,27 @@ export function FlashcardsPage({ cards, notes, attachments = [], trash = [], onC
     const sequenceItems = textLines(sequenceDraft)
     const numeric = numericValue.trim() ? Number(numericValue) : Number.NaN
     const selectedAttachment = attachments.find(item => item.id === mediaAttachmentId && item.noteId === noteId)
-    if (!question.trim() || !noteId || (cardKind === 'basic' && !answer.trim()) || (cardKind === 'cloze' && !hasCloze(question)) || (cardKind === 'image-occlusion' && !hasOcclusionAnswers(cardOcclusion)) || (cardKind === 'sequence' && sequenceItems.length < 2) || (cardKind === 'numeric' && !Number.isFinite(numeric)) || (cardKind === 'audio' && !selectedAttachment?.mimeType.startsWith('audio/')) || (cardKind === 'video' && !selectedAttachment?.mimeType.startsWith('video/'))) return
+    const correctAnswer = studyModeDraft === 'multiple-choice' ? answerOptionsDraft[correctAnswerOption]?.trim() ?? '' : studyModeDraft === 'true-false' ? trueFalseAnswerDraft ? 'Prawda' : 'Fałsz' : answer.trim()
+    const invalidOptions = studyModeDraft === 'multiple-choice' && (answerOptionsDraft.length < 2 || answerOptionsDraft.some(option => !option.trim()) || !correctAnswer)
+    if (!question.trim() || !noteId || (cardKind === 'basic' && studyModeDraft !== 'multiple-choice' && studyModeDraft !== 'true-false' && !answer.trim()) || invalidOptions || (cardKind === 'cloze' && !hasCloze(question)) || (cardKind === 'image-occlusion' && !hasOcclusionAnswers(cardOcclusion)) || (cardKind === 'sequence' && sequenceItems.length < 2) || (cardKind === 'numeric' && !Number.isFinite(numeric)) || (cardKind === 'audio' && !selectedAttachment?.mimeType.startsWith('audio/')) || (cardKind === 'video' && !selectedAttachment?.mimeType.startsWith('video/'))) return
     const mediaClip = selectedAttachment ? { attachmentId: selectedAttachment.id, startMs: Math.max(0, Number(mediaStart) || 0) * 1000, endMs: mediaEnd.trim() ? Math.max(Number(mediaStart) || 0, Number(mediaEnd) || 0) * 1000 : undefined } : undefined
-    onCreate(noteId, question.trim(), answer.trim(), cardKind, tagsDraft.split(',').map(tag => tag.trim()).filter(Boolean), cardOcclusion, {
+    onCreate(noteId, question.trim(), correctAnswer, cardKind, tagsDraft.split(',').map(tag => tag.trim()).filter(Boolean), cardOcclusion, {
       template: templateDraft,
       studyMode: studyModeDraft,
       trueFalseAnswer: studyModeDraft === 'true-false' ? trueFalseAnswerDraft : undefined,
       hints: textLines(hintsDraft),
-      answerVariants: textLines(variantsDraft),
+      answerVariants: studyModeDraft === 'multiple-choice' ? [] : textLines(variantsDraft),
+      aiDistractors: studyModeDraft === 'multiple-choice' ? answerOptionsDraft.filter((_, index) => index !== correctAnswerOption).map(option => option.trim()) : undefined,
       sequenceItems: cardKind === 'sequence' ? sequenceItems : undefined,
       numericAnswer: cardKind === 'numeric' ? { value: numeric, tolerance: Math.max(0, Number(numericTolerance) || 0), unit: numericUnit.trim() } : undefined,
       mediaClip: ['audio', 'video'].includes(cardKind) ? mediaClip : undefined,
       relatedCardIds: relatedDraft,
       glossaryTerms: parseGlossary(glossaryDraft),
     })
-    setQuestion(''); setAnswer(''); setTab('cards'); setStudyModeDraft('flip'); setTrueFalseAnswerDraft(true); setTagsDraft(''); setCardOcclusion(undefined); setHintsDraft(''); setVariantsDraft(''); setSequenceDraft(''); setNumericValue(''); setNumericTolerance('0'); setNumericUnit(''); setMediaAttachmentId(''); setMediaStart('0'); setMediaEnd(''); setRelatedDraft([]); setGlossaryDraft('')
+    setQuestion(''); setAnswer(''); setTab('cards'); setStudyModeDraft('flip'); setTrueFalseAnswerDraft(true); setAnswerOptionsDraft(['', '', '', '']); setCorrectAnswerOption(0); setTagsDraft(''); setCardOcclusion(undefined); setHintsDraft(''); setVariantsDraft(''); setSequenceDraft(''); setNumericValue(''); setNumericTolerance('0'); setNumericUnit(''); setMediaAttachmentId(''); setMediaStart('0'); setMediaEnd(''); setRelatedDraft([]); setGlossaryDraft('')
+  }
+  function updateAnswerOption(index: number, value: string) {
+    setAnswerOptionsDraft(current => current.map((option, optionIndex) => optionIndex === index ? value : option))
   }
   function startSession() {
     let selected = [...eligibleForSession]
@@ -678,14 +729,19 @@ export function FlashcardsPage({ cards, notes, attachments = [], trash = [], onC
   }
   function saveEdit(card: Flashcard) {
     const media = editMetadata.mediaClip ? attachments.find(item => item.id === editMetadata.mediaClip?.attachmentId && item.noteId === card.noteId) : undefined
-    if (!editQuestion.trim() || (editKind === 'basic' && !editAnswer.trim()) || (editKind === 'cloze' && !hasCloze(editQuestion)) || (editKind === 'image-occlusion' && !hasOcclusionAnswers(editOcclusion)) || (editKind === 'sequence' && (editMetadata.sequenceItems?.length ?? 0) < 2) || (editKind === 'numeric' && !Number.isFinite(editMetadata.numericAnswer?.value)) || (editKind === 'audio' && !media?.mimeType.startsWith('audio/')) || (editKind === 'video' && !media?.mimeType.startsWith('video/'))) return
+    if (!editQuestion.trim() || (editKind === 'basic' && editMetadata.studyMode !== 'true-false' && !editAnswer.trim()) || (editKind === 'cloze' && !hasCloze(editQuestion)) || (editKind === 'image-occlusion' && !hasOcclusionAnswers(editOcclusion)) || (editKind === 'sequence' && (editMetadata.sequenceItems?.length ?? 0) < 2) || (editKind === 'numeric' && !Number.isFinite(editMetadata.numericAnswer?.value)) || (editKind === 'audio' && !media?.mimeType.startsWith('audio/')) || (editKind === 'video' && !media?.mimeType.startsWith('video/'))) return
     onUpdate(card.id, {
-      ...editMetadata, question: editQuestion.trim(), answer: editAnswer.trim(), kind: editKind,
+      ...editMetadata, question: editQuestion.trim(), answer: editMetadata.studyMode === 'true-false' ? editMetadata.trueFalseAnswer ? 'Prawda' : 'Fałsz' : editAnswer.trim(), kind: editKind,
       tags: editTags.split(',').map(tag => tag.trim()).filter(Boolean),
       imageOcclusion: editKind === 'image-occlusion' ? editOcclusion : undefined,
       sequenceItems: editKind === 'sequence' ? editMetadata.sequenceItems : undefined,
       numericAnswer: editKind === 'numeric' ? editMetadata.numericAnswer : undefined,
       mediaClip: editKind === 'audio' || editKind === 'video' ? editMetadata.mediaClip : undefined,
+    })
+    setCardAiResults(current => {
+      const next = { ...current }
+      delete next[card.id]
+      return next
     })
     setEditingCardId('')
   }
@@ -712,9 +768,26 @@ export function FlashcardsPage({ cards, notes, attachments = [], trash = [], onC
     setExamDeadline(null)
     setBreakDeadline(null)
   }
+  function beginAiTask(label: string) {
+    const id = ++nextAiTaskId.current
+    setAiTaskNotices(current => [...current, { id, label, startedAt: Date.now(), state: 'running' }])
+    return id
+  }
+  function finishAiTask(id: number, failed = false) {
+    const finishedAt = Date.now()
+    setAiTaskNotices(current => current.map(task => task.id === id ? { ...task, finishedAt, state: failed ? 'error' : 'done' } : task))
+    window.setTimeout(() => setAiTaskNotices(current => current.filter(task => task.id !== id)), 3500)
+  }
+  function dismissAiTask(id: number) {
+    setAiTaskNotices(current => current.filter(task => task.id !== id))
+  }
   async function runAi(action: FlashcardAiAction, card?: Flashcard, input?: string) {
     if (!onAiAssist || aiBusy) return ''
+    const cardAction: FlashcardCardAiAction | undefined = card && (action === 'distractors' || action === 'example' || action === 'mnemonic' || action === 'difficulty') ? action : undefined
+    const taskId = beginAiTask(FLASHCARD_AI_TASK_LABELS[action])
+    let failed = false
     setAiError(''); setAiBusy(action)
+    if (card && cardAction) setCardAiResults(current => ({ ...current, [card.id]: { action: cardAction, state: 'running', message: 'AI pracuje nad tą fiszką…' } }))
     try {
       const result = await onAiAssist(action, card, input)
       const parsed = safeJsonValue(result)
@@ -722,7 +795,10 @@ export function FlashcardsPage({ cards, notes, attachments = [], trash = [], onC
       else if (action === 'quality' || action === 'coverage') { setAiReport(result.trim()); setAiReportExpanded(false) }
       else if (action === 'distractors' && card) {
         const values = Array.isArray(parsed) ? parsed : parsed && typeof parsed === 'object' && Array.isArray((parsed as { distractors?: unknown }).distractors) ? (parsed as { distractors: unknown[] }).distractors : []
-        onUpdate(card.id, { aiDistractors: values.filter((value): value is string => typeof value === 'string').slice(0, 8) })
+        const distractors = [...new Set(values.filter((value): value is string => typeof value === 'string').map(value => value.trim()).filter(Boolean))].slice(0, 8)
+        if (!distractors.length) throw new Error('AI nie zwróciło żadnych propozycji. Spróbuj ponownie.')
+        onUpdate(card.id, { aiDistractors: distractors })
+        setCardAiResults(current => ({ ...current, [card.id]: { action: 'distractors', state: 'done', message: `Zapisano ${distractors.length} błędnych wariantów odpowiedzi. Możesz z nich korzystać w sesji w trybie „Warianty odpowiedzi”.`, items: distractors } }))
       } else if (action === 'tags') {
         const entries = Array.isArray(parsed) ? parsed : parsed && typeof parsed === 'object' ? Object.entries(parsed as Record<string, unknown>).map(([id, tags]) => ({ id, tags })) : []
         for (const entry of entries) {
@@ -731,18 +807,27 @@ export function FlashcardsPage({ cards, notes, attachments = [], trash = [], onC
           if (typeof item.id === 'string' && Array.isArray(item.tags)) onUpdate(item.id, { tags: [...new Set(item.tags.filter((tag): tag is string => typeof tag === 'string'))] })
         }
       } else if (card && (action === 'example' || action === 'mnemonic')) {
-        const content = typeof parsed === 'string' ? parsed : parsed && typeof parsed === 'object' ? String((parsed as Record<string, unknown>).text ?? (parsed as Record<string, unknown>)[action] ?? result) : result
+        const content = (typeof parsed === 'string' ? parsed : parsed && typeof parsed === 'object' ? String((parsed as Record<string, unknown>).text ?? (parsed as Record<string, unknown>)[action] ?? result) : result).trim()
+        if (!content) throw new Error('AI nie zwróciło treści. Spróbuj ponownie.')
         onUpdate(card.id, action === 'example' ? { example: content } : { mnemonic: content })
+        setCardAiResults(current => ({ ...current, [card.id]: { action, state: 'done', message: action === 'example' ? 'Dodano przykład i kontrprzykład do wyjaśnienia fiszki.' : 'Dodano skojarzenie pomagające zapamiętać odpowiedź.', content } }))
       } else if (action === 'difficulty' && card) {
         const value = parsed && typeof parsed === 'object' ? parsed as Record<string, unknown> : {}
         const difficulty = input as Flashcard['difficulty']
-        onUpdate(card.id, { question: typeof value.question === 'string' ? value.question : card.question, answer: typeof value.answer === 'string' ? value.answer : card.answer, difficulty })
+        if (!['beginner', 'intermediate', 'advanced'].includes(difficulty ?? '') || typeof value.question !== 'string' || !value.question.trim() || typeof value.answer !== 'string' || !value.answer.trim()) throw new Error('AI nie zwróciło nowego pytania i odpowiedzi. Spróbuj ponownie.')
+        const question = value.question.trim()
+        const answer = value.answer.trim()
+        onUpdate(card.id, { question, answer, difficulty })
+        setCardAiResults(current => ({ ...current, [card.id]: { action: 'difficulty', state: 'done', message: `Przeredagowano pytanie i odpowiedź na poziom: ${FLASHCARD_DIFFICULTY_LABELS[difficulty!]}.`, question, answer } }))
       }
       return result
     } catch (error) {
-      setAiError(error instanceof Error ? error.message : 'Nie udało się wykonać akcji AI.')
+      failed = true
+      const message = error instanceof Error ? error.message : 'Nie udało się wykonać akcji AI.'
+      if (card && cardAction) setCardAiResults(current => ({ ...current, [card.id]: { action: cardAction, state: 'error', message } }))
+      else setAiError(message)
       return ''
-    } finally { setAiBusy('') }
+    } finally { setAiBusy(''); finishAiTask(taskId, failed) }
   }
   function mergeCards(first: Flashcard, second: Flashcard) {
     onUpdate(first.id, {
@@ -774,11 +859,13 @@ export function FlashcardsPage({ cards, notes, attachments = [], trash = [], onC
   }
   async function checkSimilarCards() {
     if (!onFindSimilar || similarBusy) return
+    const taskId = beginAiTask('Wykrywanie podobnych fiszek')
+    let failed = false
     setSimilarError('')
     setSimilarBusy(true)
     try { setSimilarMatches(await onFindSimilar(visibleCards)) }
-    catch (error) { setSimilarError(error instanceof Error ? error.message : 'Nie udało się porównać pytań.') }
-    finally { setSimilarBusy(false) }
+    catch (error) { failed = true; setSimilarError(error instanceof Error ? error.message : typeof error === 'string' && error.trim() ? error : 'Nie udało się porównać pytań.') }
+    finally { setSimilarBusy(false); finishAiTask(taskId, failed) }
   }
   async function setReminder(value: boolean) {
     if (value && 'Notification' in window && Notification.permission === 'default') {
@@ -788,6 +875,8 @@ export function FlashcardsPage({ cards, notes, attachments = [], trash = [], onC
   }
   async function regenerate(card: Flashcard) {
     if (!onRegenerate || regeneratingId) return
+    const taskId = beginAiTask('Poprawa fiszki przy pomocy AI')
+    let failed = false
     setRegenerateError('')
     setRegeneratingId(card.id)
     try {
@@ -796,14 +885,24 @@ export function FlashcardsPage({ cards, notes, attachments = [], trash = [], onC
       const duplicate = cards.some(item => item.id !== card.id && item.noteId === card.noteId && normalizeQuestion(item.question) === normalized)
       if (duplicate) throw new Error('AI wygenerowało pytanie, które już istnieje dla tej notatki.')
       onUpdate(card.id, { question: regenerated.question, answer: regenerated.answer, kind: 'basic', tags: card.tags ?? [] })
-    } catch (error) { setRegenerateError(error instanceof Error ? error.message : 'Nie udało się poprawić fiszki.') }
-    finally { setRegeneratingId('') }
+    } catch (error) { failed = true; setRegenerateError(error instanceof Error ? error.message : 'Nie udało się poprawić fiszki.') }
+    finally { setRegeneratingId(''); finishAiTask(taskId, failed) }
   }
 
   return (<section className="flashcards-page" aria-labelledby="flashcards-title">
     <header className="flashcards-page-heading"><span className="folder-dialog-mark"><Brain size={19} /></span><div><h1 id="flashcards-title">Fiszki</h1><p>{due.length} do powtórki · {sourceFilteredCards.length} w wybranych źródłach · {selectedCount} notatek</p></div><button type="button" className={`flashcard-trash-shortcut${tab === 'trash' ? ' active' : ''}`} aria-label={`Otwórz kosz fiszek, ${trash.length} elementów`} aria-pressed={tab === 'trash'} title={`Kosz fiszek (${trash.length})`} onClick={() => setTab('trash')}><Trash2 size={17} />{trash.length > 0 && <span>{trash.length}</span>}</button></header>
 
-    {aiReport && <aside className={`flashcard-ai-report-notification${aiReportExpanded ? ' is-expanded' : ''}`} aria-label="Powiadomienie o raporcie AI">
+    {aiTaskNotices.map((task, index) => {
+      const duration = formatAiDuration((task.finishedAt ?? now) - task.startedAt)
+      const stateLabel = task.state === 'running' ? 'AI pracuje' : task.state === 'error' ? 'AI zakończyło się błędem' : 'AI zakończyło zadanie'
+      const durationLabel = task.state === 'running' ? `Trwa: ${duration}` : `Czas zadania: ${duration}`
+      return <aside key={task.id} className={`flashcard-ai-task-notification is-${task.state}`} style={{ top: `calc(env(safe-area-inset-top, 0px) + ${122 + index * 64}px)` }} aria-label={`Zadanie AI: ${task.label}`}>
+        <div className="flashcard-ai-task-notification-status"><span className="flashcard-ai-task-notification-mark">{task.state === 'running' ? <Sparkles className="spin" size={16} /> : <Check size={16} />}</span><span><strong role="status" aria-live="polite">{stateLabel}</strong><small aria-live="off">{task.label} · {durationLabel}</small></span></div>
+        <button type="button" className="icon-button" aria-label={`Usuń powiadomienie: ${task.label}`} title="Usuń powiadomienie" onClick={() => dismissAiTask(task.id)}><X size={16} /></button>
+      </aside>
+    })}
+
+    {aiReport && <aside className={`flashcard-ai-report-notification${aiReportExpanded ? ' is-expanded' : ''}`} style={aiTaskNotices.length ? { top: `calc(env(safe-area-inset-top, 0px) + ${122 + aiTaskNotices.length * 64}px)` } : undefined} aria-label="Powiadomienie o raporcie AI">
       <div className="flashcard-ai-report-notification-status" role="status" aria-live="polite"><span className="flashcard-ai-report-notification-mark"><Sparkles size={16} /></span><span><strong>Raport AI gotowy</strong><small>{aiReportExpanded ? 'Pełna analiza' : 'Rozwiń, aby przeczytać całość'}</small></span></div>
       <div className="flashcard-ai-report-notification-actions"><button type="button" className="button secondary" aria-expanded={aiReportExpanded} aria-controls="flashcard-ai-report-content" onClick={() => setAiReportExpanded(value => !value)}>{aiReportExpanded ? <><Minimize2 size={14} />Zwiń</> : <><Maximize2 size={14} />Rozwiń</>}</button><button type="button" className="icon-button" aria-label="Usuń powiadomienie o raporcie AI" title="Usuń powiadomienie" onClick={() => { setAiReport(''); setAiReportExpanded(false) }}><X size={16} /></button></div>
       <div id="flashcard-ai-report-content" className="flashcard-ai-report-notification-content" hidden={!aiReportExpanded}><RichCardContent value={aiReport} /></div>
@@ -840,11 +939,11 @@ export function FlashcardsPage({ cards, notes, attachments = [], trash = [], onC
     <section className="flashcard-activity" aria-label="Kalendarz aktywności nauki"><div className="flashcard-activity-heading"><span><CalendarDays size={15} />Aktywność z ostatnich 12 tygodni</span><small>{activityCalendar.reduce((sum, day) => sum + day.count, 0)} powtórek</small></div><div className="flashcard-activity-months">{activityCalendar.filter(day => day.monthLabel).map(day => <span key={day.key}>{day.monthLabel}</span>)}</div><div className="flashcard-activity-grid">{activityCalendar.map(day => <span key={day.key} role="img" title={day.title} aria-label={day.title} data-level={day.level} />)}</div><div className="flashcard-activity-legend"><span>Mniej</span>{[0, 1, 2, 3, 4].map(level => <i key={level} data-level={level} />)}<span>Więcej</span></div></section>
       </div>
     </section> : tab === 'create' ? <section className="flashcard-page-panel flashcard-create-panel" aria-label="Dodaj fiszkę">
-      <header className="flashcard-panel-heading"><div><h2>Dodaj fiszkę</h2><p>Wybierz rodzaj karty i wpisz pytanie z odpowiedzią.</p></div></header>
+      <header className="flashcard-panel-heading"><div><h2>Dodaj fiszkę</h2><p>Wybierz typ nauki i uzupełnij treść fiszki.</p></div><output className="flashcard-create-scope-count" aria-live="polite"><Layers size={15} /><span>Fiszki w bieżącym zakresie</span><strong>{deckFilteredCards.length}</strong></output></header>
         <form className="flashcard-create-form" onSubmit={submit}>
           <select aria-label="Notatka dla karty" value={noteId} onChange={event => { setNoteId(event.target.value); setMediaAttachmentId('') }}>{notes.map(note => <option key={note.id} value={note.id}>{note.folder ? note.folder + ' / ' : ''}{note.title || 'Bez tytułu'}</option>)}</select>
           <label className="flashcard-kind-select"><span>Typ karty</span><select value={cardKind} onChange={event => { const kind = event.target.value as FlashcardKind; setCardKind(kind); if (kind === 'image-occlusion' && !question.trim()) setQuestion('Nazwij zakryte elementy.'); if (kind !== 'image-occlusion') setCardOcclusion(undefined) }}><option value="basic">Pytanie i odpowiedź</option><option value="cloze">Uzupełnij lukę</option><option value="image-occlusion">Zakrywanie obrazu</option><option value="sequence">Kolejność kroków</option><option value="numeric">Wynik liczbowy</option><option value="audio">Fragment audio</option><option value="video">Fragment wideo</option></select></label>
-          <label className="flashcard-kind-select"><span>Typ nauki</span><select value={studyModeDraft} onChange={event => setStudyModeDraft(event.target.value as FlashcardStudyMode)}>{FLASHCARD_STUDY_MODES.map(mode => <option key={mode.value} value={mode.value}>{mode.label}</option>)}</select></label>
+          <label className="flashcard-kind-select"><span>Typ nauki</span><select value={studyModeDraft} onChange={event => { const mode = event.target.value as FlashcardStudyMode; setStudyModeDraft(mode); if (mode === 'multiple-choice' && answer.trim() && !answerOptionsDraft.some(option => option.trim())) setAnswerOptionsDraft(current => current.map((option, index) => index === 0 ? answer : option)) }}>{FLASHCARD_STUDY_MODES.map(mode => <option key={mode.value} value={mode.value}>{mode.label}</option>)}</select></label>
           {studyModeDraft === 'true-false' && <label className="flashcard-kind-select"><span>Poprawna ocena stwierdzenia</span><select value={String(trueFalseAnswerDraft)} onChange={event => setTrueFalseAnswerDraft(event.target.value === 'true')}><option value="true">Prawda</option><option value="false">Fałsz</option></select></label>}
           <FlashcardContentField label={cardKind === 'cloze' ? 'Tekst z luką, np. Stolica Francji to {{c1::Paryż}}.' : 'Pytanie'} value={question} onChange={setQuestion} />
           {cardKind === 'cloze' ? <p className="flashcard-cloze-help">Użyj <code>{'{{c1::odpowiedź}}'}</code> dla luki. Treść może zawierać LaTeX między znakami $…$ lub $$…$$ oraz tabele Markdown.</p> : null}
@@ -852,16 +951,17 @@ export function FlashcardsPage({ cards, notes, attachments = [], trash = [], onC
           {cardKind === 'sequence' && <label className="flashcard-metadata-field">Prawidłowa kolejność, jeden element w wierszu<textarea value={sequenceDraft} onChange={event => setSequenceDraft(event.target.value)} rows={5} placeholder="Krok pierwszy&#10;Krok drugi&#10;Krok trzeci" /></label>}
           {cardKind === 'numeric' && <div className="flashcard-numeric-fields"><label>Wartość<input type="number" step="any" value={numericValue} onChange={event => setNumericValue(event.target.value)} /></label><label>Tolerancja ±<input type="number" min="0" step="any" value={numericTolerance} onChange={event => setNumericTolerance(event.target.value)} /></label><label>Jednostka<input value={numericUnit} onChange={event => setNumericUnit(event.target.value)} placeholder="np. kg" /></label></div>}
           {cardKind === 'audio' || cardKind === 'video' ? <div className="flashcard-media-fields"><label>Załącznik<select value={mediaAttachmentId} onChange={event => setMediaAttachmentId(event.target.value)}><option value="">Wybierz z załączników notatki</option>{attachments.filter(item => item.noteId === noteId && (cardKind === 'audio' ? item.mimeType.startsWith('audio/') : item.mimeType.startsWith('video/'))).map(item => <option key={item.id} value={item.id}>{item.fileName}</option>)}</select></label><label>Początek (s)<input type="number" min="0" step="0.1" value={mediaStart} onChange={event => setMediaStart(event.target.value)} /></label><label>Koniec (s)<input type="number" min="0" step="0.1" value={mediaEnd} onChange={event => setMediaEnd(event.target.value)} placeholder="do końca" /></label></div> : null}
-          {cardKind !== 'cloze' && <FlashcardContentField label={cardKind === 'numeric' ? 'Wyjaśnienie (opcjonalne)' : cardKind === 'image-occlusion' ? 'Dodatkowa odpowiedź (opcjonalna)' : 'Odpowiedź'} value={answer} onChange={setAnswer} />}
+          {studyModeDraft === 'multiple-choice' && <section className="flashcard-multiple-choice-editor" aria-label="Warianty odpowiedzi"><strong>Warianty odpowiedzi</strong><p>Zaznacz przycisk przy poprawnej odpowiedzi.</p>{answerOptionsDraft.map((option, index) => <div className="flashcard-multiple-choice-option" key={index}><label><input type="radio" name="new-flashcard-correct-answer" aria-label={`Odpowiedź ${index + 1} jest poprawna`} checked={correctAnswerOption === index} onChange={() => setCorrectAnswerOption(index)} /><span>{index + 1}</span></label><input aria-label={`Treść odpowiedzi ${index + 1}`} value={option} onChange={event => updateAnswerOption(index, event.target.value)} placeholder={`Odpowiedź ${index + 1}`} /><button type="button" className="icon-button danger-icon" aria-label={`Usuń odpowiedź ${index + 1}`} disabled={answerOptionsDraft.length <= 2} onClick={() => { setAnswerOptionsDraft(current => current.filter((_, optionIndex) => optionIndex !== index)); setCorrectAnswerOption(current => current === index ? Math.max(0, index - 1) : current > index ? current - 1 : current) }}><X size={14} /></button></div>)}<button type="button" className="link-button" disabled={answerOptionsDraft.length >= 8} onClick={() => setAnswerOptionsDraft(current => [...current, ''])}><Plus size={13} />Dodaj wariant odpowiedzi</button></section>}
+          {studyModeDraft !== 'multiple-choice' && studyModeDraft !== 'true-false' && cardKind !== 'cloze' && <FlashcardContentField label={cardKind === 'numeric' ? 'Wyjaśnienie (opcjonalne)' : cardKind === 'image-occlusion' ? 'Dodatkowa odpowiedź (opcjonalna)' : 'Odpowiedź'} value={answer} onChange={setAnswer} />}
           <details className="flashcard-metadata-editor"><summary>Podpowiedzi, warianty, szablon i powiązania</summary>
             <label>Szablon karty<select value={templateDraft} onChange={event => { const template = event.target.value as FlashcardTemplate; setTemplateDraft(template); if (!question.trim()) setQuestion(FLASHCARD_TEMPLATE_PROMPTS[template]) }}><option value="definition">Definicja</option><option value="cause-effect">Przyczyna i skutek</option><option value="comparison">Porównanie</option><option value="vocabulary">Słownictwo</option><option value="process">Proces</option><option value="formula">Wzór</option></select></label>
             <label>Podpowiedzi progresywne, jedna na wiersz<textarea value={hintsDraft} onChange={event => setHintsDraft(event.target.value)} rows={3} /></label>
-            <label>Akceptowane warianty odpowiedzi, jeden na wiersz<textarea value={variantsDraft} onChange={event => setVariantsDraft(event.target.value)} rows={3} /></label>
+            {studyModeDraft !== 'multiple-choice' && studyModeDraft !== 'true-false' && <label>Akceptowane warianty odpowiedzi, jeden na wiersz<textarea value={variantsDraft} onChange={event => setVariantsDraft(event.target.value)} rows={3} /></label>}
             <label>Tagi fiszki<input value={tagsDraft} onChange={event => setTagsDraft(event.target.value)} placeholder="Tagi, oddziel przecinkami" /></label>
             <label>Karty powiązane<select multiple value={relatedDraft} onChange={event => setRelatedDraft([...event.currentTarget.selectedOptions].map(option => option.value))}>{cards.map(card => <option key={card.id} value={card.id}>{card.question.slice(0, 100)}</option>)}</select></label>
             <label>Słowniczek: termin = definicja<textarea value={glossaryDraft} onChange={event => setGlossaryDraft(event.target.value)} rows={3} placeholder="mitoza = podział jądra komórkowego" /></label>
           </details>
-          <button className="button primary" disabled={!noteId || !question.trim() || (cardKind === 'basic' && !answer.trim()) || (cardKind === 'cloze' && !hasCloze(question)) || (cardKind === 'image-occlusion' && !hasOcclusionAnswers(cardOcclusion)) || (cardKind === 'sequence' && textLines(sequenceDraft).length < 2) || (cardKind === 'numeric' && (!numericValue.trim() || !Number.isFinite(Number(numericValue))) ) || (cardKind === 'audio' && !attachments.some(item => item.id === mediaAttachmentId && item.noteId === noteId && item.mimeType.startsWith('audio/'))) || (cardKind === 'video' && !attachments.some(item => item.id === mediaAttachmentId && item.noteId === noteId && item.mimeType.startsWith('video/')))}><Plus size={15} />Dodaj fiszkę</button>
+          <button className="button primary" disabled={!noteId || !question.trim() || (cardKind === 'basic' && studyModeDraft !== 'multiple-choice' && studyModeDraft !== 'true-false' && !answer.trim()) || (studyModeDraft === 'multiple-choice' && (answerOptionsDraft.length < 2 || answerOptionsDraft.some(option => !option.trim()))) || (cardKind === 'cloze' && !hasCloze(question)) || (cardKind === 'image-occlusion' && !hasOcclusionAnswers(cardOcclusion)) || (cardKind === 'sequence' && textLines(sequenceDraft).length < 2) || (cardKind === 'numeric' && (!numericValue.trim() || !Number.isFinite(Number(numericValue))) ) || (cardKind === 'audio' && !attachments.some(item => item.id === mediaAttachmentId && item.noteId === noteId && item.mimeType.startsWith('audio/'))) || (cardKind === 'video' && !attachments.some(item => item.id === mediaAttachmentId && item.noteId === noteId && item.mimeType.startsWith('video/')))}><Plus size={15} />Dodaj fiszkę</button>
         </form>
     </section> :
 
@@ -892,8 +992,8 @@ export function FlashcardsPage({ cards, notes, attachments = [], trash = [], onC
             {current.glossaryTerms?.length ? <dl className="flashcard-glossary">{current.glossaryTerms.map(item => <div key={item.term}><dt>{item.term}</dt><dd>{item.definition}</dd></div>)}</dl> : null}
             {current.relatedCardIds?.length ? <div className="flashcard-related-cards"><strong>Powiązane karty</strong>{current.relatedCardIds.map(id => cards.find(card => card.id === id)).filter((card): card is Flashcard => Boolean(card)).map(card => <button type="button" key={card.id} onClick={() => openRelatedCard(card)}>{card.question}</button>)}</div> : null}
             <label className="flashcard-confidence">Pewność przed oceną: <strong>{confidence}/5</strong><input type="range" min="1" max="5" value={confidence} onChange={event => setConfidence(Number(event.target.value))} /></label>
-            <p>Jak łatwo przypomniałeś sobie odpowiedź?</p><div className="flashcard-grades"><button onClick={() => grade('again')}>Ponownie <small>10 min</small></button><button onClick={() => grade('hard')}>Trudne</button><button onClick={() => grade('good')}>Dobrze</button><button onClick={() => grade('easy')}>Łatwe</button></div><label className="flashcard-postpone-control"><Clock3 size={14} /><span>Odłóż</span><select aria-label="Odłóż aktualną fiszkę" defaultValue="" onChange={event => { postpone(current.id, event.target.value); event.target.value = '' }}><option value="" disabled>Wybierz termin</option><option value="hour">1 godzinę</option><option value="day">Do jutra</option><option value="week">7 dni</option><option value="month">30 dni</option></select></label><label className="flashcard-date-control"><span>Ustaw dokładny termin</span><input aria-label="Dokładny termin powtórki" type="datetime-local" value={dateTimeLocal(current.dueAt)} onChange={event => setManualDue(current.id, event.target.value)} /></label></>  : current.kind === 'sequence' ? <div className="flashcard-answer-input"><strong>Ułóż elementy we właściwej kolejności</strong>{sequenceOrder.map((item, index) => <div className="flashcard-sequence-row" key={index}><span>{index + 1}. {item}</span><button type="button" disabled={index === 0} onClick={() => moveSequenceItem(index, -1)}>↑</button><button type="button" disabled={index === sequenceOrder.length - 1} onClick={() => moveSequenceItem(index, 1)}>↓</button></div>)}<button type="button" className="button primary" onClick={() => submitReviewAnswer()}>Sprawdź kolejność</button></div>
-            : current.kind === 'numeric' && current.numericAnswer ? <div className="flashcard-answer-input"><label>Wynik<input inputMode="decimal" value={answerInput} onChange={event => setAnswerInput(event.target.value)} placeholder={current.numericAnswer.unit || 'Liczba'} /></label><small>Tolerancja ±{current.numericAnswer.tolerance} {current.numericAnswer.unit}</small><button type="button" className="button primary" disabled={!answerInput.trim()} onClick={() => submitReviewAnswer()}>Sprawdź wynik</button></div>
+            <p>Jak łatwo przypomniałeś sobie odpowiedź?</p><div className="flashcard-grades"><button onClick={() => grade('again')}>Ponownie <small>10 min</small></button><button onClick={() => grade('hard')}>Trudne</button><button onClick={() => grade('good')}>Dobrze</button><button onClick={() => grade('easy')}>Łatwe</button></div><label className="flashcard-postpone-control"><Clock3 size={14} /><span>Odłóż</span><select aria-label="Odłóż aktualną fiszkę" defaultValue="" onChange={event => { postpone(current.id, event.target.value); event.target.value = '' }}><option value="" disabled>Wybierz termin</option><option value="hour">1 godzinę</option><option value="day">Do jutra</option><option value="week">7 dni</option><option value="month">30 dni</option></select></label><label className="flashcard-date-control"><span>Ustaw dokładny termin</span><input aria-label="Dokładny termin powtórki" type="datetime-local" value={dateTimeLocal(current.dueAt)} onChange={event => setManualDue(current.id, event.target.value)} /></label></>  : answerMode === 'flip' && current.kind === 'sequence' ? <div className="flashcard-answer-input"><strong>Ułóż elementy we właściwej kolejności</strong>{sequenceOrder.map((item, index) => <div className="flashcard-sequence-row" key={index}><span>{index + 1}. {item}</span><button type="button" disabled={index === 0} onClick={() => moveSequenceItem(index, -1)}>↑</button><button type="button" disabled={index === sequenceOrder.length - 1} onClick={() => moveSequenceItem(index, 1)}>↓</button></div>)}<button type="button" className="button primary" onClick={() => submitReviewAnswer()}>Sprawdź kolejność</button></div>
+            : answerMode === 'flip' && current.kind === 'numeric' && current.numericAnswer ? <div className="flashcard-answer-input"><label>Wynik<input inputMode="decimal" value={answerInput} onChange={event => setAnswerInput(event.target.value)} placeholder={current.numericAnswer.unit || 'Liczba'} /></label><small>Tolerancja ±{current.numericAnswer.tolerance} {current.numericAnswer.unit}</small><button type="button" className="button primary" disabled={!answerInput.trim()} onClick={() => submitReviewAnswer()}>Sprawdź wynik</button></div>
               : answerMode === 'multiple-choice' ? <div className="flashcard-answer-input"><strong>Wybierz odpowiedź</strong>{choiceOptions.map(option => <button type="button" className={choiceValue === option ? 'flashcard-choice selected' : 'flashcard-choice'} key={option} aria-pressed={choiceValue === option} onClick={() => setChoiceValue(option)}>{option}</button>)}{choiceOptions.length < 4 && onAiAssist && <button type="button" className="link-button" disabled={aiBusy === 'distractors'} onClick={() => void runAi('distractors', current)}>Wygeneruj dystraktory AI</button>}<button type="button" className="button primary" disabled={!choiceValue} onClick={() => submitReviewAnswer()}>Sprawdź</button></div>
                 : answerMode === 'true-false' ? <div className="flashcard-answer-input">{current.studyMode === 'true-false' ? <RichCardContent value={current.question} /> : <RichCardContent value={`${current.question} — ${trueFalseStatement.answer}`} />}<button type="button" className="button secondary" onClick={() => submitReviewAnswer('true')}>Prawda</button><button type="button" className="button secondary" onClick={() => submitReviewAnswer('false')}>Fałsz</button></div>
                   : answerMode === 'explain' || answerMode === 'timed-exam' ? <div className="flashcard-answer-input"><label>Twoja odpowiedź<textarea value={answerInput} onChange={event => setAnswerInput(event.target.value)} rows={4} disabled={Boolean(aiBusy)} /></label>{aiError && <p className="flashcard-form-error" role="alert">{aiError}</p>}<button type="button" className="button primary" disabled={!answerInput.trim() || Boolean(aiBusy)} onClick={() => void checkDescriptiveAnswer()}>{aiBusy === 'evaluate' ? 'Porównuję odpowiedź…' : onAiAssist ? 'Porównaj z AI i pokaż odpowiedź' : 'Sprawdź i pokaż odpowiedź'}</button></div>
@@ -903,7 +1003,7 @@ export function FlashcardsPage({ cards, notes, attachments = [], trash = [], onC
         <div className="flashcard-card-toolbar flashcard-card-search-toolbar"><label className="flashcard-search"><Search size={15} /><input type="search" value={query} onChange={event => setQuery(event.target.value)} placeholder="Szukaj w pytaniach, odpowiedziach i notatkach" /></label><span className="flashcard-result-count">{visibleCards.length} kart</span><label className="flashcard-page-size"><span>Na stronie</span><select aria-label="Liczba fiszek na stronę" value={cardsPerPage} onChange={event => { setCardsPerPage(Number(event.target.value) as FlashcardPageSize); setCardsPage(1) }}><option value={10}>10</option><option value={25}>25</option><option value={50}>50</option><option value={100}>100</option></select></label></div>
         <section className="flashcard-page-panel flashcard-list-tools-panel">
           <header className="flashcard-panel-heading"><div><h2>Filtrowanie i analiza</h2><p>Sortuj karty, filtruj tagi i uruchamiaj narzędzia AI.</p></div></header>
-          <div className="flashcard-card-toolbar flashcard-card-toolbar-tools"><label className="flashcard-sort"><span>Sortuj</span><select value={sortBy} onChange={event => setSortBy(event.target.value as FlashcardSort)}><option value="due">Termin powtórki</option><option value="hardest">Najtrudniejsze</option><option value="question">Pytanie A–Z</option><option value="recent">Ostatnio powtarzane</option></select></label><label className="flashcard-tag-filter"><span>Tag</span><select value={tagFilter} onChange={event => setTagFilter(event.target.value)}><option value="">Wszystkie tagi</option>{availableTags.map(tag => <option key={tag} value={tag}>{tag}</option>)}</select></label>{onFindSimilar && <button type="button" className="button secondary flashcard-similar-button" title="Porównanie korzysta z modelu embeddingów ustawionego w Ollama." disabled={similarBusy || visibleCards.length < 2} onClick={() => void checkSimilarCards()}>{similarBusy ? <><Sparkles className="spin" size={14} />Porównuję…</> : <><Sparkles size={14} />Wykryj podobne</>}</button>}{onAiAssist && <><button type="button" className="button secondary" disabled={Boolean(aiBusy)} onClick={() => void runAi('quality', undefined, JSON.stringify(visibleCards.map(card => ({ id: card.id, question: card.question, answer: card.answer, tags: card.tags }))))}>Sprawdź jakość AI</button><button type="button" className="button secondary" disabled={Boolean(aiBusy)} onClick={() => void runAi('coverage', undefined, JSON.stringify(visibleCards.map(card => ({ question: card.question, answer: card.answer, tags: card.tags }))))}>Pokrycie tematów</button><button type="button" className="button secondary" disabled={Boolean(aiBusy)} onClick={() => void runAi('tags', undefined, JSON.stringify(visibleCards.map(card => ({ id: card.id, question: card.question, answer: card.answer, tags: card.tags }))))}>Nadaj tagi AI</button></>}<button type="button" className="link-button" onClick={() => setSelectedCardIds(selectedCardIds.length === visibleCards.length ? [] : visibleCards.map(card => card.id))}>{selectedCardIds.length ? 'Odznacz' : 'Zaznacz widoczne'}</button></div>
+          <div className="flashcard-card-toolbar flashcard-card-toolbar-tools"><label className="flashcard-sort"><span>Sortuj</span><select value={sortBy} onChange={event => setSortBy(event.target.value as FlashcardSort)}><option value="due">Termin powtórki</option><option value="hardest">Najtrudniejsze</option><option value="question">Pytanie A–Z</option><option value="recent">Ostatnio powtarzane</option></select></label><label className="flashcard-tag-filter"><span>Tag</span><select value={tagFilter} onChange={event => setTagFilter(event.target.value)}><option value="">Wszystkie tagi</option>{availableTags.map(tag => <option key={tag} value={tag}>{tag}</option>)}</select></label>{onFindSimilar && <button type="button" className="button secondary flashcard-similar-button" title="Porównanie korzysta z modelu embeddingów ustawionego w Ollama." disabled={similarBusy || visibleCards.length < 2} onClick={() => void checkSimilarCards()}>{similarBusy ? <><Sparkles className="spin" size={14} />Porównuję…</> : <><Sparkles size={14} />Wykryj podobne</>}</button>}{onAiAssist && <><button type="button" className="button secondary" title="Wykrywa niejasne, zbyt szerokie, błędne lub powtarzające się pytania i proponuje poprawki." disabled={Boolean(aiBusy)} onClick={() => void runAi('quality', undefined, JSON.stringify(visibleCards.map(card => ({ id: card.id, question: card.question, answer: card.answer, tags: card.tags }))))}>Sprawdź jakość AI</button><button type="button" className="button secondary" title="Grupuje fiszki według tematów i wskazuje ważne zagadnienia, których brakuje w zestawie." disabled={Boolean(aiBusy)} onClick={() => void runAi('coverage', undefined, JSON.stringify(visibleCards.map(card => ({ question: card.question, answer: card.answer, tags: card.tags }))))}>Pokrycie tematów</button><button type="button" className="button secondary" disabled={Boolean(aiBusy)} onClick={() => void runAi('tags', undefined, JSON.stringify(visibleCards.map(card => ({ id: card.id, question: card.question, answer: card.answer, tags: card.tags }))))}>Nadaj tagi AI</button></>}<button type="button" className="link-button" onClick={() => setSelectedCardIds(selectedCardIds.length === visibleCards.length ? [] : visibleCards.map(card => card.id))}>{selectedCardIds.length ? 'Odznacz' : 'Zaznacz widoczne'}</button></div>
         </section>
         {!!selectedCardIds.length && <section className="flashcard-page-panel flashcard-bulk-panel"><header className="flashcard-panel-heading"><div><h2>Operacje zbiorcze</h2><p>{selectedCardIds.length} zaznaczono</p></div></header><div className="flashcard-bulk-toolbar"><strong>{selectedCardIds.length} zaznaczono</strong><input aria-label="Tagi do edycji zbiorczej" value={bulkTagDraft} onChange={event => setBulkTagDraft(event.target.value)} placeholder="Tagi, oddziel przecinkami" /><button type="button" onClick={() => applyBulk('add-tag')}>Dodaj tagi</button><button type="button" onClick={() => applyBulk('remove-tag')}>Usuń tagi</button><label>Przesuń termin o <input type="number" value={bulkDueDays} onChange={event => setBulkDueDays(Number(event.target.value) || 0)} /> dni</label><button type="button" onClick={() => applyBulk('shift-due')}>Zmień terminy</button><button type="button" onClick={() => applyBulk('suspend')}>Wstrzymaj</button><button type="button" onClick={() => applyBulk('resume')}>Wznów</button><button type="button" className="danger-icon" onClick={() => applyBulk('delete')}>Przenieś do kosza</button></div></section>}
         {similarError && <p className="flashcard-form-error flashcard-regenerate-error" role="alert">{similarError}</p>}
@@ -924,7 +1024,7 @@ export function FlashcardsPage({ cards, notes, attachments = [], trash = [], onC
               {editKind === 'sequence' && <label className="flashcard-metadata-field">Prawidłowa kolejność, jeden element w wierszu<textarea value={editMetadata.sequenceItems?.join(String.fromCharCode(10)) ?? ''} onChange={event => setEditMetadata(value => ({ ...value, sequenceItems: textLines(event.target.value) }))} rows={5} /></label>}
               {editKind === 'numeric' && <div className="flashcard-numeric-fields"><label>Wartość<input type="number" step="any" value={editMetadata.numericAnswer?.value ?? ''} onChange={event => setEditMetadata(value => ({ ...value, numericAnswer: { value: Number(event.target.value), tolerance: value.numericAnswer?.tolerance ?? 0, unit: value.numericAnswer?.unit ?? '' } }))} /></label><label>Tolerancja<input type="number" min="0" step="any" value={editMetadata.numericAnswer?.tolerance ?? 0} onChange={event => setEditMetadata(value => ({ ...value, numericAnswer: { value: value.numericAnswer?.value ?? 0, tolerance: Number(event.target.value), unit: value.numericAnswer?.unit ?? '' } }))} /></label><label>Jednostka<input value={editMetadata.numericAnswer?.unit ?? ''} onChange={event => setEditMetadata(value => ({ ...value, numericAnswer: { value: value.numericAnswer?.value ?? 0, tolerance: value.numericAnswer?.tolerance ?? 0, unit: event.target.value } }))} /></label></div>}
               {(editKind === 'audio' || editKind === 'video') && <div className="flashcard-media-fields"><label>Załącznik<select value={editMetadata.mediaClip?.attachmentId ?? ''} onChange={event => setEditMetadata(value => ({ ...value, mediaClip: { attachmentId: event.target.value, startMs: value.mediaClip?.startMs ?? 0, endMs: value.mediaClip?.endMs } }))}><option value="">Wybierz załącznik</option>{attachments.filter(item => item.noteId === card.noteId && (editKind === 'audio' ? item.mimeType.startsWith('audio/') : item.mimeType.startsWith('video/'))).map(item => <option key={item.id} value={item.id}>{item.fileName}</option>)}</select></label><label>Początek (s)<input type="number" min="0" step="0.1" value={(editMetadata.mediaClip?.startMs ?? 0) / 1000} onChange={event => setEditMetadata(value => ({ ...value, mediaClip: { attachmentId: value.mediaClip?.attachmentId ?? '', startMs: Math.max(0, Number(event.target.value) || 0) * 1000, endMs: value.mediaClip?.endMs } }))} /></label><label>Koniec (s)<input type="number" min="0" step="0.1" value={editMetadata.mediaClip?.endMs === undefined ? '' : editMetadata.mediaClip.endMs / 1000} onChange={event => setEditMetadata(value => ({ ...value, mediaClip: { attachmentId: value.mediaClip?.attachmentId ?? '', startMs: value.mediaClip?.startMs ?? 0, endMs: event.target.value ? Number(event.target.value) * 1000 : undefined } }))} /></label></div>}
-              {editKind !== 'cloze' && <FlashcardContentField label="Odpowiedź / wyjaśnienie" value={editAnswer} onChange={setEditAnswer} />}
+              {editKind !== 'cloze' && editMetadata.studyMode !== 'true-false' && <FlashcardContentField label="Odpowiedź / wyjaśnienie" value={editAnswer} onChange={setEditAnswer} />}
               {editKind === 'cloze' && <p className="flashcard-cloze-help">Użyj składni <code>{'{{c1::odpowiedź}}'}</code> w treści pytania.</p>}
               <details className="flashcard-metadata-editor" open><summary>Szablon, podpowiedzi i powiązania</summary>
                 <label>Szablon<select value={editMetadata.template ?? 'definition'} onChange={event => setEditMetadata(value => ({ ...value, template: event.target.value as FlashcardTemplate }))}><option value="definition">Definicja</option><option value="cause-effect">Przyczyna i skutek</option><option value="comparison">Porównanie</option><option value="vocabulary">Słownictwo</option><option value="process">Proces</option><option value="formula">Wzór</option></select></label>
@@ -936,8 +1036,8 @@ export function FlashcardsPage({ cards, notes, attachments = [], trash = [], onC
               <input className="flashcard-tags-input" aria-label="Tagi fiszki" value={editTags} onChange={event => setEditTags(event.target.value)} placeholder="Tagi, oddziel przecinkami" />
               <div className="flashcard-edit-actions"><button type="button" className="button secondary" onClick={() => setEditingCardId('')}>Anuluj</button><button type="button" className="button primary" onClick={() => saveEdit(card)}>Zapisz zmiany</button></div>
             </div> : <>
-              <label className="flashcard-card-select"><input type="checkbox" checked={selectedCardIds.includes(card.id)} onChange={event => setSelectedCardIds(value => event.target.checked ? [...new Set([...value, card.id])] : value.filter(id => id !== card.id))} /><span>Zaznacz kartę</span></label><div className="flashcard-list-content"><RichCardContent value={card.kind === 'cloze' ? clozeText(card.question, false) : card.question} />{card.kind === 'sequence' && card.sequenceItems?.length ? <small>Kolejność · {card.sequenceItems.length} kroków</small> : null}{card.kind === 'numeric' && card.numericAnswer ? <small>Odpowiedź liczbowa · tolerancja ±{card.numericAnswer.tolerance} {card.numericAnswer.unit}</small> : null}{card.mediaClip && <FlashcardMediaClip attachment={attachments.find(item => item.id === card.mediaClip?.attachmentId)} clip={card.mediaClip} />}{card.kind === 'image-occlusion' && card.imageOcclusion && <FlashcardOcclusionImage value={card.imageOcclusion} reveal={false} fallback="Odpowiedź" className="flashcard-image-occlusion-preview" />}<div className="flashcard-card-meta">{note ? <button type="button" className="flashcard-note-path" title={notePath(note)} onClick={() => onOpenNote(note.id)}>{notePath(note)}</button> : <small>Brak notatki</small>}<small>{card.suspended ? 'wstrzymana · ' : ''}{card.tags?.length ? `${card.tags.join(', ')} · ` : ''}{`${FLASHCARD_STUDY_MODES.find(mode => mode.value === (card.studyMode ?? 'flip'))?.label ?? 'Pokaż odpowiedź'} · `}{card.dueAt <= now ? 'do powtórzenia' : `następna: ${new Intl.DateTimeFormat('pl-PL', { dateStyle: 'medium' }).format(card.dueAt)}`}{card.kind === 'cloze' ? ' · luka' : card.kind === 'image-occlusion' ? ' · zakrywanie obrazu' : card.kind === 'sequence' ? ' · kolejność' : card.kind === 'numeric' ? ' · liczby' : card.kind === 'audio' ? ' · audio' : card.kind === 'video' ? ' · wideo' : ''}</small></div></div>
-              <div className="flashcard-row-actions"><button type="button" className="icon-button" aria-label="Edytuj fiszkę" title="Edytuj" onClick={() => beginEdit(card)}><Pencil size={15} /></button><details className="flashcard-row-more"><summary>Więcej<ChevronDown size={12} aria-hidden="true" /></summary><div className="flashcard-row-more-actions">{onAiAssist && <details className="flashcard-row-ai"><summary><Sparkles size={14} />AI</summary><div><button type="button" onClick={() => void runAi('distractors', card)}>Dystraktory</button><button type="button" onClick={() => void runAi('example', card)}>Przykład i kontrprzykład</button><button type="button" onClick={() => void runAi('mnemonic', card)}>Skojarzenie</button><label>Poziom<select value={card.difficulty ?? 'intermediate'} onChange={event => void runAi('difficulty', card, event.target.value)}><option value="beginner">Początkujący</option><option value="intermediate">Średni</option><option value="advanced">Zaawansowany</option></select></label></div></details>}{onRegenerate && card.kind === 'basic' && <button type="button" className="icon-button" aria-label="Popraw fiszkę przy pomocy AI" title="Popraw przy pomocy AI" disabled={Boolean(regeneratingId)} onClick={() => void regenerate(card)}>{regeneratingId === card.id ? <Sparkles className="spin" size={15} /> : <Sparkles size={15} />}</button>}<button type="button" className="icon-button" aria-label={card.suspended ? 'Wznów fiszkę' : 'Wstrzymaj fiszkę'} title={card.suspended ? 'Wznów fiszkę' : 'Wstrzymaj fiszkę'} onClick={() => onToggleSuspend(card.id)}>{card.suspended ? <Play size={15} /> : <Pause size={15} />}</button><label className="flashcard-postpone-mini"><Clock3 size={13} /><select aria-label="Odłóż fiszkę" defaultValue="" onChange={event => { postpone(card.id, event.target.value); event.target.value = '' }}><option value="" disabled>Odłóż</option><option value="hour">+1 godz.</option><option value="day">Jutro</option><option value="week">+7 dni</option><option value="month">+30 dni</option></select></label><label className="flashcard-date-mini"><input aria-label="Ustaw dokładny termin powtórki" type="datetime-local" value={dateTimeLocal(card.dueAt)} onChange={event => setManualDue(card.id, event.target.value)} /></label><button type="button" className="icon-button danger-icon" title="Usuń fiszkę" aria-label="Usuń fiszkę" onClick={() => onDelete(card)}><X size={15} /></button></div></details></div>
+              <label className="flashcard-card-select"><input type="checkbox" checked={selectedCardIds.includes(card.id)} onChange={event => setSelectedCardIds(value => event.target.checked ? [...new Set([...value, card.id])] : value.filter(id => id !== card.id))} /><span>Zaznacz kartę</span></label><div className="flashcard-list-content"><RichCardContent value={card.kind === 'cloze' ? clozeText(card.question, false) : card.question} />{card.kind === 'sequence' && card.sequenceItems?.length ? <small>Kolejność · {card.sequenceItems.length} kroków</small> : null}{card.kind === 'numeric' && card.numericAnswer ? <small>Odpowiedź liczbowa · tolerancja ±{card.numericAnswer.tolerance} {card.numericAnswer.unit}</small> : null}{card.mediaClip && <FlashcardMediaClip attachment={attachments.find(item => item.id === card.mediaClip?.attachmentId)} clip={card.mediaClip} />}{card.kind === 'image-occlusion' && card.imageOcclusion && <FlashcardOcclusionImage value={card.imageOcclusion} reveal={false} fallback="Odpowiedź" className="flashcard-image-occlusion-preview" />}<div className="flashcard-card-meta">{note ? <button type="button" className="flashcard-note-path" title={notePath(note)} onClick={() => onOpenNote(note.id)}>{notePath(note)}</button> : <small>Brak notatki</small>}<small>{card.suspended ? 'wstrzymana · ' : ''}{card.tags?.length ? `${card.tags.join(', ')} · ` : ''}{`${FLASHCARD_STUDY_MODES.find(mode => mode.value === (card.studyMode ?? 'flip'))?.label ?? 'Pokaż odpowiedź'} · `}{card.dueAt <= now ? 'do powtórzenia' : `następna: ${new Intl.DateTimeFormat('pl-PL', { dateStyle: 'medium' }).format(card.dueAt)}`}{card.kind === 'cloze' ? ' · luka' : card.kind === 'image-occlusion' ? ' · zakrywanie obrazu' : card.kind === 'sequence' ? ' · kolejność' : card.kind === 'numeric' ? ' · liczby' : card.kind === 'audio' ? ' · audio' : card.kind === 'video' ? ' · wideo' : ''}</small></div>{cardAiResults[card.id] && <FlashcardCardAiResultView result={cardAiResults[card.id]!} onDismiss={() => setCardAiResults(current => { const next = { ...current }; delete next[card.id]; return next })} />}</div>
+              <div className="flashcard-row-actions"><button type="button" className="icon-button" aria-label="Edytuj fiszkę" title="Edytuj" onClick={() => beginEdit(card)}><Pencil size={15} /></button><details className="flashcard-row-more"><summary>Więcej<ChevronDown size={12} aria-hidden="true" /></summary><div className="flashcard-row-more-actions">{onAiAssist && <details className="flashcard-row-ai"><summary><Sparkles size={14} />AI</summary><div><button type="button" title="Tworzy błędne odpowiedzi do trybu nauki „Warianty odpowiedzi”." onClick={() => void runAi('distractors', card)}>Dystraktory</button><button type="button" title="Dodaje przykład i kontrprzykład wyjaśniający pojęcie z fiszki." onClick={() => void runAi('example', card)}>Przykład i kontrprzykład</button><button type="button" title="Dodaje mnemotechnikę, która ma pomóc zapamiętać odpowiedź." onClick={() => void runAi('mnemonic', card)}>Skojarzenie</button><label title="Przeredagowuje pytanie i odpowiedź na wybrany poziom trudności.">Poziom<select aria-label="Poziom trudności fiszki" value={card.difficulty ?? 'intermediate'} onChange={event => void runAi('difficulty', card, event.target.value)}><option value="beginner">Początkujący</option><option value="intermediate">Średni</option><option value="advanced">Zaawansowany</option></select></label></div></details>}{onRegenerate && card.kind === 'basic' && <button type="button" className="icon-button" aria-label="Popraw fiszkę przy pomocy AI" title="Popraw przy pomocy AI" disabled={Boolean(regeneratingId)} onClick={() => void regenerate(card)}>{regeneratingId === card.id ? <Sparkles className="spin" size={15} /> : <Sparkles size={15} />}</button>}<button type="button" className="icon-button" aria-label={card.suspended ? 'Wznów fiszkę' : 'Wstrzymaj fiszkę'} title={card.suspended ? 'Wznów fiszkę' : 'Wstrzymaj fiszkę'} onClick={() => onToggleSuspend(card.id)}>{card.suspended ? <Play size={15} /> : <Pause size={15} />}</button><label className="flashcard-postpone-mini"><Clock3 size={13} /><select aria-label="Odłóż fiszkę" defaultValue="" onChange={event => { postpone(card.id, event.target.value); event.target.value = '' }}><option value="" disabled>Odłóż</option><option value="hour">+1 godz.</option><option value="day">Jutro</option><option value="week">+7 dni</option><option value="month">+30 dni</option></select></label><label className="flashcard-date-mini"><input aria-label="Ustaw dokładny termin powtórki" type="datetime-local" value={dateTimeLocal(card.dueAt)} onChange={event => setManualDue(card.id, event.target.value)} /></label><button type="button" className="icon-button danger-icon" title="Usuń fiszkę" aria-label="Usuń fiszkę" onClick={() => onDelete(card)}><X size={15} /></button></div></details></div>
             </>}
           </article>
         })}{!visibleCards.length && <p className="flashcard-list-empty">Nie ma kart pasujących do wyszukiwania i wybranych filtrów.</p>}</div>

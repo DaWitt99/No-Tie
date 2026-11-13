@@ -1,4 +1,4 @@
-import { useMemo, useRef, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import { Check, LoaderCircle, Maximize2, Minimize2, Plus, Sparkles, Trash2, X } from 'lucide-react'
 import { FLASHCARD_STUDY_MODES, type Flashcard, type FlashcardStudyMode, type Note, type NoteAttachment } from './types'
 import { imageAttachmentToPngBase64, streamOllamaMessage } from './ollama'
@@ -12,6 +12,14 @@ type ParsedFlashcard = Omit<FlashcardDraft, 'id' | 'selectedMode'>
 const MAX_AI_CONTEXT_IMAGES = 20
 const MAX_AI_NOTE_TEXT = 28_000
 const MAX_AI_ATTACHMENT_TEXT = 14_000
+
+function formatTaskDuration(milliseconds: number) {
+  const totalSeconds = Math.max(0, Math.floor(milliseconds / 1000))
+  const seconds = String(totalSeconds % 60).padStart(2, '0')
+  const minutes = String(Math.floor(totalSeconds / 60) % 60).padStart(2, '0')
+  const hours = Math.floor(totalSeconds / 3600)
+  return hours ? `${hours}:${minutes}:${seconds}` : `${minutes}:${seconds}`
+}
 
 const toolLabels: Record<AiNoteTool, string> = {
   summary: 'Podsumowanie i konspekt',
@@ -58,7 +66,7 @@ function parseFlashcards(value: string, existingQuestions: readonly string[] = [
       const variant = raw && typeof raw === 'object' ? raw as Record<string, unknown> : {}
       const question = typeof variant.question === 'string' ? variant.question.trim() : legacyQuestion
       const answer = typeof variant.answer === 'string' ? variant.answer.trim() : legacyAnswer
-      if (!question || !answer) return null
+      if (!question || (!answer && mode !== 'true-false')) return null
       const distractors = Array.isArray(variant.distractors) ? variant.distractors.filter((item): item is string => typeof item === 'string' && item.trim().length > 0).map(item => item.trim()).slice(0, 8) : []
       const truthValue = variant.correct ?? variant.isTrue
       if (mode === 'true-false' && hasStructuredVariants && typeof truthValue !== 'boolean') return null
@@ -110,15 +118,25 @@ export function AiNoteToolsDialog({ kind, note, attachments, existingQuestions =
   const [flashcardCount, setFlashcardCount] = useState(12)
   const [promptPreset, setPromptPreset] = useState<keyof typeof flashcardPromptPresets | 'custom'>('balanced')
   const [busy, setBusy] = useState(false)
+  const [taskStartedAt, setTaskStartedAt] = useState<number | null>(null)
+  const [taskFinishedAt, setTaskFinishedAt] = useState<number | null>(null)
+  const [taskNow, setTaskNow] = useState(() => Date.now())
   const [minimized, setMinimized] = useState(false)
   const [error, setError] = useState('')
   const [created, setCreated] = useState(false)
   const nextCardId = useRef(0)
   const isFlashcards = toolKind === 'flashcards'
+  useEffect(() => {
+    if (taskStartedAt === null || taskFinishedAt !== null) return
+    setTaskNow(Date.now())
+    const timer = window.setInterval(() => setTaskNow(Date.now()), 1000)
+    return () => window.clearInterval(timer)
+  }, [taskStartedAt, taskFinishedAt])
+  const taskDuration = taskStartedAt === null ? '' : formatTaskDuration((taskFinishedAt ?? taskNow) - taskStartedAt)
   const hasIncompleteCard = flashcards.some(card => {
     if (!card.selectedMode) return true
     const selected = card.variants[card.selectedMode]
-    return !selected.question.trim() || !selected.answer.trim() || (card.selectedMode === 'multiple-choice' && selected.distractors.length < 2)
+    return !selected.question.trim() || (card.selectedMode !== 'true-false' && !selected.answer.trim()) || (card.selectedMode === 'multiple-choice' && (selected.distractors.length < 2 || selected.distractors.some(option => !option.trim())))
   })
   const hasDuplicateCard = (() => {
     const seen = new Set(existingQuestions.map(normalizeQuestion).filter(Boolean))
@@ -133,6 +151,10 @@ export function AiNoteToolsDialog({ kind, note, attachments, existingQuestions =
 
   async function generate() {
     if (!model || busy) return
+    const startedAt = Date.now()
+    setTaskStartedAt(startedAt)
+    setTaskFinishedAt(null)
+    setTaskNow(startedAt)
     setBusy(true)
     setError('')
     if (!isFlashcards) {
@@ -142,10 +164,10 @@ export function AiNoteToolsDialog({ kind, note, attachments, existingQuestions =
     let result = ''
     const flashcardInstructions = [
       `Utwórz ${flashcardCount} wysokiej jakości zagadnień do nauki na podstawie wyłącznie materiału źródłowego. Dla każdego zagadnienia przygotuj dokładnie pięć wariantów tej samej wiedzy: standardowy, wielokrotnego wyboru, prawda/fałsz, opisowy i egzaminacyjny na czas. Przygotuj wskazaną liczbę zagadnień, jeśli materiał zawiera wystarczająco dużo informacji; w przeciwnym razie utwórz mniej.`,
-      'Każdy wariant ma sprawdzać tę samą konkretną, istotną rzecz, ale w formie odpowiedniej dla danego trybu. Pytania muszą być jasne bez zgadywania kontekstu, a odpowiedzi krótkie, precyzyjne i zgodne wyłącznie ze źródłem.',
+      'Każdy wariant ma sprawdzać tę samą konkretną, istotną rzecz, ale w formie odpowiedniej dla danego trybu. Pytania muszą być jasne bez zgadywania kontekstu, a odpowiedzi wzorcowe krótkie, precyzyjne i zgodne wyłącznie ze źródłem. Wariant prawda/fałsz nie ma pola z odpowiedzią.',
       'Wybieraj ważne pojęcia, zależności, przyczyny i skutki, warunki, różnice, etapy procesów oraz informacje, które łatwo pomylić. Unikaj pytań ogólnikowych, banalnych, wieloczęściowych i powtarzających tę samą wiedzę.',
       'Nie dopowiadaj faktów spoza materiału. Jeśli źródło nie zawiera dość treści na wiele dobrych fiszek, utwórz mniej zamiast wypełniać listę słabymi kartami.',
-      'Zwróć wyłącznie poprawną tablicę JSON. Każdy element ma mieć obiekt `variants` z dokładnie pięcioma kluczami: `flip`, `multipleChoice`, `trueFalse`, `explain`, `timedExam`. Każdy wariant ma pola string `question` i `answer`. `multipleChoice` ma dodatkowo tablicę trzech stringów `distractors` zawierającą wiarygodne błędne odpowiedzi. `trueFalse.question` ma być samodzielnym stwierdzeniem, `trueFalse.answer` krótkim uzasadnieniem, a `trueFalse.correct` wartością boolean określającą, czy stwierdzenie jest prawdziwe. `explain` ma wymagać samodzielnego opisania odpowiedzi. `timedExam` ma być krótkim pytaniem egzaminacyjnym z konkretną odpowiedzią wzorcową. Nie dodawaj Markdown ani tekstu przed lub po JSON.',
+      'Zwróć wyłącznie poprawną tablicę JSON. Każdy element ma mieć obiekt `variants` z dokładnie pięcioma kluczami: `flip`, `multipleChoice`, `trueFalse`, `explain`, `timedExam`. Każdy wariant poza `trueFalse` ma pola string `question` i `answer`. `multipleChoice` ma dodatkowo tablicę trzech stringów `distractors` zawierającą wiarygodne błędne odpowiedzi; poprawna odpowiedź to pole `answer`. `trueFalse` ma mieć `question` jako samodzielne stwierdzenie oraz `correct` jako wartość boolean określającą jego prawdziwość. Nie dodawaj pola odpowiedzi do `trueFalse`. `explain` ma wymagać samodzielnego opisania odpowiedzi. `timedExam` ma być krótkim pytaniem egzaminacyjnym z konkretną odpowiedzią wzorcową. Nie dodawaj Markdown ani tekstu przed lub po JSON.',
       extraGuidance.trim() ? `DODATKOWE WSKAZÓWKI UŻYTKOWNIKA:\n${extraGuidance.trim()}` : '',
     ].filter(Boolean).join('\n\n')
     const instructions: Record<AiNoteTool, string> = {
@@ -231,7 +253,11 @@ export function AiNoteToolsDialog({ kind, note, attachments, existingQuestions =
       }
     } catch (generationError) {
       setError(generationError instanceof Error ? generationError.message : 'Nie udało się wygenerować treści.')
-    } finally { setBusy(false) }
+    } finally {
+      setBusy(false)
+      setTaskFinishedAt(Date.now())
+      window.setTimeout(() => setTaskStartedAt(current => current === startedAt ? null : current), 3500)
+    }
   }
 
   function accept() {
@@ -242,7 +268,8 @@ export function AiNoteToolsDialog({ kind, note, attachments, existingQuestions =
         const selectedMode = card.selectedMode
         if (!selectedMode) continue
         const variant = card.variants[selectedMode]
-        onCreateFlashcard(sourceNote.id, variant.question.trim(), variant.answer.trim(), {
+        const answer = selectedMode === 'true-false' ? variant.trueFalseAnswer ? 'Prawda' : 'Fałsz' : variant.answer.trim()
+        onCreateFlashcard(sourceNote.id, variant.question.trim(), answer, {
           studyMode: selectedMode,
           aiDistractors: selectedMode === 'multiple-choice' ? variant.distractors : undefined,
           trueFalseAnswer: selectedMode === 'true-false' ? variant.trueFalseAnswer : undefined,
@@ -265,13 +292,47 @@ export function AiNoteToolsDialog({ kind, note, attachments, existingQuestions =
     setCreated(false)
   }
 
-  function updateDistractors(id: number, mode: FlashcardStudyMode, value: string) {
-    setFlashcards(current => current.map(card => card.id === id ? { ...card, variants: { ...card.variants, [mode]: { ...card.variants[mode], distractors: value.split('\n').map(item => item.trim()).filter(Boolean) } } } : card))
+  function updateTrueFalseAnswer(id: number, mode: FlashcardStudyMode, value: boolean) {
+    setFlashcards(current => current.map(card => card.id === id ? { ...card, variants: { ...card.variants, [mode]: { ...card.variants[mode], trueFalseAnswer: value } } } : card))
     setCreated(false)
   }
 
-  function updateTrueFalseAnswer(id: number, mode: FlashcardStudyMode, value: boolean) {
-    setFlashcards(current => current.map(card => card.id === id ? { ...card, variants: { ...card.variants, [mode]: { ...card.variants[mode], trueFalseAnswer: value } } } : card))
+  function updateMultipleChoiceOption(id: number, index: number, value: string) {
+    setFlashcards(current => current.map(card => {
+      if (card.id !== id) return card
+      const variant = card.variants['multiple-choice']
+      const choices = [variant.answer, ...variant.distractors]
+      choices[index] = value
+      return { ...card, variants: { ...card.variants, 'multiple-choice': { ...variant, answer: choices[0] ?? '', distractors: choices.slice(1) } } }
+    }))
+    setCreated(false)
+  }
+
+  function markCorrectMultipleChoiceOption(id: number, index: number) {
+    setFlashcards(current => current.map(card => {
+      if (card.id !== id) return card
+      const variant = card.variants['multiple-choice']
+      const choices = [variant.answer, ...variant.distractors]
+      const [correct] = choices.splice(index, 1)
+      return { ...card, variants: { ...card.variants, 'multiple-choice': { ...variant, answer: correct ?? '', distractors: choices } } }
+    }))
+    setCreated(false)
+  }
+
+  function addMultipleChoiceOption(id: number) {
+    setFlashcards(current => current.map(card => card.id === id ? { ...card, variants: { ...card.variants, 'multiple-choice': { ...card.variants['multiple-choice'], distractors: [...card.variants['multiple-choice'].distractors, ''] } } } : card))
+    setCreated(false)
+  }
+
+  function removeMultipleChoiceOption(id: number, index: number) {
+    setFlashcards(current => current.map(card => {
+      if (card.id !== id) return card
+      const variant = card.variants['multiple-choice']
+      const choices = [variant.answer, ...variant.distractors]
+      if (choices.length <= 2) return card
+      choices.splice(index, 1)
+      return { ...card, variants: { ...card.variants, 'multiple-choice': { ...variant, answer: choices[0] ?? '', distractors: choices.slice(1) } } }
+    }))
     setCreated(false)
   }
 
@@ -284,9 +345,9 @@ export function AiNoteToolsDialog({ kind, note, attachments, existingQuestions =
   }
 
   if (minimized) return <aside className="ai-note-tools-minimized" aria-label="Zminimalizowany generator fiszek">
-    <div className="ai-note-tools-minimized-status" role="status" aria-live="polite">
+    <div className="ai-note-tools-minimized-status">
       <span className="ai-note-tools-minimized-mark">{busy ? <LoaderCircle className="spin" size={16} /> : <Sparkles size={16} />}</span>
-      <span><strong>{busy ? 'Generuję fiszki…' : error ? 'Generator fiszek — błąd' : created ? `${flashcards.length} fiszek dodano do puli` : flashcards.length ? `${flashcards.length} fiszek gotowych do edycji` : 'Generator fiszek'}</strong><small>{sourceNote.title || 'Bez tytułu'}</small></span>
+      <span><strong role="status" aria-live="polite">{busy ? 'AI pracuje' : error ? 'AI zakończyło się błędem' : taskStartedAt !== null ? 'AI zakończyło zadanie' : created ? `${flashcards.length} fiszek dodano do puli` : flashcards.length ? `${flashcards.length} fiszek gotowych do edycji` : 'Generator fiszek'}</strong>{taskStartedAt !== null && <small aria-live="off">Generowanie fiszek · {busy ? 'trwa' : 'czas'}: {taskDuration}</small>}<small>{sourceNote.title || 'Bez tytułu'}</small></span>
     </div>
     <div className="ai-note-tools-minimized-actions">
       <button type="button" className="button primary" onClick={() => setMinimized(false)}><Maximize2 size={14} />Wróć do generatora</button>
@@ -306,7 +367,7 @@ export function AiNoteToolsDialog({ kind, note, attachments, existingQuestions =
             <label><span>Doprecyzuj prompt</span><textarea aria-label="Dodatkowe wskazówki do fiszek" value={extraGuidance} onChange={event => { setExtraGuidance(event.target.value); setPromptPreset('custom') }} placeholder="Np. skup się na pojęciach i różnicach, zadawaj pytania wymagające krótkiego wyjaśnienia…" disabled={busy} /></label>
             <small>Model przygotuje najwyżej 50 zagadnień z pięcioma wariantami każde; do puli trafi wybrany wariant.</small>
           </div>
-          {busy && <p className="ai-note-tools-progress" role="status"><LoaderCircle className="spin" size={15} />{sourceLabel ? `Czytam ${sourceLabel} i przygotowuję fiszki. ` : 'Czytam notatkę i jej załączniki, a potem przygotuję fiszki. '}Możesz zminimalizować to okno i wrócić później.</p>}
+          {taskStartedAt !== null && <p className="ai-note-tools-progress"><span className="ai-note-tools-progress-mark">{busy ? <LoaderCircle className="spin" size={15} /> : <Check size={15} />}</span><span><strong role="status" aria-live="polite">{busy ? 'AI pracuje' : 'AI zakończyło zadanie'}</strong><small aria-live="off">Generowanie fiszek · {busy ? 'trwa' : 'czas'}: {taskDuration}</small>{busy && <small>{sourceLabel ? `Czytam ${sourceLabel} i przygotowuję fiszki. ` : 'Czytam notatkę i jej załączniki, a potem przygotuję fiszki. '}Możesz zminimalizować to okno i wrócić później.</small>}</span></p>}
           {flashcards.length > 0 && <section className="ai-note-tools-flashcards" aria-label="Edytuj wygenerowane fiszki">
             <div className="ai-note-tools-cards-heading"><div><h3>Wybierz wariant fiszki</h3><p>Dla każdego zagadnienia wybierz formę nauki i popraw jej treść.</p></div><span>{flashcards.length}</span></div>
             <div className="ai-note-tools-card-list">{flashcards.map((card, index) => <article className="ai-note-tools-card" key={card.id}>
@@ -319,8 +380,7 @@ export function AiNoteToolsDialog({ kind, note, attachments, existingQuestions =
                 const variant = card.variants[selectedMode]
                 return <>
                   <label><span>{selectedMode === 'true-false' ? 'Stwierdzenie' : 'Pytanie'}</span><textarea value={variant.question} onChange={event => updateVariant(card.id, selectedMode, 'question', event.target.value)} disabled={busy || created} /></label>
-                  <label><span>{selectedMode === 'true-false' ? 'Uzasadnienie odpowiedzi' : 'Odpowiedź wzorcowa'}</span><textarea value={variant.answer} onChange={event => updateVariant(card.id, selectedMode, 'answer', event.target.value)} disabled={busy || created} /></label>
-                  {selectedMode === 'multiple-choice' && <label><span>Błędne warianty odpowiedzi, po jednym w wierszu</span><textarea value={variant.distractors.join('\n')} onChange={event => updateDistractors(card.id, selectedMode, event.target.value)} disabled={busy || created} /></label>}
+                  {selectedMode === 'multiple-choice' ? <div className="ai-note-tools-answer-options" role="radiogroup" aria-label="Opcje odpowiedzi, zaznacz poprawną"><p>Zaznacz poprawną odpowiedź przyciskiem wyboru.</p>{[variant.answer, ...variant.distractors].map((choice, choiceIndex) => <div className="ai-note-tools-answer-option" key={choiceIndex}><label><input type="radio" name={`flashcard-${card.id}-correct`} aria-label={`Odpowiedź ${choiceIndex + 1} jest poprawna`} checked={choiceIndex === 0} onChange={() => markCorrectMultipleChoiceOption(card.id, choiceIndex)} disabled={busy || created} /><span>{choiceIndex === 0 ? 'Poprawna' : `Odpowiedź ${choiceIndex + 1}`}</span></label><input value={choice} onChange={event => updateMultipleChoiceOption(card.id, choiceIndex, event.target.value)} placeholder={`Odpowiedź ${choiceIndex + 1}`} disabled={busy || created} /><button type="button" className="icon-button danger-icon" aria-label={`Usuń odpowiedź ${choiceIndex + 1}`} disabled={busy || created || variant.distractors.length < 2} onClick={() => removeMultipleChoiceOption(card.id, choiceIndex)}><X size={14} /></button></div>)}<button type="button" className="link-button" disabled={busy || created || variant.distractors.length >= 7} onClick={() => addMultipleChoiceOption(card.id)}><Plus size={13} />Dodaj wariant odpowiedzi</button></div> : selectedMode !== 'true-false' && <label><span>Odpowiedź wzorcowa</span><textarea value={variant.answer} onChange={event => updateVariant(card.id, selectedMode, 'answer', event.target.value)} disabled={busy || created} /></label>}
                   {selectedMode === 'true-false' && <label><span>Poprawna ocena stwierdzenia</span><select value={String(variant.trueFalseAnswer)} onChange={event => updateTrueFalseAnswer(card.id, selectedMode, event.target.value === 'true')} disabled={busy || created}><option value="true">Prawda</option><option value="false">Fałsz</option></select></label>}
                 </>
               })() : <p className="ai-note-tools-validation">Wybierz wariant, który chcesz dodać do puli.</p>}
