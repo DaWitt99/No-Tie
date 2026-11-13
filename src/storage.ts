@@ -3,7 +3,7 @@ import { documentDir, join } from '@tauri-apps/api/path'
 import { exists, mkdir, readDir, readFile, readTextFile, remove, rename, stat, writeFile, writeTextFile } from '@tauri-apps/plugin-fs'
 import { markdownToNote, noteToMarkdown, sanitizeSvg } from './content'
 import { fileFingerprint } from './fileFingerprint'
-import type { Flashcard, Note, NoteAsset, NoteAttachment, NoteAttachmentHistory, NoteAttachmentReference, NoteTemplate, NoteVersion, ReviewSession, ReviewSessionStatus, SavedSearch, TrashEntry } from './types'
+import type { Flashcard, FlashcardTrashEntry, Note, NoteAsset, NoteAttachment, NoteAttachmentHistory, NoteAttachmentReference, NoteTemplate, NoteVersion, ReviewSession, ReviewSessionStatus, SavedSearch, TrashEntry } from './types'
 
 const DATABASE = 'no-tie-notes'
 const DATABASE_VERSION = 4
@@ -335,14 +335,34 @@ function normalizeFlashcards(value: unknown): Flashcard[] {
     const imageOcclusion = card.imageOcclusion && typeof card.imageOcclusion.imageDataUrl === 'string' && Array.isArray(card.imageOcclusion.regions)
       ? { imageDataUrl: card.imageOcclusion.imageDataUrl, fileName: typeof card.imageOcclusion.fileName === 'string' ? card.imageOcclusion.fileName : 'obraz', regions: card.imageOcclusion.regions.flatMap(region => region && typeof region.id === 'string' && [region.x, region.y, region.width, region.height].every(value => typeof value === 'number' && Number.isFinite(value)) ? [{ id: region.id, x: Math.max(0, Math.min(1, region.x)), y: Math.max(0, Math.min(1, region.y)), width: Math.max(0, Math.min(1, region.width)), height: Math.max(0, Math.min(1, region.height)), label: typeof region.label === 'string' ? region.label : '' }] : []) }
       : undefined
+    const validKinds = ['basic', 'cloze', 'image-occlusion', 'sequence', 'numeric', 'audio', 'video']
+    const templateValues = ['definition', 'cause-effect', 'comparison', 'vocabulary', 'process', 'formula']
+    const numericAnswer = card.numericAnswer && Number.isFinite(card.numericAnswer.value) && Number.isFinite(card.numericAnswer.tolerance)
+      ? { value: card.numericAnswer.value, tolerance: Math.max(0, card.numericAnswer.tolerance), unit: typeof card.numericAnswer.unit === 'string' ? card.numericAnswer.unit.slice(0, 40) : '' }
+      : undefined
+    const mediaClip = card.mediaClip && typeof card.mediaClip.attachmentId === 'string' && Number.isFinite(card.mediaClip.startMs)
+      ? { attachmentId: card.mediaClip.attachmentId, startMs: Math.max(0, card.mediaClip.startMs), endMs: Number.isFinite(card.mediaClip.endMs) ? Math.max(card.mediaClip.startMs, card.mediaClip.endMs!) : undefined }
+      : undefined
     return [{
       id: card.id,
       noteId: card.noteId,
       question: card.question,
       answer: card.answer,
-      kind: card.kind === 'cloze' || card.kind === 'image-occlusion' ? card.kind : 'basic',
+      kind: validKinds.includes(card.kind ?? '') ? card.kind : 'basic',
+      template: templateValues.includes(card.template ?? '') ? card.template : undefined,
       tags: Array.isArray(card.tags) ? card.tags.filter((tag): tag is string => typeof tag === 'string') : [],
       imageOcclusion,
+      hints: Array.isArray(card.hints) ? card.hints.filter((hint): hint is string => typeof hint === 'string').slice(0, 10) : [],
+      answerVariants: Array.isArray(card.answerVariants) ? card.answerVariants.filter((answer): answer is string => typeof answer === 'string').slice(0, 20) : [],
+      sequenceItems: Array.isArray(card.sequenceItems) ? card.sequenceItems.filter((part): part is string => typeof part === 'string').slice(0, 40) : [],
+      numericAnswer,
+      mediaClip,
+      aiDistractors: Array.isArray(card.aiDistractors) ? card.aiDistractors.filter((item): item is string => typeof item === 'string').slice(0, 12) : [],
+      difficulty: card.difficulty === 'beginner' || card.difficulty === 'intermediate' || card.difficulty === 'advanced' ? card.difficulty : undefined,
+      example: typeof card.example === 'string' ? card.example.slice(0, 10_000) : undefined,
+      mnemonic: typeof card.mnemonic === 'string' ? card.mnemonic.slice(0, 10_000) : undefined,
+      relatedCardIds: Array.isArray(card.relatedCardIds) ? [...new Set(card.relatedCardIds.filter((id): id is string => typeof id === 'string' && id !== card.id))].slice(0, 100) : [],
+      glossaryTerms: Array.isArray(card.glossaryTerms) ? card.glossaryTerms.flatMap(item => item && typeof item.term === 'string' && typeof item.definition === 'string' ? [{ term: item.term.slice(0, 500), definition: item.definition.slice(0, 5000) }] : []).slice(0, 100) : [],
       suspended: card.suspended === true,
       dueAt: typeof card.dueAt === 'number' ? card.dueAt : Date.now(),
       intervalDays: typeof card.intervalDays === 'number' ? Math.max(0, card.intervalDays) : 0,
@@ -350,30 +370,41 @@ function normalizeFlashcards(value: unknown): Flashcard[] {
       repetitions: typeof card.repetitions === 'number' ? Math.max(0, card.repetitions) : 0,
       lapses: typeof card.lapses === 'number' ? Math.max(0, card.lapses) : 0,
       lastReviewedAt: typeof card.lastReviewedAt === 'number' ? card.lastReviewedAt : undefined,
-      reviewHistory: Array.isArray(card.reviewHistory) ? card.reviewHistory.flatMap(event => event && typeof event.at === 'number' && ['again', 'hard', 'good', 'easy'].includes(event.grade) ? [{ at: event.at, grade: event.grade as NonNullable<Flashcard['reviewHistory']>[number]['grade'] }] : []).slice(-500) : [],
+      reviewHistory: Array.isArray(card.reviewHistory) ? card.reviewHistory.flatMap(event => event && typeof event.at === 'number' && ['again', 'hard', 'good', 'easy'].includes(event.grade) ? [{ at: event.at, grade: event.grade as NonNullable<Flashcard['reviewHistory']>[number]['grade'], confidence: Number.isFinite(event.confidence) ? Math.max(1, Math.min(5, Math.round(event.confidence!))) : undefined, responseMs: Number.isFinite(event.responseMs) ? Math.max(0, event.responseMs!) : undefined }] : []).slice(-500) : [],
     }]
   })
 }
 
-type AdvancedData = { trash: TrashEntry[]; flashcards: Flashcard[] }
+function normalizeFlashcardTrash(value: unknown): FlashcardTrashEntry[] {
+  if (!Array.isArray(value)) return []
+  const cards = new Map(normalizeFlashcards(value.map((entry: unknown) => entry && typeof entry === 'object' ? (entry as Partial<FlashcardTrashEntry>).card : null)).map(card => [card.id, card]))
+  return value.flatMap((entry: unknown): FlashcardTrashEntry[] => {
+    if (!entry || typeof entry !== 'object') return []
+    const item = entry as Partial<FlashcardTrashEntry>
+    const card = item.card && typeof item.card.id === 'string' ? cards.get(item.card.id) : undefined
+    return card && typeof item.id === 'string' && typeof item.deletedAt === 'number' ? [{ id: item.id, deletedAt: item.deletedAt, card }] : []
+  }).sort((a, b) => b.deletedAt - a.deletedAt)
+}
+
+type AdvancedData = { trash: TrashEntry[]; flashcards: Flashcard[]; flashcardTrash: FlashcardTrashEntry[] }
 
 async function getAdvancedData(): Promise<AdvancedData> {
   if (!usesNativeFiles) {
     const data = await withStore<unknown>('settings', 'readonly', store => store.get('advancedData'))
-    if (!data || typeof data !== 'object') return { trash: [], flashcards: [] }
+    if (!data || typeof data !== 'object') return { trash: [], flashcards: [], flashcardTrash: [] }
     const record = data as Partial<AdvancedData>
-    return { trash: normalizeTrashEntries(record.trash), flashcards: normalizeFlashcards(record.flashcards) }
+    return { trash: normalizeTrashEntries(record.trash), flashcards: normalizeFlashcards(record.flashcards), flashcardTrash: normalizeFlashcardTrash(record.flashcardTrash) }
   }
   const path = await join(await getNativeNotesRoot(), ADVANCED_DATA_FILE)
-  if (!await exists(path)) return { trash: [], flashcards: [] }
+  if (!await exists(path)) return { trash: [], flashcards: [], flashcardTrash: [] }
   try {
     const data = JSON.parse(await readTextFile(path)) as Partial<AdvancedData>
-    return { trash: normalizeTrashEntries(data.trash), flashcards: normalizeFlashcards(data.flashcards) }
-  } catch { return { trash: [], flashcards: [] } }
+    return { trash: normalizeTrashEntries(data.trash), flashcards: normalizeFlashcards(data.flashcards), flashcardTrash: normalizeFlashcardTrash(data.flashcardTrash) }
+  } catch { return { trash: [], flashcards: [], flashcardTrash: [] } }
 }
 
 async function saveAdvancedData(data: AdvancedData): Promise<void> {
-  const normalized = { trash: normalizeTrashEntries(data.trash), flashcards: normalizeFlashcards(data.flashcards) }
+  const normalized = { trash: normalizeTrashEntries(data.trash), flashcards: normalizeFlashcards(data.flashcards), flashcardTrash: normalizeFlashcardTrash(data.flashcardTrash) }
   if (!usesNativeFiles) {
     await withStore<IDBValidKey>('settings', 'readwrite', store => store.put(normalized, 'advancedData'))
     return
@@ -381,10 +412,23 @@ async function saveAdvancedData(data: AdvancedData): Promise<void> {
   await writeTextFile(await join(await getNativeNotesRoot(), ADVANCED_DATA_FILE), JSON.stringify(normalized, null, 2))
 }
 
+let advancedDataSaveQueue: Promise<void> = Promise.resolve()
+function updateAdvancedData(update: (current: AdvancedData) => AdvancedData): Promise<void> {
+  const operation = advancedDataSaveQueue.catch(() => undefined).then(async () => {
+    const current = await getAdvancedData()
+    await saveAdvancedData(update(current))
+  })
+  advancedDataSaveQueue = operation
+  return operation
+}
+
 export async function getTrashEntries(): Promise<TrashEntry[]> { return (await getAdvancedData()).trash }
-export async function saveTrashEntries(trash: TrashEntry[]): Promise<void> { const current = await getAdvancedData(); return saveAdvancedData({ ...current, trash }) }
+export function saveTrashEntries(trash: TrashEntry[]): Promise<void> { return updateAdvancedData(current => ({ ...current, trash })) }
 export async function getFlashcards(): Promise<Flashcard[]> { return (await getAdvancedData()).flashcards }
-export async function saveFlashcards(flashcards: Flashcard[]): Promise<void> { const current = await getAdvancedData(); return saveAdvancedData({ ...current, flashcards }) }
+export function saveFlashcards(flashcards: Flashcard[]): Promise<void> { return updateAdvancedData(current => ({ ...current, flashcards })) }
+export async function getFlashcardTrash(): Promise<FlashcardTrashEntry[]> { return (await getAdvancedData()).flashcardTrash }
+export function saveFlashcardTrash(flashcardTrash: FlashcardTrashEntry[]): Promise<void> { return updateAdvancedData(current => ({ ...current, flashcardTrash })) }
+export function saveFlashcardsAndTrash(flashcards: Flashcard[], flashcardTrash: FlashcardTrashEntry[]): Promise<void> { return updateAdvancedData(current => ({ ...current, flashcards, flashcardTrash })) }
 
 export type AutoBackupInfo = { fileName: string; createdAt: number; size: number }
 type StoredAutoBackup = AutoBackupInfo & { bytes: Uint8Array }
@@ -712,6 +756,7 @@ export async function getAssetsForNote(noteId: string): Promise<NoteAsset[]> {
 const attachmentTypes: Record<string, string> = {
   png: 'image/png', jpg: 'image/jpeg', jpeg: 'image/jpeg', gif: 'image/gif', webp: 'image/webp', avif: 'image/avif',
   pdf: 'application/pdf', mp3: 'audio/mpeg', m4a: 'audio/mp4', wav: 'audio/wav', ogg: 'audio/ogg', webm: 'audio/webm', aac: 'audio/aac', flac: 'audio/flac', opus: 'audio/opus', '3gp': 'audio/3gpp', amr: 'audio/amr',
+  mp4: 'video/mp4', m4v: 'video/mp4', mov: 'video/quicktime', mkv: 'video/x-matroska', avi: 'video/x-msvideo', mpeg: 'video/mpeg', mpg: 'video/mpeg',
 }
 
 function attachmentMimeType(fileName: string) {
@@ -734,7 +779,7 @@ async function readNativeAttachmentTranscripts(directory: string): Promise<Recor
   } catch { return {} }
 }
 
-type AttachmentExtraMetadata = Pick<NoteAttachment, 'extractedText' | 'transcriptSegments' | 'pdfAnnotations'>
+type AttachmentExtraMetadata = Partial<Pick<NoteAttachment, 'extractedText' | 'transcriptSegments' | 'pdfAnnotations' | 'mimeType'>>
 async function readNativeAttachmentMetadata(directory: string): Promise<Record<string, AttachmentExtraMetadata>> {
   const path = await join(directory, NOTE_ATTACHMENT_METADATA_FILE)
   if (!await exists(path)) return {}
@@ -792,10 +837,11 @@ async function readNativeAttachments(noteId: string, directory: string): Promise
   const metadata = await readNativeAttachmentMetadata(directory)
   const attachments: NoteAttachment[] = []
   for (const entry of await readDir(assetsDirectory)) {
-    if (!entry.isFile || entry.name.toLowerCase().endsWith('.svg') || !attachmentMimeType(entry.name).startsWith('image/') && attachmentMimeType(entry.name) !== 'application/pdf' && !attachmentMimeType(entry.name).startsWith('audio/')) continue
+    const storedMimeType = metadata[entry.name]?.mimeType ?? attachmentMimeType(entry.name)
+    if (!entry.isFile || entry.name.toLowerCase().endsWith('.svg') || !storedMimeType.startsWith('image/') && storedMimeType !== 'application/pdf' && !storedMimeType.startsWith('audio/') && !storedMimeType.startsWith('video/')) continue
     try {
       const bytes = await readFile(await join(assetsDirectory, entry.name))
-      const mimeType = attachmentMimeType(entry.name)
+      const mimeType = metadata[entry.name]?.mimeType ?? attachmentMimeType(entry.name)
       attachments.push({ ...metadata[entry.name], id: `${noteId}:${entry.name}`, noteId, fileName: entry.name, mimeType, dataUrl: `data:${mimeType};base64,${bytesToBase64(bytes)}`, size: bytes.byteLength, contentHash: fileFingerprint(bytes), transcript: transcripts[entry.name] })
     } catch { /* Skip unreadable user attachments and keep the rest of the note library available. */ }
   }
@@ -905,7 +951,7 @@ export async function saveAttachment(attachment: NoteAttachment): Promise<IDBVal
   const fileName = safeAttachmentFileName(attachment.fileName)
   await writeFile(await join(assetsDirectory, fileName), dataUrlBytes(attachment.dataUrl))
   if (attachment.transcript !== undefined) await writeNativeAttachmentTranscript(directory, fileName, attachment.transcript)
-  if (attachment.extractedText !== undefined || attachment.transcriptSegments !== undefined || attachment.pdfAnnotations !== undefined) await writeNativeAttachmentMetadata(directory, fileName, { extractedText: attachment.extractedText, transcriptSegments: attachment.transcriptSegments, pdfAnnotations: attachment.pdfAnnotations })
+  await writeNativeAttachmentMetadata(directory, fileName, { mimeType: attachment.mimeType, extractedText: attachment.extractedText, transcriptSegments: attachment.transcriptSegments, pdfAnnotations: attachment.pdfAnnotations })
 }
 
 export async function saveAttachmentMetadata(attachment: NoteAttachment, metadata: AttachmentExtraMetadata): Promise<void> {

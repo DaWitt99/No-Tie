@@ -57,7 +57,8 @@ export type TrashEntry = {
   attachments: NoteAttachment[]
 }
 
-export type FlashcardKind = 'basic' | 'cloze' | 'image-occlusion'
+export type FlashcardKind = 'basic' | 'cloze' | 'image-occlusion' | 'sequence' | 'numeric' | 'audio' | 'video'
+export type FlashcardTemplate = 'definition' | 'cause-effect' | 'comparison' | 'vocabulary' | 'process' | 'formula'
 
 export type FlashcardOcclusionRegion = { id: string; x: number; y: number; width: number; height: number; label: string }
 export type FlashcardImageOcclusion = { imageDataUrl: string; fileName: string; regions: FlashcardOcclusionRegion[] }
@@ -65,6 +66,8 @@ export type FlashcardImageOcclusion = { imageDataUrl: string; fileName: string; 
 export type FlashcardReviewEvent = {
   at: number
   grade: 'again' | 'hard' | 'good' | 'easy'
+  confidence?: number
+  responseMs?: number
 }
 
 export type Flashcard = {
@@ -73,8 +76,20 @@ export type Flashcard = {
   question: string
   answer: string
   kind?: FlashcardKind
+  template?: FlashcardTemplate
   tags?: string[]
   imageOcclusion?: FlashcardImageOcclusion
+  hints?: string[]
+  answerVariants?: string[]
+  sequenceItems?: string[]
+  numericAnswer?: { value: number; tolerance: number; unit: string }
+  mediaClip?: { attachmentId: string; startMs: number; endMs?: number }
+  aiDistractors?: string[]
+  difficulty?: 'beginner' | 'intermediate' | 'advanced'
+  example?: string
+  mnemonic?: string
+  relatedCardIds?: string[]
+  glossaryTerms?: { term: string; definition: string }[]
   suspended?: boolean
   dueAt: number
   intervalDays: number
@@ -84,6 +99,8 @@ export type Flashcard = {
   lastReviewedAt?: number
   reviewHistory?: FlashcardReviewEvent[]
 }
+
+export type FlashcardTrashEntry = { id: string; deletedAt: number; card: Flashcard }
 
 export type SavedSearch = {
   id: string
@@ -121,5 +138,6 @@ export type WorkspaceBackup = {
   noteTemplates: NoteTemplate[]
   folderColors: Record<string, string>
   flashcards?: Flashcard[]
+  flashcardTrash?: FlashcardTrashEntry[]
   trash?: TrashEntry[]
 }

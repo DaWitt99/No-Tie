@@ -2,7 +2,7 @@ import { invoke, isTauri } from '@tauri-apps/api/core'
 import { strFromU8, strToU8, unzipSync, zipSync } from 'fflate'
 import { markdownToNote, noteToMarkdown, sanitizeSvg } from './content'
 import { fileFingerprint } from './fileFingerprint'
-import type { Flashcard, Note, NoteAsset, NoteAttachment, NoteAttachmentHistory, NoteAttachmentReference, NoteTemplate, NoteVersion, ReviewSession, SavedSearch, TrashEntry, WorkspaceBackup } from './types'
+import type { Flashcard, FlashcardTrashEntry, Note, NoteAsset, NoteAttachment, NoteAttachmentHistory, NoteAttachmentReference, NoteTemplate, NoteVersion, ReviewSession, SavedSearch, TrashEntry, WorkspaceBackup } from './types'
 
 const NOTE_VERSIONS_FILE = '.no-tie-versions.json'
 const WORKSPACE_BACKUP_FILE = '.no-tie-workspace.json'
@@ -43,7 +43,7 @@ export function buildArchive(notes: Note[], assets: NoteAsset[], versions: NoteV
     })
     const transcripts = Object.fromEntries(attachments.filter(attachment => attachment.noteId === note.id && attachment.transcript?.trim()).map(attachment => [attachment.fileName, attachment.transcript]))
     if (Object.keys(transcripts).length) files[`${folder}/${ATTACHMENT_TRANSCRIPTS_FILE}`] = strToU8(JSON.stringify(transcripts, null, 2))
-    const attachmentMetadata = Object.fromEntries(attachments.filter(attachment => attachment.noteId === note.id && (attachment.extractedText || attachment.transcriptSegments?.length || attachment.pdfAnnotations?.length)).map(attachment => [attachment.fileName, { extractedText: attachment.extractedText, transcriptSegments: attachment.transcriptSegments, pdfAnnotations: attachment.pdfAnnotations }]))
+    const attachmentMetadata = Object.fromEntries(attachments.filter(attachment => attachment.noteId === note.id).map(attachment => [attachment.fileName, { mimeType: attachment.mimeType, extractedText: attachment.extractedText, transcriptSegments: attachment.transcriptSegments, pdfAnnotations: attachment.pdfAnnotations }]))
     if (Object.keys(attachmentMetadata).length) files[`${folder}/${ATTACHMENT_METADATA_FILE}`] = strToU8(JSON.stringify(attachmentMetadata, null, 2))
   })
   if (workspace) files[WORKSPACE_BACKUP_FILE] = strToU8(JSON.stringify(workspace, null, 2))
@@ -131,7 +131,28 @@ function parseWorkspaceBackup(bytes: Uint8Array): WorkspaceBackup {
     const imageOcclusion = card.imageOcclusion && typeof card.imageOcclusion.imageDataUrl === 'string' && Array.isArray(card.imageOcclusion.regions)
       ? { imageDataUrl: card.imageOcclusion.imageDataUrl, fileName: typeof card.imageOcclusion.fileName === 'string' ? card.imageOcclusion.fileName : 'obraz', regions: card.imageOcclusion.regions.flatMap(region => region && typeof region.id === 'string' && [region.x, region.y, region.width, region.height].every(value => typeof value === 'number' && Number.isFinite(value)) ? [{ id: region.id, x: Math.max(0, Math.min(1, region.x)), y: Math.max(0, Math.min(1, region.y)), width: Math.max(0, Math.min(1, region.width)), height: Math.max(0, Math.min(1, region.height)), label: typeof region.label === 'string' ? region.label : '' }] : []) }
       : undefined
-    return [{ id: card.id, noteId: card.noteId, question: card.question, answer: card.answer, kind: card.kind === 'cloze' || card.kind === 'image-occlusion' ? card.kind : 'basic', tags: Array.isArray(card.tags) ? card.tags.filter((tag): tag is string => typeof tag === 'string') : [], imageOcclusion, suspended: card.suspended === true, dueAt: typeof card.dueAt === 'number' ? card.dueAt : Date.now(), intervalDays: typeof card.intervalDays === 'number' ? card.intervalDays : 0, ease: typeof card.ease === 'number' ? card.ease : 2.5, repetitions: typeof card.repetitions === 'number' ? card.repetitions : 0, lapses: typeof card.lapses === 'number' ? card.lapses : 0, lastReviewedAt: typeof card.lastReviewedAt === 'number' ? card.lastReviewedAt : undefined, reviewHistory: Array.isArray(card.reviewHistory) ? card.reviewHistory.flatMap(event => event && typeof event.at === 'number' && ['again', 'hard', 'good', 'easy'].includes(event.grade) ? [{ at: event.at, grade: event.grade as NonNullable<Flashcard['reviewHistory']>[number]['grade'] }] : []).slice(-500) : [] }]
+    const kinds = ['basic', 'cloze', 'image-occlusion', 'sequence', 'numeric', 'audio', 'video']
+    const numericAnswer = card.numericAnswer && Number.isFinite(card.numericAnswer.value) && Number.isFinite(card.numericAnswer.tolerance) ? { value: card.numericAnswer.value, tolerance: Math.max(0, card.numericAnswer.tolerance), unit: typeof card.numericAnswer.unit === 'string' ? card.numericAnswer.unit : '' } : undefined
+    const mediaClip = card.mediaClip && typeof card.mediaClip.attachmentId === 'string' && Number.isFinite(card.mediaClip.startMs) ? { attachmentId: card.mediaClip.attachmentId, startMs: Math.max(0, card.mediaClip.startMs), endMs: Number.isFinite(card.mediaClip.endMs) ? Math.max(card.mediaClip.startMs, card.mediaClip.endMs!) : undefined } : undefined
+    return [{ id: card.id, noteId: card.noteId, question: card.question, answer: card.answer, kind: kinds.includes(card.kind ?? '') ? card.kind : 'basic', template: card.template, tags: Array.isArray(card.tags) ? card.tags.filter((tag): tag is string => typeof tag === 'string') : [], imageOcclusion, hints: Array.isArray(card.hints) ? card.hints.filter((hint): hint is string => typeof hint === 'string').slice(0, 10) : [], answerVariants: Array.isArray(card.answerVariants) ? card.answerVariants.filter((item): item is string => typeof item === 'string').slice(0, 20) : [], sequenceItems: Array.isArray(card.sequenceItems) ? card.sequenceItems.filter((item): item is string => typeof item === 'string').slice(0, 40) : [], numericAnswer, mediaClip, aiDistractors: Array.isArray(card.aiDistractors) ? card.aiDistractors.filter((item): item is string => typeof item === 'string').slice(0, 12) : [], difficulty: card.difficulty, example: typeof card.example === 'string' ? card.example : undefined, mnemonic: typeof card.mnemonic === 'string' ? card.mnemonic : undefined, relatedCardIds: Array.isArray(card.relatedCardIds) ? card.relatedCardIds.filter((id): id is string => typeof id === 'string') : [], glossaryTerms: Array.isArray(card.glossaryTerms) ? card.glossaryTerms.flatMap(item => item && typeof item.term === 'string' && typeof item.definition === 'string' ? [{ term: item.term, definition: item.definition }] : []) : [], suspended: card.suspended === true, dueAt: typeof card.dueAt === 'number' ? card.dueAt : Date.now(), intervalDays: typeof card.intervalDays === 'number' ? card.intervalDays : 0, ease: typeof card.ease === 'number' ? card.ease : 2.5, repetitions: typeof card.repetitions === 'number' ? card.repetitions : 0, lapses: typeof card.lapses === 'number' ? card.lapses : 0, lastReviewedAt: typeof card.lastReviewedAt === 'number' ? card.lastReviewedAt : undefined, reviewHistory: Array.isArray(card.reviewHistory) ? card.reviewHistory.flatMap(event => event && typeof event.at === 'number' && ['again', 'hard', 'good', 'easy'].includes(event.grade) ? [{ at: event.at, grade: event.grade as NonNullable<Flashcard['reviewHistory']>[number]['grade'], confidence: typeof event.confidence === 'number' ? Math.max(1, Math.min(5, Math.round(event.confidence))) : undefined, responseMs: typeof event.responseMs === 'number' ? Math.max(0, event.responseMs) : undefined }] : []).slice(-500) : [] }]
+  }) : []
+  const flashcardTrash: FlashcardTrashEntry[] = Array.isArray(source.flashcardTrash) ? source.flashcardTrash.flatMap(item => {
+    if (!item || typeof item !== 'object') return []
+    const entry = item as Partial<FlashcardTrashEntry>
+    const card = entry.card
+    if (typeof entry.id !== 'string' || typeof entry.deletedAt !== 'number' || !card || typeof card.id !== 'string' || typeof card.noteId !== 'string' || typeof card.question !== 'string' || typeof card.answer !== 'string') return []
+    const normalized = flashcards.find(value => value.id === card.id) ?? {
+      ...card,
+      kind: ['basic', 'cloze', 'image-occlusion', 'sequence', 'numeric', 'audio', 'video'].includes(card.kind ?? '') ? card.kind : 'basic',
+      tags: Array.isArray(card.tags) ? card.tags.filter((tag): tag is string => typeof tag === 'string') : [],
+      dueAt: typeof card.dueAt === 'number' ? card.dueAt : Date.now(),
+      intervalDays: typeof card.intervalDays === 'number' ? Math.max(0, card.intervalDays) : 0,
+      ease: typeof card.ease === 'number' ? Math.max(1.3, card.ease) : 2.5,
+      repetitions: typeof card.repetitions === 'number' ? Math.max(0, card.repetitions) : 0,
+      lapses: typeof card.lapses === 'number' ? Math.max(0, card.lapses) : 0,
+      reviewHistory: Array.isArray(card.reviewHistory) ? card.reviewHistory.slice(-500) : [],
+    } as Flashcard
+    return [{ id: entry.id, deletedAt: entry.deletedAt, card: normalized }]
   }) : []
   const trash: TrashEntry[] = Array.isArray(source.trash) ? source.trash.flatMap(item => {
     if (!item || typeof item !== 'object') return []
@@ -139,7 +160,7 @@ function parseWorkspaceBackup(bytes: Uint8Array): WorkspaceBackup {
     if (typeof entry.id !== 'string' || typeof entry.batchId !== 'string' || typeof entry.deletedAt !== 'number' || !entry.note || typeof entry.note.id !== 'string') return []
     return [{ id: entry.id, batchId: entry.batchId, deletedAt: entry.deletedAt, note: entry.note, assets: Array.isArray(entry.assets) ? entry.assets : [], attachments: Array.isArray(entry.attachments) ? entry.attachments : [] }]
   }) : []
-  return { reviewSessions, savedSearches, noteTemplates, folderColors, flashcards, trash }
+  return { reviewSessions, savedSearches, noteTemplates, folderColors, flashcards, flashcardTrash, trash }
 }
 
 function parseAttachmentHistory(bytes: Uint8Array): NoteAttachmentHistory[] {
@@ -191,7 +212,7 @@ export function parseArchive(bytes: Uint8Array): { notes: Note[]; assets: NoteAs
     const baseDirectory = lastSlash < 0 ? '' : path.slice(0, lastSlash)
     const basePrefix = baseDirectory ? `${baseDirectory}/` : ''
     let attachmentTranscripts: Record<string, string> = {}
-    let attachmentMetadata: Record<string, Partial<Pick<NoteAttachment, 'extractedText' | 'transcriptSegments' | 'pdfAnnotations'>>> = {}
+    let attachmentMetadata: Record<string, Partial<Pick<NoteAttachment, 'mimeType' | 'extractedText' | 'transcriptSegments' | 'pdfAnnotations'>>> = {}
     const transcriptFile = files[`${basePrefix}${ATTACHMENT_TRANSCRIPTS_FILE}`]
     if (transcriptFile) {
       try {
@@ -247,7 +268,7 @@ export function parseArchive(bytes: Uint8Array): { notes: Note[]; assets: NoteAs
           referenceNames.forEach(reference => externalPathMappings.push([reference, `./assets/${fileName}`]))
         }
       } else {
-        const mimeType = supportedAttachment(fileName)
+        const mimeType = attachmentMetadata[fileName]?.mimeType ?? supportedAttachment(fileName)
         if (mimeType) {
           attachments.push({ ...attachmentMetadata[fileName], id: `${note.id}:${fileName}`, noteId: note.id, fileName, mimeType, dataUrl: bytesToDataUrl(files[assetPath], mimeType), size: files[assetPath].byteLength, contentHash: fileFingerprint(files[assetPath]), transcript: attachmentTranscripts[fileName] })
           if (!noTieLayout) {

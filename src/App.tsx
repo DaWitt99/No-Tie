@@ -20,7 +20,7 @@ import { NoteAttachmentsPanel } from './NoteAttachmentsPanel'
 import { AttachmentPreviewDialog } from './AttachmentPreviewDialog'
 import { HelpDialog } from './HelpDialog'
 import { BackupTrashDialog } from './BackupTrashDialog'
-import { FlashcardsPage } from './FlashcardsPage'
+import type { FlashcardAiAction } from './FlashcardsPage'
 import { SelectedTextFlashcardDialog } from './SelectedTextFlashcardDialog'
 import { CreateNoteDialog } from './CreateNoteDialog'
 import { NoteCollectionPage } from './NoteCollectionPage'
@@ -43,13 +43,13 @@ import { ReviewSessionDialog } from './ReviewSessionDialog'
 import { ReviewSessionView } from './ReviewSessionView'
 import { ReviewSessionsOverview } from './ReviewSessionsOverview'
 import { checkpointReviewSession } from './reviews'
-import { archiveAttachment, deleteAutoBackup, getAssets, getAttachmentHistory, getAttachments, getAutoBackups, getFlashcards, getFolderColors, getFolders, getNoteTemplates, getNoteVersions, getNotes, getReviewSessions, getSavedSearches, getTrashEntries, hasInitialized, markInitialized, readAutoBackup, removeAssetsForNote, removeAttachmentsForNote, removeAttachment, removeFolderFromDisk, removeNote, restoreArchivedAttachment, saveArchivedAttachment, saveAsset, saveAttachment, saveAttachmentMetadata, saveAttachmentTranscript as persistAttachmentTranscript, saveAutoBackup, saveFlashcards, saveFolderColors, saveFolders, saveNote, saveNoteTemplates, saveNoteVersion, saveNoteVersions, saveReviewSessions, saveSavedSearches, saveTrashEntries, storageLocationLabel, usesNativeFiles } from './storage'
+import { archiveAttachment, deleteAutoBackup, getAssets, getAttachmentHistory, getAttachments, getAutoBackups, getFlashcards, getFlashcardTrash, getFolderColors, getFolders, getNoteTemplates, getNoteVersions, getNotes, getReviewSessions, getSavedSearches, getTrashEntries, hasInitialized, markInitialized, readAutoBackup, removeAssetsForNote, removeAttachmentsForNote, removeAttachment, removeFolderFromDisk, removeNote, restoreArchivedAttachment, saveArchivedAttachment, saveAsset, saveAttachment, saveAttachmentMetadata, saveAttachmentTranscript as persistAttachmentTranscript, saveAutoBackup, saveFlashcardsAndTrash, saveFolderColors, saveFolders, saveNote, saveNoteTemplates, saveNoteVersion, saveNoteVersions, saveReviewSessions, saveSavedSearches, saveTrashEntries, storageLocationLabel, usesNativeFiles } from './storage'
 import type { AutoBackupInfo } from './storage'
-import type { Flashcard, FlashcardImageOcclusion, FlashcardKind, Note, NoteAsset, NoteAttachment, NoteAttachmentReference, NoteTemplate, NoteVersion, ReviewSession, SavedSearch, TrashEntry } from './types'
+import type { Flashcard, FlashcardImageOcclusion, FlashcardKind, FlashcardTrashEntry, Note, NoteAsset, NoteAttachment, NoteAttachmentReference, NoteTemplate, NoteVersion, ReviewSession, SavedSearch, TrashEntry } from './types'
 import { readFeatureFlags, type FeatureFlags, type FeatureId } from './features'
 import { dispatchAiReplaceSelection, dispatchWikiEmbedInsert, dispatchWikiLinkInsert, replaceWikiLinkTarget } from './wikiLinks'
 import { fileFingerprint } from './fileFingerprint'
-import { reviewFlashcard, type FlashcardGrade } from './flashcards'
+import { reviewFlashcard, type FlashcardGrade, type FlashcardReviewMeta } from './flashcards'
 import './App.css'
 
 type Filter = 'all' | 'favorites' | string
@@ -99,6 +99,7 @@ function copyNote(note: Note): Note {
 
 const MarkdownEditor = lazy(() => import('./MarkdownEditor').then(module => ({ default: module.MarkdownEditor })))
 const VectorEditor = lazy(() => import('./VectorEditor').then(module => ({ default: module.VectorEditor })))
+const FlashcardsPage = lazy(() => import('./FlashcardsPage').then(module => ({ default: module.FlashcardsPage })))
 
 const defaultTemplates: NoteTemplate[] = [
   { id: 'meeting', title: 'Nowe spotkanie', tags: ['spotkanie'], content: '# Cel spotkania\n\n## Agenda\n\n- \n\n## Notatki\n\n\n## Ustalenia i zadania\n\n- [ ] ' },
@@ -363,6 +364,7 @@ function App() {
   const [reviewSessions, setReviewSessions] = useState<ReviewSession[]>([])
   const [trashEntries, setTrashEntries] = useState<TrashEntry[]>([])
   const [flashcards, setFlashcards] = useState<Flashcard[]>([])
+  const [flashcardTrash, setFlashcardTrash] = useState<FlashcardTrashEntry[]>([])
   const [autoBackups, setAutoBackups] = useState<AutoBackupInfo[]>([])
   const [showBackupTrash, setShowBackupTrash] = useState(false)
   const [showCreateNoteDialog, setShowCreateNoteDialog] = useState(false)
@@ -506,6 +508,7 @@ function App() {
         const storedReviewSessions = await getReviewSessions()
         const storedTrash = await getTrashEntries()
         const storedFlashcards = await getFlashcards()
+        const storedFlashcardTrash = await getFlashcardTrash()
         const storedBackups = await getAutoBackups()
         if (!await hasInitialized()) {
           if (!storedNotes.length) {
@@ -526,6 +529,7 @@ function App() {
             const note = resolveWikiTarget(storedNotes, card.noteId)
             return note && note.id !== card.noteId ? { ...card, noteId: note.id } : card
           }))
+          setFlashcardTrash(storedFlashcardTrash)
           setAutoBackups(storedBackups)
           setAttachments(storedAttachments)
           setSavedSearches(storedSearches)
@@ -567,7 +571,7 @@ function App() {
   useEffect(() => {
     if (ready) void saveReviewSessions(reviewSessions).catch(reportDiskSaveError)
   }, [ready, reviewSessions])
-  useEffect(() => { if (ready) void saveFlashcards(flashcards).catch(reportDiskSaveError) }, [ready, flashcards])
+  useEffect(() => { if (ready) void saveFlashcardsAndTrash(flashcards, flashcardTrash).catch(reportDiskSaveError) }, [ready, flashcards, flashcardTrash])
   useEffect(() => { if (ready) void saveTrashEntries(trashEntries).catch(reportDiskSaveError) }, [ready, trashEntries])
   useEffect(() => { if (ready) void saveSavedSearches(savedSearches).catch(reportDiskSaveError) }, [ready, savedSearches])
   useEffect(() => { if (ready) void saveNoteTemplates(templates).catch(reportDiskSaveError) }, [ready, templates])
@@ -676,11 +680,11 @@ function App() {
     })
   }, [selectedId, notes])
   const notesRef = useRef<Note[]>([])
-  const backupSnapshotRef = useRef({ notes, assets, attachments, reviewSessions, savedSearches, templates, folderColors, flashcards, trashEntries })
+  const backupSnapshotRef = useRef({ notes, assets, attachments, reviewSessions, savedSearches, templates, folderColors, flashcards, flashcardTrash, trashEntries })
   useLayoutEffect(() => {
     notesRef.current = notes
-    backupSnapshotRef.current = { notes, assets, attachments, reviewSessions, savedSearches, templates, folderColors, flashcards, trashEntries }
-  }, [notes, assets, attachments, reviewSessions, savedSearches, templates, folderColors, flashcards, trashEntries])
+    backupSnapshotRef.current = { notes, assets, attachments, reviewSessions, savedSearches, templates, folderColors, flashcards, flashcardTrash, trashEntries }
+  }, [notes, assets, attachments, reviewSessions, savedSearches, templates, folderColors, flashcards, flashcardTrash, trashEntries])
   useLayoutEffect(() => {
     const note = notesRef.current.find(item => item.id === selectedId)
     if (!note) return
@@ -1059,7 +1063,7 @@ function App() {
     let content = note.content
     for (const file of files) {
       const extension = file.name.split('.').at(-1)?.toLowerCase() ?? ''
-      const mimeType = ({ jpg: 'image/jpeg', jpeg: 'image/jpeg', png: 'image/png', gif: 'image/gif', webp: 'image/webp', avif: 'image/avif', pdf: 'application/pdf', mp3: 'audio/mpeg', m4a: 'audio/mp4', wav: 'audio/wav', ogg: 'audio/ogg', webm: 'audio/webm', aac: 'audio/aac', flac: 'audio/flac', opus: 'audio/opus', '3gp': 'audio/3gpp', amr: 'audio/amr' } as Record<string, string>)[extension] || ''
+      const mimeType = file.type.startsWith('video/') ? file.type : ({ jpg: 'image/jpeg', jpeg: 'image/jpeg', png: 'image/png', gif: 'image/gif', webp: 'image/webp', avif: 'image/avif', pdf: 'application/pdf', mp3: 'audio/mpeg', m4a: 'audio/mp4', wav: 'audio/wav', ogg: 'audio/ogg', webm: 'audio/webm', aac: 'audio/aac', flac: 'audio/flac', opus: 'audio/opus', '3gp': 'audio/3gpp', amr: 'audio/amr', mp4: 'video/mp4', m4v: 'video/mp4', mov: 'video/quicktime', mkv: 'video/x-matroska', avi: 'video/x-msvideo', mpeg: 'video/mpeg', mpg: 'video/mpeg' } as Record<string, string>)[extension] || ''
       if (!mimeType || (file.type && file.type !== mimeType && !file.type.startsWith(`${mimeType};`))) { setToast(`Typ pliku „${file.name}” nie jest obsługiwany.`); window.setTimeout(() => setToast(''), 3000); continue }
       if (file.size > 15 * 1024 * 1024) { setToast(`Plik „${file.name}” przekracza limit 15 MB.`); window.setTimeout(() => setToast(''), 3000); continue }
       const fileName = uniqueAttachmentName(safeAttachmentName(file.name), usedNames)
@@ -2038,7 +2042,7 @@ function App() {
       await Promise.all(snapshot.notes.map(note => flushNoteVersion(note.id, note)))
       const versions = (await Promise.all(snapshot.notes.map(note => getNoteVersions(note.id)))).flat()
       const attachmentHistory = (await Promise.all(snapshot.notes.map(note => getAttachmentHistory(note.id)))).flat()
-      const workspace = { reviewSessions: snapshot.reviewSessions, savedSearches: snapshot.savedSearches, noteTemplates: snapshot.templates, folderColors: snapshot.folderColors, flashcards: snapshot.flashcards, trash: snapshot.trashEntries }
+      const workspace = { reviewSessions: snapshot.reviewSessions, savedSearches: snapshot.savedSearches, noteTemplates: snapshot.templates, folderColors: snapshot.folderColors, flashcards: snapshot.flashcards, flashcardTrash: snapshot.flashcardTrash, trash: snapshot.trashEntries }
       const info = await saveAutoBackup(buildArchive(snapshot.notes, snapshot.assets, versions, snapshot.attachments, workspace, attachmentHistory))
       localStorage.setItem('no-tie-last-automatic-backup', String(info.createdAt))
       setAutoBackups(await getAutoBackups())
@@ -2080,12 +2084,12 @@ function App() {
     try { await deleteAutoBackup(fileName); setAutoBackups(await getAutoBackups()) } catch (error) { reportDiskSaveError(error) }
   }
 
-  function createFlashcard(noteId: string, question: string, answer: string, kind: FlashcardKind = 'basic', tags: string[] = [], imageOcclusion?: FlashcardImageOcclusion) {
+  function createFlashcard(noteId: string, question: string, answer: string, kind: FlashcardKind = 'basic', tags: string[] = [], imageOcclusion?: FlashcardImageOcclusion, metadata: Partial<Flashcard> = {}) {
     const now = Date.now()
-    setFlashcards(current => [{ id: crypto.randomUUID(), noteId, question, answer, kind, tags, imageOcclusion: kind === 'image-occlusion' ? imageOcclusion : undefined, dueAt: now, intervalDays: 0, ease: 2.5, repetitions: 0, lapses: 0 }, ...current])
+    setFlashcards(current => [{ id: crypto.randomUUID(), noteId, question, answer, kind, tags, ...metadata, imageOcclusion: kind === 'image-occlusion' ? imageOcclusion : undefined, dueAt: now, intervalDays: 0, ease: 2.5, repetitions: 0, lapses: 0 }, ...current])
   }
 
-  function updateFlashcard(id: string, edit: Pick<Flashcard, 'question' | 'answer' | 'kind' | 'tags' | 'imageOcclusion'>) {
+  function updateFlashcard(id: string, edit: Partial<Flashcard>) {
     setFlashcards(current => current.map(card => card.id === id ? { ...card, ...edit } : card))
   }
 
@@ -2097,8 +2101,20 @@ function App() {
     setFlashcards(current => current.map(card => card.id === id ? { ...card, dueAt } : card))
   }
 
-  function rateFlashcard(id: string, grade: FlashcardGrade) {
-    setFlashcards(current => current.map(card => card.id === id ? reviewFlashcard(card, grade) : card))
+  function rateFlashcard(id: string, grade: FlashcardGrade, metadata?: FlashcardReviewMeta) {
+    setFlashcards(current => current.map(card => card.id === id ? reviewFlashcard(card, grade, Date.now(), metadata) : card))
+  }
+
+  function trashFlashcard(card: Flashcard) {
+    setFlashcards(current => current.filter(item => item.id !== card.id))
+    setFlashcardTrash(current => [{ id: crypto.randomUUID(), deletedAt: Date.now(), card }, ...current])
+  }
+
+  function restoreFlashcardTrash(id: string) {
+    const entry = flashcardTrash.find(item => item.id === id)
+    if (!entry) return
+    setFlashcards(current => current.some(card => card.id === entry.card.id) ? current : [entry.card, ...current])
+    setFlashcardTrash(current => current.filter(item => item.id !== id))
   }
 
   async function regenerateFlashcard(card: Flashcard): Promise<{ question: string; answer: string }> {
@@ -2189,6 +2205,25 @@ function App() {
     return matches.sort((left, right) => right.score - left.score).slice(0, 30)
   }
 
+  async function assistFlashcards(action: FlashcardAiAction, card?: Flashcard, input = ''): Promise<string> {
+    if (!ollamaModel.trim()) throw new Error('Wybierz model Ollama w ustawieniach.')
+    const cardContext = card ? 'Pytanie: ' + card.question + '\nOdpowiedź: ' + card.answer + '\nAkceptowane warianty: ' + (card.answerVariants ?? []).join('; ') + '\nTagi: ' + (card.tags ?? []).join(', ') : ''
+    const instructions: Record<FlashcardAiAction, string> = {
+      evaluate: 'Oceń odpowiedź ucznia do fiszki. Zwróć krótki feedback po polsku: co jest poprawne, czego brakuje i czy odpowiedź jest błędna. Nie dodawaj faktów spoza poprawnej odpowiedzi.\n' + cardContext + '\nOdpowiedź ucznia: ' + input,
+      distractors: 'Wygeneruj 3 wiarygodne, ale błędne odpowiedzi do pytania wielokrotnego wyboru. Nie powtarzaj poprawnej odpowiedzi ani jej wariantów. Zwróć wyłącznie JSON array stringów.\n' + cardContext,
+      quality: 'Przeprowadź kontrolę jakości fiszek. Dla każdej wskaż niejednoznaczne, zbyt szerokie, błędne lub powtarzalne pytania i zaproponuj konkretną poprawę. Jeśli karta jest dobra, napisz to. Zwróć raport po polsku. Dane: ' + input,
+      coverage: 'Pogrupuj fiszki w tematy, wskaż najważniejsze zagadnienia niepokryte przez pytania oraz nierównowagę między tematami. Nie wymyślaj treści źródła. Zwróć zwięzły raport po polsku. Dane: ' + input,
+      tags: 'Nadaj każdej fiszce 1–4 krótkie tagi tematyczne po polsku. Zachowaj identyfikatory. Zwróć wyłącznie JSON array obiektów {"id":string,"tags":string[]}. Dane: ' + input,
+      example: 'Podaj krótki trafny przykład i kontrprzykład ilustrujący pojęcie z fiszki. Używaj wyłącznie faktów zgodnych z kartą. Zwróć tekst po polsku z etykietami „Przykład” i „Kontrprzykład”.\n' + cardContext,
+      mnemonic: 'Utwórz łatwe do zapamiętania skojarzenie, mnemotechnikę lub analogię pomagającą przypomnieć odpowiedź. Nie zmieniaj znaczenia. Zwróć krótki tekst po polsku.\n' + cardContext,
+      difficulty: 'Przepisz fiszkę na poziom ' + input + '. Zachowaj poprawność i tę samą wiedzę. Poziom początkujący używa prostego języka, zaawansowany może wymagać dokładniejszego rozumowania. Zwróć wyłącznie JSON z polami string question i answer.\n' + cardContext,
+    }
+    let result = ''
+    await streamOllamaMessage(ollamaBaseUrl, ollamaModel, [{ role: 'user', content: instructions[action] }], chunk => { result += chunk })
+    if (!result.trim()) throw new Error('Model nie zwrócił odpowiedzi.')
+    return result.trim()
+  }
+
   function trashNoteData(noteIds: Set<string>, batchId = crypto.randomUUID()) {
     const deletedAt = Date.now()
     return notes.filter(note => noteIds.has(note.id)).map(note => ({
@@ -2236,7 +2271,7 @@ function App() {
       await Promise.all(notes.map(note => flushNoteVersion(note.id, note)))
       const versions = (await Promise.all(notes.map(note => getNoteVersions(note.id)))).flat()
       const attachmentHistory = (await Promise.all(notes.map(note => getAttachmentHistory(note.id)))).flat()
-      const workspace = { reviewSessions, savedSearches, noteTemplates: templates, folderColors, flashcards, trash: trashEntries }
+      const workspace = { reviewSessions, savedSearches, noteTemplates: templates, folderColors, flashcards, flashcardTrash, trash: trashEntries }
       const savedPath = await exportArchiveToFolder(notes, assets, versions, attachments, workspace, attachmentHistory)
       if (!savedPath) return
       setToast(`Paczka została zapisana: ${savedPath}`)
@@ -2363,6 +2398,7 @@ function App() {
       setTemplates(imported.workspace.noteTemplates.length ? imported.workspace.noteTemplates : defaultTemplates)
       setFolderColors(imported.workspace.folderColors)
       if (imported.workspace.flashcards) setFlashcards(imported.workspace.flashcards.filter(card => availableNoteIds.has(card.noteId)))
+      if (imported.workspace.flashcardTrash) setFlashcardTrash(imported.workspace.flashcardTrash)
       if (imported.workspace.trash) setTrashEntries(imported.workspace.trash)
     }
     if (replaceExisting) setActiveFilter('all')
@@ -2543,7 +2579,7 @@ function App() {
         ) : showingFavoriteNotesPage ? (
           <NoteCollectionPage kind="favorites" notes={notes} recentIds={recentNoteIds} onOpen={openLinkedNote} />
         ) : showingFlashcardsPage ? (
-          <FlashcardsPage cards={flashcards} notes={notes} onCreate={createFlashcard} onUpdate={updateFlashcard} onReview={rateFlashcard} onSetDueAt={setFlashcardDueAt} onToggleSuspend={toggleFlashcardSuspended} onDelete={id => setFlashcards(current => current.filter(card => card.id !== id))} onRegenerate={regenerateFlashcard} onFindSimilar={findSimilarFlashcards} onOpenNote={noteId => { setActiveReviewSessionId(''); openLinkedNote(noteId) }} />
+          <Suspense fallback={<div className="editor-loading">Otwieram fiszki…</div>}><FlashcardsPage cards={flashcards} notes={notes} attachments={attachments} trash={flashcardTrash} onCreate={createFlashcard} onUpdate={updateFlashcard} onReview={rateFlashcard} onSetDueAt={setFlashcardDueAt} onToggleSuspend={toggleFlashcardSuspended} onDelete={trashFlashcard} onRestoreTrash={restoreFlashcardTrash} onPurgeTrash={id => setFlashcardTrash(current => current.filter(entry => entry.id !== id))} onRegenerate={regenerateFlashcard} onFindSimilar={findSimilarFlashcards} onAiAssist={assistFlashcards} onOpenNote={noteId => { setActiveReviewSessionId(''); openLinkedNote(noteId) }} /></Suspense>
         ) : showingReviewSessionsOverview ? (
           <ReviewSessionsOverview
             sessions={reviewSessions}
