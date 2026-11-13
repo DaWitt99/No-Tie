@@ -20,7 +20,7 @@ import { NoteAttachmentsPanel } from './NoteAttachmentsPanel'
 import { AttachmentPreviewDialog } from './AttachmentPreviewDialog'
 import { HelpDialog } from './HelpDialog'
 import { BackupTrashDialog } from './BackupTrashDialog'
-import { FlashcardsDialog } from './FlashcardsDialog'
+import { FlashcardsPage } from './FlashcardsPage'
 import { CreateNoteDialog } from './CreateNoteDialog'
 import { NoteCollectionPage } from './NoteCollectionPage'
 import { AiSelectionEditDialog } from './AiSelectionEditDialog'
@@ -518,7 +518,10 @@ function App() {
           setFolderColors(storedFolderColors)
           setReviewSessions(storedReviewSessions)
           setTrashEntries(storedTrash.filter(entry => Date.now() - entry.deletedAt < 30 * 86_400_000))
-          setFlashcards(storedFlashcards)
+          setFlashcards(storedFlashcards.map(card => {
+            const note = resolveWikiTarget(storedNotes, card.noteId)
+            return note && note.id !== card.noteId ? { ...card, noteId: note.id } : card
+          }))
           setAutoBackups(storedBackups)
           setAttachments(storedAttachments)
           setSavedSearches(storedSearches)
@@ -2395,7 +2398,7 @@ function App() {
         ) : showingFavoriteNotesPage ? (
           <NoteCollectionPage kind="favorites" notes={notes} recentIds={recentNoteIds} onOpen={openLinkedNote} />
         ) : showingFlashcardsPage ? (
-          <FlashcardsDialog cards={flashcards} notes={notes} onCreate={createFlashcard} onReview={rateFlashcard} onDelete={id => setFlashcards(current => current.filter(card => card.id !== id))} onOpenNote={noteId => { setActiveReviewSessionId(''); openLinkedNote(noteId) }} onClose={() => setActiveReviewSessionId('')} />
+          <FlashcardsPage cards={flashcards} notes={notes} onCreate={createFlashcard} onReview={rateFlashcard} onDelete={id => setFlashcards(current => current.filter(card => card.id !== id))} onOpenNote={noteId => { setActiveReviewSessionId(''); openLinkedNote(noteId) }} />
         ) : showingReviewSessionsOverview ? (
           <ReviewSessionsOverview
             sessions={reviewSessions}

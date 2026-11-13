@@ -1213,7 +1213,27 @@
 .flashcard-list article > div { min-width: 0; flex: 1; display: flex; flex-direction: column; gap: 4px; }
 .flashcard-list article strong { overflow: hidden; color: #2b3650; font-size: 12px; text-overflow: ellipsis; white-space: nowrap; }
 .flashcard-list article small { color: #8892a3; font-size: 10px; }
-.flashcards-page { width: min(900px, calc(100% - 36px)); min-height: 0; max-height: none; flex: 1; margin: 16px auto; border-radius: 16px; }
+.flashcards-page { width: 100%; min-width: 0; min-height: 0; max-height: none; flex: 1; display: flex; flex-direction: column; overflow: auto; margin: 0; padding: clamp(22px, 5vw, 54px); border: 0; border-radius: 0; background: #fff; box-shadow: none; }
+.flashcards-page > header { width: min(900px, 100%); flex: 0 0 auto; align-self: center; padding: 0 0 21px; border-bottom: 1px solid #edf0f5; }
+.flashcards-page h1 { margin: 0; color: #273149; font-size: 24px; letter-spacing: -.5px; }
+.flashcards-page header p { margin: 5px 0 0; color: #8790a2; font-size: 11px; }
+.flashcards-page > .flashcard-note-filter,
+.flashcards-page > .backup-trash-tabs,
+.flashcards-page > .flashcard-create-form,
+.flashcards-page > .flashcard-list,
+.flashcards-page > .flashcard-review,
+.flashcards-page > .backup-trash-empty { width: min(900px, 100%); align-self: center; }
+.flashcards-page > .backup-trash-tabs { padding-inline: 0; }
+.flashcards-page .flashcard-note-filter { border-bottom: 0; }
+.flashcards-page .flashcard-note-filter > summary { display: inline-flex; width: fit-content; min-height: 34px; justify-content: flex-start; gap: 8px; margin: 10px 0 5px; padding: 0 11px; border: 1px solid #d6defb; border-radius: 9px; color: #4255ad; background: #f0f3ff; font-weight: 600; transition: background .15s, border-color .15s; }
+.flashcards-page .flashcard-note-filter > summary:hover { border-color: #bdcafa; background: #e9eeff; }
+.flashcards-page .flashcard-note-filter[open] > summary { border-color: #bdcafa; background: #e9eeff; }
+.flashcards-page .flashcard-note-filter > summary strong { font-weight: 650; }
+.flashcards-page .flashcard-note-filter > summary span { color: #5969b0; font-size: 10px; font-weight: 500; }
+.flashcards-page .flashcard-note-filter > summary svg { flex: 0 0 auto; color: #5969b0; transition: transform .15s; }
+.flashcards-page .flashcard-note-filter[open] > summary svg { transform: rotate(180deg); }
+.flashcards-page .flashcard-note-options { padding-inline: 0; }
+.flashcards-page .flashcard-create-form { padding-inline: 0; }
 .flashcards-page .flashcard-list { max-height: none; min-height: 80px; flex: 1; }
 .flashcard-note-filter { position: relative; flex: 0 0 auto; border-bottom: 1px solid #edf0f5; }
 .flashcard-note-filter > summary { display: flex; align-items: center; justify-content: space-between; min-height: 40px; padding: 0 20px; color: #69758c; font-size: 11px; cursor: pointer; list-style: none; }
