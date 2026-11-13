@@ -19,7 +19,19 @@ const toolLabels: Record<AiNoteTool, string> = {
   quiz: 'Quiz do notatki',
 }
 
-function parseFlashcards(value: string): ParsedFlashcard[] {
+const flashcardPromptPresets = {
+  balanced: '',
+  definitions: 'Skup się na ważnych pojęciach, definicjach i różnicach między podobnymi terminami.',
+  causes: 'Skup się na przyczynach, skutkach, warunkach i zależnościach opisanych w materiale.',
+  comparisons: 'Priorytetem niech będą porównania, podobieństwa i różnice, które pomagają odróżnić bliskie sobie pojęcia.',
+  exam: 'Przygotuj pytania w stylu egzaminacyjnym, wymagające przypomnienia i krótkiego wyjaśnienia wiedzy.',
+} as const
+
+function normalizeQuestion(value: string) {
+  return value.normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLocaleLowerCase('pl').replace(/[^\p{L}\p{N}]+/gu, ' ').trim()
+}
+
+function parseFlashcards(value: string, existingQuestions: readonly string[] = []): ParsedFlashcard[] {
   const fenced = value.match(/```(?:json)?\s*([\s\S]*?)```/i)?.[1]
   const start = value.indexOf('[')
   const end = value.lastIndexOf(']')
@@ -39,14 +51,25 @@ function parseFlashcards(value: string): ParsedFlashcard[] {
     const answer = typeof row.answer === 'string' ? row.answer.trim() : typeof row.odpowiedz === 'string' ? row.odpowiedz.trim() : ''
     return question && answer ? [{ question, answer }] : []
   })
-  if (!cards.length) throw new Error('Nie udało się odczytać żadnej fiszki z odpowiedzi modelu. Spróbuj ponownie.')
-  return cards
+  const seen = new Set(existingQuestions.map(normalizeQuestion).filter(Boolean))
+  const uniqueCards = cards.filter(card => {
+    const key = normalizeQuestion(card.question)
+    if (seen.has(key)) return false
+    seen.add(key)
+    return true
+  })
+  if (!uniqueCards.length) throw new Error('Wszystkie wygenerowane pytania są już w puli albo nie udało się odczytać fiszek. Zmień wskazówki i spróbuj ponownie.')
+  return uniqueCards
 }
 
-export function AiNoteToolsDialog({ kind, note, attachments, baseUrl, model, onApply, onCreateFlashcard, onTranscribeAudio, onClose }: {
+export function AiNoteToolsDialog({ kind, note, attachments, existingQuestions = [], sourceText, sourcePage, sourceLabel, baseUrl, model, onApply, onCreateFlashcard, onTranscribeAudio, onClose }: {
   kind: AiNoteTool
   note: Note
   attachments: NoteAttachment[]
+  existingQuestions?: readonly string[]
+  sourceText?: string
+  sourcePage?: { attachmentId: string; page: number }
+  sourceLabel?: string
   baseUrl: string
   model: string
   onApply: (generated: string) => void
@@ -55,11 +78,13 @@ export function AiNoteToolsDialog({ kind, note, attachments, baseUrl, model, onA
   onClose: () => void
 }) {
   const [sourceNote] = useState(note)
-  const sourceAttachments = useMemo(() => attachments.filter(attachment => attachment.noteId === sourceNote.id), [attachments, sourceNote.id])
+  const sourceAttachments = useMemo(() => sourcePage ? attachments.filter(attachment => attachment.id === sourcePage.attachmentId) : sourceText?.trim() ? [] : attachments.filter(attachment => attachment.noteId === sourceNote.id), [attachments, sourceNote.id, sourcePage, sourceText])
   const [toolKind] = useState(kind)
   const [generated, setGenerated] = useState('')
   const [flashcards, setFlashcards] = useState<FlashcardDraft[]>([])
   const [extraGuidance, setExtraGuidance] = useState('')
+  const [flashcardCount, setFlashcardCount] = useState(12)
+  const [promptPreset, setPromptPreset] = useState<keyof typeof flashcardPromptPresets | 'custom'>('balanced')
   const [busy, setBusy] = useState(false)
   const [minimized, setMinimized] = useState(false)
   const [error, setError] = useState('')
@@ -67,6 +92,15 @@ export function AiNoteToolsDialog({ kind, note, attachments, baseUrl, model, onA
   const nextCardId = useRef(0)
   const isFlashcards = toolKind === 'flashcards'
   const hasIncompleteCard = flashcards.some(card => !card.question.trim() || !card.answer.trim())
+  const hasDuplicateCard = (() => {
+    const seen = new Set(existingQuestions.map(normalizeQuestion).filter(Boolean))
+    return flashcards.some(card => {
+      const key = normalizeQuestion(card.question)
+      if (!key || seen.has(key)) return true
+      seen.add(key)
+      return false
+    })
+  })()
 
   async function generate() {
     if (!model || busy) return
@@ -78,7 +112,7 @@ export function AiNoteToolsDialog({ kind, note, attachments, baseUrl, model, onA
     }
     let result = ''
     const flashcardInstructions = [
-      'Utwórz maksymalnie 12 wysokiej jakości fiszek do nauki na podstawie wyłącznie materiału źródłowego.',
+      `Utwórz ${flashcardCount} wysokiej jakości fiszek do nauki na podstawie wyłącznie materiału źródłowego. Przygotuj tę liczbę, jeśli źródło zawiera wystarczająco dużo informacji; w przeciwnym razie utwórz mniej i nie powtarzaj kart.`,
       'Każda fiszka ma sprawdzać jedną konkretną, istotną rzecz. Pytanie powinno być jasne i zrozumiałe bez zgadywania kontekstu, a odpowiedź krótka, precyzyjna i wystarczająca do samodzielnej nauki.',
       'Wybieraj ważne pojęcia, zależności, przyczyny i skutki, warunki, różnice, etapy procesów oraz informacje, które łatwo pomylić. Unikaj pytań ogólnikowych, banalnych, wieloczęściowych i powtarzających tę samą wiedzę.',
       'Nie dopowiadaj faktów spoza materiału. Jeśli źródło nie zawiera dość treści na wiele dobrych fiszek, utwórz mniej zamiast wypełniać listę słabymi kartami.',
@@ -106,20 +140,23 @@ export function AiNoteToolsDialog({ kind, note, attachments, baseUrl, model, onA
           if (!transcript) throw new Error(`Nie udało się uzyskać transkrypcji załącznika „${attachment.fileName}”.`)
         }
 
-        const textSections = [transcript, attachment.extractedText?.trim() ?? ''].filter(Boolean)
-        if (attachment.pdfAnnotations?.length) {
-          textSections.push(attachment.pdfAnnotations.map(annotation => `Strona ${annotation.page}${annotation.quote ? `, cytat: „${annotation.quote}”` : ''}: ${annotation.text}`).join('\n'))
+        const selectedPage = sourcePage?.attachmentId === attachment.id ? sourcePage.page : undefined
+        const annotations = selectedPage ? attachment.pdfAnnotations?.filter(annotation => annotation.page === selectedPage) : attachment.pdfAnnotations
+        const extractedText = selectedPage ? '' : attachment.extractedText?.trim() ?? ''
+        const textSections = [transcript, extractedText].filter(Boolean)
+        if (annotations?.length) {
+          textSections.push(annotations.map(annotation => `Strona ${annotation.page}${annotation.quote ? `, cytat: „${annotation.quote}”` : ''}: ${annotation.text}`).join('\n'))
         }
 
-        if (attachment.mimeType === 'application/pdf' && !attachment.extractedText?.trim()) {
+        if (attachment.mimeType === 'application/pdf' && (!attachment.extractedText?.trim() || selectedPage !== undefined)) {
           const { pdfAttachmentToText } = await import('./pdfVision')
-          const pdfText = await pdfAttachmentToText(attachment.dataUrl)
+          const pdfText = await pdfAttachmentToText(attachment.dataUrl, selectedPage === undefined ? 40 : 1, selectedPage === undefined ? MAX_AI_ATTACHMENT_TEXT : 14_000, selectedPage ?? 1)
           if (pdfText.text.trim()) {
             textSections.push(pdfText.text.trim())
-            omittedPdfPages += Math.max(0, pdfText.totalPages - pdfText.pagesRead)
+            if (selectedPage === undefined) omittedPdfPages += Math.max(0, pdfText.totalPages - pdfText.pagesRead)
           } else if (attachmentImages.length < MAX_AI_CONTEXT_IMAGES) {
             const { pdfAttachmentToVisionPages } = await import('./pdfVision')
-            const pages = await pdfAttachmentToVisionPages(attachment.dataUrl, MAX_AI_CONTEXT_IMAGES - attachmentImages.length)
+            const pages = await pdfAttachmentToVisionPages(attachment.dataUrl, selectedPage === undefined ? MAX_AI_CONTEXT_IMAGES - attachmentImages.length : 1, selectedPage ?? 1)
             for (const page of pages.pages) {
               attachmentImages.push(page.base64)
               imageLabels.push(`PDF „${attachment.fileName}”, strona ${page.pageNumber} z ${page.totalPages}`)
@@ -138,7 +175,8 @@ export function AiNoteToolsDialog({ kind, note, attachments, baseUrl, model, onA
         if (textSections.length) attachmentTextSections.push(`ZAŁĄCZNIK „${attachment.fileName}”:\n${textSections.join('\n\n')}`)
       }
 
-      const noteSource = `Tytuł: ${sourceNote.title || 'Bez tytułu'}\nTagi: ${sourceNote.tags.join(', ') || 'brak'}\n\n${sourceNote.content}`
+      const noteContent = sourceText?.trim() ?? (sourcePage ? '' : sourceNote.content)
+      const noteSource = `Tytuł: ${sourceNote.title || 'Bez tytułu'}\nTagi: ${sourceNote.tags.join(', ') || 'brak'}\n${sourceLabel ? `Zakres: ${sourceLabel}\n` : ''}\n${noteContent}`
       const allAttachmentSource = attachmentTextSections.join('\n\n')
       const attachmentSource = allAttachmentSource.slice(0, MAX_AI_ATTACHMENT_TEXT)
       const contentParts = [
@@ -151,13 +189,14 @@ export function AiNoteToolsDialog({ kind, note, attachments, baseUrl, model, onA
         omittedVisuals ? `\nPominięto ${omittedVisuals} obrazów lub stron PDF z powodu limitu ${MAX_AI_CONTEXT_IMAGES} obrazów.` : '',
       ].filter(Boolean)
       const content = contentParts.join('\n\n').slice(0, 48_000)
+      if (sourcePage && !sourceText?.trim() && !attachmentTextSections.length && !attachmentImages.length) throw new Error(`Nie udało się odczytać strony ${sourcePage.page} z załącznika PDF.`)
       await streamOllamaMessage(baseUrl, model, [{ role: 'user', content: `${instructions[toolKind]}\n\nMATERIAŁ ŹRÓDŁOWY:\n${content}`, images: attachmentImages.length ? attachmentImages : undefined }], chunk => {
         result += chunk
         if (!isFlashcards) setGenerated(result)
       })
       if (!result.trim()) throw new Error('Model zwrócił pustą odpowiedź.')
       if (isFlashcards) {
-        const parsed = parseFlashcards(result)
+        const parsed = parseFlashcards(result, existingQuestions).slice(0, flashcardCount)
         setFlashcards(parsed.map(card => ({ ...card, id: nextCardId.current++ })))
         setCreated(false)
       }
@@ -169,7 +208,7 @@ export function AiNoteToolsDialog({ kind, note, attachments, baseUrl, model, onA
   function accept() {
     if (created || busy) return
     if (isFlashcards) {
-      if (!flashcards.length || hasIncompleteCard) return
+      if (!flashcards.length || hasIncompleteCard || hasDuplicateCard) return
       for (const card of flashcards) onCreateFlashcard(sourceNote.id, card.question.trim(), card.answer.trim())
     } else {
       if (!generated.trim()) return
@@ -196,13 +235,17 @@ export function AiNoteToolsDialog({ kind, note, attachments, baseUrl, model, onA
 
   return <div className="modal-backdrop ai-note-tools-backdrop" role="presentation" onMouseDown={event => { if (event.target === event.currentTarget && !busy) onClose() }}>
     <section className="ai-note-tools-dialog" role="dialog" aria-modal="true" aria-labelledby="ai-note-tools-title">
-      <header><span className="folder-dialog-mark"><Sparkles size={19} /></span><div><h2 id="ai-note-tools-title">{toolLabels[toolKind]}</h2><p>{sourceNote.title || 'Bez tytułu'} · materiał pozostaje na tym urządzeniu</p></div>{isFlashcards && <button type="button" className="icon-button" aria-label="Zminimalizuj generator i czytaj notatkę" title="Zminimalizuj i czytaj notatkę" onClick={() => setMinimized(true)}><Minimize2 size={17} /></button>}<button type="button" className="icon-button" aria-label="Zamknij" onClick={onClose} disabled={busy}><X size={17} /></button></header>
+      <header><span className="folder-dialog-mark"><Sparkles size={19} /></span><div><h2 id="ai-note-tools-title">{toolLabels[toolKind]}</h2><p>{sourceNote.title || 'Bez tytułu'}{sourceLabel ? ` · ${sourceLabel}` : ' · materiał pozostaje na tym urządzeniu'}</p></div>{isFlashcards && <button type="button" className="icon-button" aria-label="Zminimalizuj generator i czytaj notatkę" title="Zminimalizuj i czytaj notatkę" onClick={() => setMinimized(true)}><Minimize2 size={17} /></button>}<button type="button" className="icon-button" aria-label="Zamknij" onClick={onClose} disabled={busy}><X size={17} /></button></header>
       <div className="ai-note-tools-body">
         {!model && <p className="ai-note-tools-error">Najpierw wybierz model w ustawieniach Ollama.</p>}
         {error && <p className="ai-note-tools-error" role="alert">{error}</p>}
         {isFlashcards ? <>
-          <label className="ai-note-tools-guidance"><span>Jakie fiszki przygotować?</span><textarea aria-label="Dodatkowe wskazówki do fiszek" value={extraGuidance} onChange={event => setExtraGuidance(event.target.value)} placeholder="Np. skup się na pojęciach i różnicach, zadawaj pytania wymagające krótkiego wyjaśnienia…" disabled={busy} /><small>Twoje wskazówki uzupełnią kryteria jakości i treść notatki.</small></label>
-          {busy && <p className="ai-note-tools-progress" role="status"><LoaderCircle className="spin" size={15} />Czytam notatkę i jej załączniki, a potem przygotuję fiszki. Możesz zminimalizować to okno i wrócić później.</p>}
+          <div className="ai-note-tools-guidance">
+            <div className="ai-note-tools-prompt-controls"><label><span>Profil fiszek</span><select aria-label="Profil promptu fiszek" value={promptPreset} onChange={event => { const preset = event.target.value as keyof typeof flashcardPromptPresets | 'custom'; setPromptPreset(preset); if (preset !== 'custom') setExtraGuidance(flashcardPromptPresets[preset]) }} disabled={busy}><option value="balanced">Zrównoważone</option><option value="definitions">Definicje</option><option value="causes">Przyczyny i skutki</option><option value="comparisons">Porównania</option><option value="exam">Egzamin</option><option value="custom">Własne wskazówki</option></select></label><label><span>Liczba fiszek</span><input aria-label="Liczba generowanych fiszek" type="number" min={1} max={50} value={flashcardCount} onChange={event => setFlashcardCount(Math.max(1, Math.min(50, Number(event.target.value) || 1)))} disabled={busy} /></label></div>
+            <label><span>Doprecyzuj prompt</span><textarea aria-label="Dodatkowe wskazówki do fiszek" value={extraGuidance} onChange={event => { setExtraGuidance(event.target.value); setPromptPreset('custom') }} placeholder="Np. skup się na pojęciach i różnicach, zadawaj pytania wymagające krótkiego wyjaśnienia…" disabled={busy} /></label>
+            <small>Model przygotuje najwyżej 50 kart, a duplikaty zostaną pominięte.</small>
+          </div>
+          {busy && <p className="ai-note-tools-progress" role="status"><LoaderCircle className="spin" size={15} />{sourceLabel ? `Czytam ${sourceLabel} i przygotowuję fiszki. ` : 'Czytam notatkę i jej załączniki, a potem przygotuję fiszki. '}Możesz zminimalizować to okno i wrócić później.</p>}
           {flashcards.length > 0 && <section className="ai-note-tools-flashcards" aria-label="Edytuj wygenerowane fiszki">
             <div className="ai-note-tools-cards-heading"><div><h3>Przejrzyj fiszki</h3><p>Popraw pytania i odpowiedzi przed dodaniem ich do puli.</p></div><span>{flashcards.length}</span></div>
             <div className="ai-note-tools-card-list">{flashcards.map((card, index) => <article className="ai-note-tools-card" key={card.id}>
@@ -212,14 +255,15 @@ export function AiNoteToolsDialog({ kind, note, attachments, baseUrl, model, onA
             </article>)}</div>
             <button type="button" className="button secondary ai-note-tools-add-card" disabled={busy || created} onClick={() => { setFlashcards(current => [...current, { id: nextCardId.current++, question: '', answer: '' }]); setCreated(false) }}><Plus size={14} />Dodaj fiszkę</button>
             {hasIncompleteCard && <p className="ai-note-tools-validation" role="status">Uzupełnij pytanie i odpowiedź w każdej fiszce, aby ją zapisać.</p>}
+            {hasDuplicateCard && <p className="ai-note-tools-validation" role="status">Usuń lub zmień powtarzające się pytania. W puli są już karty o takim samym pytaniu.</p>}
           </section>}
-          {!flashcards.length && !busy && <p className="ai-note-tools-help">Model przeanalizuje notatkę i jej załączniki. Obrazy oraz skanowane PDF-y wymagają modelu obsługującego obrazy; audio bez transkrypcji zostanie przetworzone przez skonfigurowaną usługę. Przed dodaniem możesz poprawić lub usunąć każdą fiszkę.</p>}
+          {!flashcards.length && !busy && <p className="ai-note-tools-help">{sourceLabel ? `Fiszki powstaną na podstawie zakresu: ${sourceLabel}.` : 'Model przeanalizuje notatkę i jej załączniki. Obrazy oraz skanowane PDF-y wymagają modelu obsługującego obrazy; audio bez transkrypcji zostanie przetworzone przez skonfigurowaną usługę.'} Przed dodaniem możesz poprawić lub usunąć każdą fiszkę.</p>}
         </> : <>
           {generated && <textarea className="ai-note-tools-result" aria-label="Wynik wygenerowany przez AI" value={generated} onChange={event => { setGenerated(event.target.value); setCreated(false) }} />}
           {!generated && <p className="ai-note-tools-help">Model przeanalizuje treść notatki oraz zapisane transkrypcje i teksty załączników.</p>}
         </>}
       </div>
-      <footer>{(isFlashcards ? flashcards.length > 0 : Boolean(generated)) && <button type="button" className="button primary" onClick={accept} disabled={created || busy || (isFlashcards && hasIncompleteCard)}><Check size={14} />{created ? 'Dodano' : isFlashcards ? 'Zapisz fiszki' : toolKind === 'tasks' ? 'Dodaj do notatki' : 'Wstaw do notatki'}</button>}<button type="button" className="button secondary" onClick={() => void generate()} disabled={busy || !model}>{busy ? <><LoaderCircle className="spin" size={14} />Generuję…</> : isFlashcards ? flashcards.length ? 'Wygeneruj ponownie' : 'Generuj fiszki' : generated ? 'Wygeneruj ponownie' : 'Generuj'}</button>{!busy && <button type="button" className="button secondary" onClick={onClose}>Zamknij</button>}</footer>
+      <footer>{(isFlashcards ? flashcards.length > 0 : Boolean(generated)) && <button type="button" className="button primary" onClick={accept} disabled={created || busy || (isFlashcards && (hasIncompleteCard || hasDuplicateCard))}><Check size={14} />{created ? 'Dodano' : isFlashcards ? 'Zapisz fiszki' : toolKind === 'tasks' ? 'Dodaj do notatki' : 'Wstaw do notatki'}</button>}<button type="button" className="button secondary" onClick={() => void generate()} disabled={busy || !model}>{busy ? <><LoaderCircle className="spin" size={14} />Generuję…</> : isFlashcards ? flashcards.length ? 'Wygeneruj ponownie' : 'Generuj fiszki' : generated ? 'Wygeneruj ponownie' : 'Generuj'}</button>{!busy && <button type="button" className="button secondary" onClick={onClose}>Zamknij</button>}</footer>
     </section>
   </div>
 }

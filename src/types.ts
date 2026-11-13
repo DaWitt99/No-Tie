@@ -57,17 +57,32 @@ export type TrashEntry = {
   attachments: NoteAttachment[]
 }
 
+export type FlashcardKind = 'basic' | 'cloze' | 'image-occlusion'
+
+export type FlashcardOcclusionRegion = { id: string; x: number; y: number; width: number; height: number; label: string }
+export type FlashcardImageOcclusion = { imageDataUrl: string; fileName: string; regions: FlashcardOcclusionRegion[] }
+
+export type FlashcardReviewEvent = {
+  at: number
+  grade: 'again' | 'hard' | 'good' | 'easy'
+}
+
 export type Flashcard = {
   id: string
   noteId: string
   question: string
   answer: string
+  kind?: FlashcardKind
+  tags?: string[]
+  imageOcclusion?: FlashcardImageOcclusion
+  suspended?: boolean
   dueAt: number
   intervalDays: number
   ease: number
   repetitions: number
   lapses: number
   lastReviewedAt?: number
+  reviewHistory?: FlashcardReviewEvent[]
 }
 
 export type SavedSearch = {

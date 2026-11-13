@@ -21,6 +21,7 @@ import { AttachmentPreviewDialog } from './AttachmentPreviewDialog'
 import { HelpDialog } from './HelpDialog'
 import { BackupTrashDialog } from './BackupTrashDialog'
 import { FlashcardsPage } from './FlashcardsPage'
+import { SelectedTextFlashcardDialog } from './SelectedTextFlashcardDialog'
 import { CreateNoteDialog } from './CreateNoteDialog'
 import { NoteCollectionPage } from './NoteCollectionPage'
 import { AiSelectionEditDialog } from './AiSelectionEditDialog'
@@ -44,7 +45,7 @@ import { ReviewSessionsOverview } from './ReviewSessionsOverview'
 import { checkpointReviewSession } from './reviews'
 import { archiveAttachment, deleteAutoBackup, getAssets, getAttachmentHistory, getAttachments, getAutoBackups, getFlashcards, getFolderColors, getFolders, getNoteTemplates, getNoteVersions, getNotes, getReviewSessions, getSavedSearches, getTrashEntries, hasInitialized, markInitialized, readAutoBackup, removeAssetsForNote, removeAttachmentsForNote, removeAttachment, removeFolderFromDisk, removeNote, restoreArchivedAttachment, saveArchivedAttachment, saveAsset, saveAttachment, saveAttachmentMetadata, saveAttachmentTranscript as persistAttachmentTranscript, saveAutoBackup, saveFlashcards, saveFolderColors, saveFolders, saveNote, saveNoteTemplates, saveNoteVersion, saveNoteVersions, saveReviewSessions, saveSavedSearches, saveTrashEntries, storageLocationLabel, usesNativeFiles } from './storage'
 import type { AutoBackupInfo } from './storage'
-import type { Flashcard, Note, NoteAsset, NoteAttachment, NoteAttachmentReference, NoteTemplate, NoteVersion, ReviewSession, SavedSearch, TrashEntry } from './types'
+import type { Flashcard, FlashcardImageOcclusion, FlashcardKind, Note, NoteAsset, NoteAttachment, NoteAttachmentReference, NoteTemplate, NoteVersion, ReviewSession, SavedSearch, TrashEntry } from './types'
 import { readFeatureFlags, type FeatureFlags, type FeatureId } from './features'
 import { dispatchAiReplaceSelection, dispatchWikiEmbedInsert, dispatchWikiLinkInsert, replaceWikiLinkTarget } from './wikiLinks'
 import { fileFingerprint } from './fileFingerprint'
@@ -72,6 +73,7 @@ type DeleteTarget = EntryTarget & { label: string; noteCount: number }
 type EntryColor = { value: string; label: string }
 type EntryPointerDrag = { target: EntryTarget; label: string; pointerId: number; startX: number; startY: number; started: boolean }
 type EntryDragVisual = { target: EntryTarget; label: string; x: number; y: number; dropFolder: string | null }
+type FlashcardGenerationScope = { kind: 'selection'; noteId: string; text: string; label: string } | { kind: 'pdf-page'; noteId: string; attachmentId: string; page: number; label: string }
 
 const REVIEW_SESSIONS_OVERVIEW_ID = '__no_tie_review_sessions_overview__'
 const SAVED_SEARCHES_PAGE_ID = '__no_tie_saved_searches_page__'
@@ -307,6 +309,8 @@ function App() {
   const [showTaskManager, setShowTaskManager] = useState(false)
   const [showAiEdit, setShowAiEdit] = useState(false)
   const [aiNoteTool, setAiNoteTool] = useState<AiNoteTool | null>(null)
+  const [flashcardGenerationScope, setFlashcardGenerationScope] = useState<FlashcardGenerationScope | null>(null)
+  const [selectedTextFlashcard, setSelectedTextFlashcard] = useState<{ noteId: string; text: string } | null>(null)
   const [showKnowledgeGraph, setShowKnowledgeGraph] = useState(false)
   const [showDuplicateManager, setShowDuplicateManager] = useState(false)
   const [showAttachmentManager, setShowAttachmentManager] = useState(false)
@@ -788,17 +792,58 @@ function App() {
     const timer = window.setInterval(notifyNoteReminders, 30_000)
     return () => window.clearInterval(timer)
   }, [featureFlags.noteReminders, notes])
+  useEffect(() => {
+    const notifyDueFlashcards = () => {
+      let settings: { enabled?: boolean; time?: string; lastNotifiedDate?: string }
+      try { settings = JSON.parse(localStorage.getItem('no-tie-flashcard-reminder') ?? '{}') as typeof settings } catch { return }
+      const configuredTime = settings.time
+      if (!settings.enabled || typeof configuredTime !== 'string' || !/^([01]\d|2[0-3]):[0-5]\d$/.test(configuredTime)) return
+      const now = new Date()
+      const date = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(now.getDate()).padStart(2, '0')}`
+      const time = `${String(now.getHours()).padStart(2, '0')}:${String(now.getMinutes()).padStart(2, '0')}`
+      if (time < configuredTime || settings.lastNotifiedDate === date) return
+      const dueCount = flashcards.filter(card => !card.suspended && card.dueAt <= now.getTime()).length
+      if (!dueCount) return
+      localStorage.setItem('no-tie-flashcard-reminder', JSON.stringify({ ...settings, lastNotifiedDate: date }))
+      const dueMessage = dueCount === 1 ? '1 fiszka czeka na powtórkę.' : dueCount >= 2 && dueCount <= 4 ? `${dueCount} fiszki czekają na powtórkę.` : `${dueCount} fiszek czeka na powtórkę.`
+      if ('Notification' in window && Notification.permission === 'granted') new Notification('Czas na powtórkę fiszek', { body: dueMessage })
+      else {
+        setToast(dueMessage)
+        window.setTimeout(() => setToast(''), 5000)
+      }
+    }
+    notifyDueFlashcards()
+    const timer = window.setInterval(notifyDueFlashcards, 30_000)
+    return () => window.clearInterval(timer)
+  }, [flashcards])
   const documentCounts = selectedNote ? countMarkdownDocument(selectedNote.content) : { words: 0, characters: 0 }
   const selectionText = selectedNote && editorSelection.noteId === selectedNote.id && editorSelection.mode === editorMode ? editorSelection.text : ''
   const selectionCounts = countEditorText(selectionText)
+  const aiDialogNote = flashcardGenerationScope ? notes.find(note => note.id === flashcardGenerationScope.noteId) : selectedNote
   const markdownNoteActions = [
     { id: 'link', label: 'Połącz notatkę' },
     { id: 'embed', label: 'Osadź notatkę' },
     { id: 'edit-ai', label: 'Edytuj zaznaczenie z AI', disabled: !selectionText || !ollamaModel },
+    ...(selectionText.trim() ? [{ id: 'create-flashcard-selection', label: 'Utwórz fiszkę z zaznaczenia' }] : []),
+    ...(selectionText.trim() && featureFlags.aiFlashcards ? [{ id: 'generate-flashcards-selection', label: 'Generuj fiszki z zaznaczenia', disabled: !ollamaModel }] : []),
     ...(featureFlags.aiSummaries ? [{ id: 'summary', label: 'Podsumuj i stwórz konspekt' }] : []),
     ...(featureFlags.aiTaskExtraction ? [{ id: 'tasks', label: 'Wydobądź zadania' }] : []),
     ...(featureFlags.aiFlashcards ? [{ id: 'flashcards', label: 'Stwórz fiszki' }, { id: 'quiz', label: 'Stwórz quiz' }] : []),
   ]
+
+  function handleMarkdownNoteAction(action: string) {
+    if (action === 'link') setShowNoteLinkDialog(true)
+    else if (action === 'embed') setShowNoteEmbedDialog(true)
+    else if (action === 'edit-ai') setShowAiEdit(true)
+    else if (action === 'create-flashcard-selection' && selectedNote && selectionText.trim()) setSelectedTextFlashcard({ noteId: selectedNote.id, text: selectionText.trim() })
+    else if (action === 'generate-flashcards-selection' && selectedNote && selectionText.trim()) {
+      setFlashcardGenerationScope({ kind: 'selection', noteId: selectedNote.id, text: selectionText.trim(), label: 'Zaznaczony fragment notatki' })
+      setAiNoteTool('flashcards')
+    } else {
+      setFlashcardGenerationScope(null)
+      setAiNoteTool(action as AiNoteTool)
+    }
+  }
 
   function scheduleNoteVersion(note: Note, previous: Note) {
     if (!persistentVersionTimers.current.has(note.id)) {
@@ -2035,13 +2080,113 @@ function App() {
     try { await deleteAutoBackup(fileName); setAutoBackups(await getAutoBackups()) } catch (error) { reportDiskSaveError(error) }
   }
 
-  function createFlashcard(noteId: string, question: string, answer: string) {
+  function createFlashcard(noteId: string, question: string, answer: string, kind: FlashcardKind = 'basic', tags: string[] = [], imageOcclusion?: FlashcardImageOcclusion) {
     const now = Date.now()
-    setFlashcards(current => [{ id: crypto.randomUUID(), noteId, question, answer, dueAt: now, intervalDays: 0, ease: 2.5, repetitions: 0, lapses: 0 }, ...current])
+    setFlashcards(current => [{ id: crypto.randomUUID(), noteId, question, answer, kind, tags, imageOcclusion: kind === 'image-occlusion' ? imageOcclusion : undefined, dueAt: now, intervalDays: 0, ease: 2.5, repetitions: 0, lapses: 0 }, ...current])
+  }
+
+  function updateFlashcard(id: string, edit: Pick<Flashcard, 'question' | 'answer' | 'kind' | 'tags' | 'imageOcclusion'>) {
+    setFlashcards(current => current.map(card => card.id === id ? { ...card, ...edit } : card))
+  }
+
+  function toggleFlashcardSuspended(id: string) {
+    setFlashcards(current => current.map(card => card.id === id ? { ...card, suspended: !card.suspended } : card))
+  }
+
+  function setFlashcardDueAt(id: string, dueAt: number) {
+    setFlashcards(current => current.map(card => card.id === id ? { ...card, dueAt } : card))
   }
 
   function rateFlashcard(id: string, grade: FlashcardGrade) {
     setFlashcards(current => current.map(card => card.id === id ? reviewFlashcard(card, grade) : card))
+  }
+
+  async function regenerateFlashcard(card: Flashcard): Promise<{ question: string; answer: string }> {
+    const note = resolveWikiTarget(notes, card.noteId)
+    if (!note) throw new Error('Nie znaleziono notatki źródłowej tej fiszki.')
+    if (!ollamaModel.trim()) throw new Error('Wybierz model Ollama w ustawieniach.')
+
+    const contextImages: string[] = []
+    const attachmentSections: string[] = []
+    for (const attachment of attachments.filter(item => item.noteId === note.id)) {
+      let transcript = attachment.transcript?.trim() || attachment.transcriptSegments?.map(segment => segment.text.trim()).filter(Boolean).join('\n') || ''
+      if (attachment.mimeType.startsWith('audio/') && !transcript && featureFlags.audioNotes) transcript = (await transcribeAudioAttachment(attachment)).trim()
+      const textSections = [
+        transcript,
+        attachment.extractedText?.trim(),
+        attachment.pdfAnnotations?.map(annotation => `Strona ${annotation.page}${annotation.quote ? `, cytat: „${annotation.quote}”` : ''}: ${annotation.text}`).join('\n'),
+      ].filter((value): value is string => Boolean(value))
+
+      if (attachment.mimeType === 'application/pdf' && !attachment.extractedText?.trim()) {
+        try {
+          const { pdfAttachmentToText } = await import('./pdfVision')
+          const extracted = await pdfAttachmentToText(attachment.dataUrl, 24, 9_000)
+          if (extracted.text.trim()) textSections.push(extracted.text.trim())
+          else if (contextImages.length < 6) {
+            const { pdfAttachmentToVisionPages } = await import('./pdfVision')
+            const pages = await pdfAttachmentToVisionPages(attachment.dataUrl, 6 - contextImages.length)
+            contextImages.push(...pages.pages.map(page => page.base64))
+          }
+        } catch { /* Continue with any text already extracted from the PDF. */ }
+      } else if (attachment.mimeType.startsWith('image/') && !attachment.extractedText?.trim() && contextImages.length < 6) {
+        try { contextImages.push(await imageAttachmentToPngBase64(attachment.dataUrl)) } catch { /* Continue with the note and readable attachment text. */ }
+      }
+      if (textSections.length) attachmentSections.push(`ZAŁĄCZNIK „${attachment.fileName}”:\n${textSections.join('\n\n')}`)
+    }
+
+    const sourceText = `NOTATKA: ${note.title || 'Bez tytułu'}\nFolder: ${note.folder || 'Bez folderu'}\nTagi: ${note.tags.join(', ') || 'brak'}\n\n${note.content.slice(0, 28_000)}\n\nZAŁĄCZNIKI:\n${attachmentSections.join('\n\n').slice(0, 14_000)}`
+    let result = ''
+    await streamOllamaMessage(ollamaBaseUrl, ollamaModel, [{
+      role: 'user',
+      content: `Popraw poniższą fiszkę, zachowując zgodność z materiałem. Uczyń pytanie jednoznacznym i skupionym na jednej istotnej informacji, a odpowiedź krótką i precyzyjną. Nie dodawaj faktów spoza źródła. Zwróć wyłącznie obiekt JSON z polami string "question" i "answer".\n\nOBECNA FISZKA:\nPytanie: ${card.question}\nOdpowiedź: ${card.answer}\n\nMATERIAŁ ŹRÓDŁOWY:\n${sourceText}`,
+      images: contextImages.length ? contextImages : undefined,
+    }], chunk => { result += chunk })
+    const fenced = result.match(/```(?:json)?\s*([\s\S]*?)```/i)?.[1]
+    const start = result.indexOf('{')
+    const end = result.lastIndexOf('}')
+    const candidate = fenced?.trim() || (start >= 0 && end > start ? result.slice(start, end + 1) : '')
+    if (!candidate) throw new Error('Model nie zwrócił poprawionej fiszki.')
+    let parsed: unknown
+    try { parsed = JSON.parse(candidate) } catch { throw new Error('Odpowiedź modelu nie zawiera poprawnego JSON.') }
+    if (!parsed || typeof parsed !== 'object') throw new Error('Model nie zwrócił obiektu fiszki.')
+    const row = parsed as Record<string, unknown>
+    const question = typeof row.question === 'string' ? row.question.trim() : ''
+    const answer = typeof row.answer === 'string' ? row.answer.trim() : ''
+    if (!question || !answer) throw new Error('Poprawiona fiszka nie zawiera pytania i odpowiedzi.')
+    return { question, answer }
+  }
+
+  async function findSimilarFlashcards(candidates: readonly Flashcard[]): Promise<{ firstId: string; secondId: string; score: number }[]> {
+    const cardsToCompare = candidates.filter(card => card.question.trim())
+    if (cardsToCompare.length < 2) return []
+    if (cardsToCompare.length > 300) throw new Error('Zawęź listę filtrami do maksymalnie 300 kart, aby porównać ich pytania.')
+    if (!embeddingModel.trim()) throw new Error('Ustaw model embeddingów w ustawieniach Ollama.')
+    const vectors: number[][] = []
+    for (let start = 0; start < cardsToCompare.length; start += 64) {
+      const batch = cardsToCompare.slice(start, start + 64)
+      try { vectors.push(...await embedOllamaTexts(ollamaBaseUrl, embeddingModel, batch.map(card => card.question))) }
+      catch (error) {
+        const detail = error instanceof Error ? error.message : ''
+        if (/model.*not found|model.*nie znaleziono/i.test(detail)) throw new Error(`Nie znaleziono modelu embeddingów „${embeddingModel}”. Pobierz go poleceniem: ollama pull ${embeddingModel}`)
+        throw error
+      }
+    }
+    const normalizedVectors = vectors.map(vector => {
+      const norm = Math.sqrt(vector.reduce((sum, value) => sum + value * value, 0)) || 1
+      return vector.map(value => value / norm)
+    })
+    const matches: { firstId: string; secondId: string; score: number }[] = []
+    for (let first = 0; first < cardsToCompare.length; first += 1) {
+      for (let second = first + 1; second < cardsToCompare.length; second += 1) {
+        const left = normalizedVectors[first] ?? []
+        const right = normalizedVectors[second] ?? []
+        let score = 0
+        for (let index = 0; index < Math.min(left.length, right.length); index += 1) score += left[index]! * right[index]!
+        if (score >= .78) matches.push({ firstId: cardsToCompare[first]!.id, secondId: cardsToCompare[second]!.id, score })
+      }
+      if (first % 8 === 7) await new Promise<void>(resolve => window.setTimeout(resolve, 0))
+    }
+    return matches.sort((left, right) => right.score - left.score).slice(0, 30)
   }
 
   function trashNoteData(noteIds: Set<string>, batchId = crypto.randomUUID()) {
@@ -2292,7 +2437,7 @@ function App() {
             <div className="section-heading"><span className="section-label">NARZĘDZIA</span></div>
             <button className="nav-item" onClick={() => setShowDailyNotes(true)}><CalendarDays size={16} /><span>Notatki dzienne</span></button>
             <button className="nav-item" onClick={() => setShowTaskManager(true)}><CheckSquare2 size={16} /><span>Zadania</span><span className="nav-count">{parsedTasks.filter(task => !task.done).length}</span></button>
-            <button className={`nav-item ${showingFlashcardsPage ? 'active' : ''}`} onClick={() => { setActiveReviewSessionId(FLASHCARDS_PAGE_ID); setActiveFilter('all'); setMobileDrawer('none') }}><Brain size={16} /><span>Fiszki</span><span className="nav-count">{flashcards.filter(card => card.dueAt <= Date.now()).length}</span></button>
+            <button className={`nav-item ${showingFlashcardsPage ? 'active' : ''}`} onClick={() => { setActiveReviewSessionId(FLASHCARDS_PAGE_ID); setActiveFilter('all'); setMobileDrawer('none') }}><Brain size={16} /><span>Fiszki</span><span className="nav-count">{flashcards.filter(card => !card.suspended && card.dueAt <= Date.now()).length}</span></button>
             <button className="nav-item" onClick={() => setShowBackupTrash(true)}><Archive size={16} /><span>Kopie i kosz</span><span className="nav-count">{trashEntries.length}</span></button>
             <button className="nav-item" onClick={() => setShowKnowledgeGraph(true)}><Network size={16} /><span>Mapa powiązań</span></button>
             <button className="nav-item" onClick={() => setShowFeatureManager(true)}><Puzzle size={16} /><span>Moduły aplikacji</span></button>
@@ -2398,7 +2543,7 @@ function App() {
         ) : showingFavoriteNotesPage ? (
           <NoteCollectionPage kind="favorites" notes={notes} recentIds={recentNoteIds} onOpen={openLinkedNote} />
         ) : showingFlashcardsPage ? (
-          <FlashcardsPage cards={flashcards} notes={notes} onCreate={createFlashcard} onReview={rateFlashcard} onDelete={id => setFlashcards(current => current.filter(card => card.id !== id))} onOpenNote={noteId => { setActiveReviewSessionId(''); openLinkedNote(noteId) }} />
+          <FlashcardsPage cards={flashcards} notes={notes} onCreate={createFlashcard} onUpdate={updateFlashcard} onReview={rateFlashcard} onSetDueAt={setFlashcardDueAt} onToggleSuspend={toggleFlashcardSuspended} onDelete={id => setFlashcards(current => current.filter(card => card.id !== id))} onRegenerate={regenerateFlashcard} onFindSimilar={findSimilarFlashcards} onOpenNote={noteId => { setActiveReviewSessionId(''); openLinkedNote(noteId) }} />
         ) : showingReviewSessionsOverview ? (
           <ReviewSessionsOverview
             sessions={reviewSessions}
@@ -2433,7 +2578,7 @@ function App() {
                 <div className="editor-tools-left"><div className="view-mode-toggle" role="group" aria-label="Widok notatki"><button className={`view-mode-button ${editorMode === 'rendered' ? 'active' : ''}`} title="Widok wizualny" aria-label="Widok wizualny" aria-pressed={editorMode === 'rendered'} onClick={() => setEditorMode('rendered')}><Eye size={16} /></button><button className={`view-mode-button ${editorMode === 'source' ? 'active' : ''}`} title="Surowy Markdown" aria-label="Surowy Markdown" aria-pressed={editorMode === 'source'} onClick={() => setEditorMode('source')}><Code2 size={16} /></button></div><span className="toolbar-separator" /><button className="inline-tool" onClick={() => { setEditingAsset(undefined); setShowDrawing(true) }}><Sparkles size={15} />Dodaj schemat</button>{currentAssets.map(asset => <button className="inline-tool asset-tool" key={asset.id} onClick={() => { setEditingAsset(asset); setShowDrawing(true) }}><Lightbulb size={14} />{asset.fileName}</button>)}</div>
                 <div className="template-toolbar"><button type="button" className="icon-button template-manage-button" title="Eksportuj jako HTML" aria-label="Eksportuj jako HTML" onClick={() => exportCurrentAsHtml()}><FileText size={14} /></button><button type="button" className="icon-button template-manage-button" title="Drukuj / zapisz jako PDF" aria-label="Drukuj lub zapisz jako PDF" onClick={exportCurrentAsPdf}><Archive size={14} /></button></div>
               </div>
-              {editorMode === 'source' ? <MarkdownSourceEditor noteId={selectedNote.id} markdown={selectedNote.content} onChange={content => patchNote(selectedNote.id, { content })} onSelectionChange={text => setEditorSelection({ noteId: selectedNote.id, mode: 'source', text })} noteActions={markdownNoteActions} onNoteAction={action => { if (action === 'link') setShowNoteLinkDialog(true); else if (action === 'embed') setShowNoteEmbedDialog(true); else if (action === 'edit-ai') setShowAiEdit(true); else setAiNoteTool(action as AiNoteTool) }} /> : <Suspense fallback={<div className="editor-loading">Otwieram edytor…</div>}><MarkdownEditor key={`${selectedNote.id}-${editorRevision}`} noteId={selectedNote.id} markdown={selectedNote.content} assets={currentAssets} attachments={currentAttachments} revision={editorRevision} onChange={content => patchNote(selectedNote.id, { content })} onSelectionChange={text => setEditorSelection({ noteId: selectedNote.id, mode: 'rendered', text })} onOpenNote={openLinkedNote} onOpenAttachment={openAttachment} notes={notes} allAssets={assets} noteActions={markdownNoteActions} onNoteAction={action => { if (action === 'link') setShowNoteLinkDialog(true); else if (action === 'embed') setShowNoteEmbedDialog(true); else if (action === 'edit-ai') setShowAiEdit(true); else setAiNoteTool(action as AiNoteTool) }} /></Suspense>}
+              {editorMode === 'source' ? <MarkdownSourceEditor noteId={selectedNote.id} markdown={selectedNote.content} onChange={content => patchNote(selectedNote.id, { content })} onSelectionChange={text => setEditorSelection({ noteId: selectedNote.id, mode: 'source', text })} noteActions={markdownNoteActions} onNoteAction={handleMarkdownNoteAction} /> : <Suspense fallback={<div className="editor-loading">Otwieram edytor…</div>}><MarkdownEditor key={`${selectedNote.id}-${editorRevision}`} noteId={selectedNote.id} markdown={selectedNote.content} assets={currentAssets} attachments={currentAttachments} revision={editorRevision} onChange={content => patchNote(selectedNote.id, { content })} onSelectionChange={text => setEditorSelection({ noteId: selectedNote.id, mode: 'rendered', text })} onOpenNote={openLinkedNote} onOpenAttachment={openAttachment} notes={notes} allAssets={assets} noteActions={markdownNoteActions} onNoteAction={handleMarkdownNoteAction} /></Suspense>}
       <NoteConnections note={selectedNote} notes={notes} onOpen={note => openLinkedNote(note.id)} onShowGraph={() => setShowKnowledgeGraph(true)} />
               <NoteAttachmentsPanel attachments={currentAttachmentsForUi} audioEnabled={featureFlags.audioNotes} onAdd={addAttachments} onRemove={attachment => void deleteAttachment(attachment)} onOcr={featureFlags.attachmentIndex ? recognizeAttachmentText : undefined} onTranscribe={featureFlags.audioNotes ? transcribeAudioAttachment : undefined} onInsertText={insertTextIntoNote} onSaveTranscript={saveAttachmentTranscript} onInsertAttachmentLink={insertAttachmentLink} onPreview={attachment => setPreviewAttachmentId(attachment.id)} />
               <div className="editor-content-stats" aria-label="Statystyki dokumentu i zaznaczenia">
@@ -2451,7 +2596,7 @@ function App() {
       </section>
       <ChatPanel open={showChat} baseUrl={ollamaBaseUrl} model={ollamaModel} note={selectedNote} notes={notes} assets={assets} attachments={attachments.filter(attachment => featureFlags.audioNotes || !attachment.mimeType.startsWith('audio/')).map(attachment => featureFlags.attachmentIndex ? attachment : { ...attachment, extractedText: undefined })} contextPickerEnabled={featureFlags.aiContextPicker} citationsEnabled={featureFlags.aiCitations} onOpenCitation={openCitation} onClose={closeChat} onOpenSettings={openOllamaSettings} />
       {showHelp && <HelpDialog onClose={() => setShowHelp(false)} />}
-      {attachments.find(attachment => attachment.id === previewAttachmentId && (!attachment.mimeType.startsWith('audio/') || featureFlags.audioNotes)) && <AttachmentPreviewDialog attachment={attachments.find(attachment => attachment.id === previewAttachmentId)!} annotationsEnabled={featureFlags.pdfAnnotations} transcriptTimestampsEnabled={featureFlags.transcriptTimestamps} initialPage={previewAttachmentPage} onSaveAnnotations={savePdfAnnotations} onClose={() => setPreviewAttachmentId('')} />}
+      {attachments.find(attachment => attachment.id === previewAttachmentId && (!attachment.mimeType.startsWith('audio/') || featureFlags.audioNotes)) && <AttachmentPreviewDialog attachment={attachments.find(attachment => attachment.id === previewAttachmentId)!} annotationsEnabled={featureFlags.pdfAnnotations} transcriptTimestampsEnabled={featureFlags.transcriptTimestamps} initialPage={previewAttachmentPage} onSaveAnnotations={savePdfAnnotations} onGenerateFlashcardsFromPage={featureFlags.aiFlashcards ? (attachment, page) => { setFlashcardGenerationScope({ kind: 'pdf-page', noteId: attachment.noteId, attachmentId: attachment.id, page, label: `Strona ${page} · ${attachment.fileName}` }); setAiNoteTool('flashcards'); setPreviewAttachmentId('') } : undefined} onClose={() => setPreviewAttachmentId('')} />}
       {entryDragVisual && <div className="entry-drag-ghost" style={{ left: entryDragVisual.x, top: entryDragVisual.y }} aria-hidden="true"><div>{entryDragVisual.target.kind === 'folder' ? <Folder size={15} /> : <FileText size={15} />}<strong>{entryDragVisual.label}</strong></div><span>{entryDragVisual.dropFolder === null ? 'Upuść na folder' : entryDragVisual.dropFolder ? `Przenieś do: ${entryDragVisual.dropFolder}` : 'Przenieś do: Bez folderu'}</span></div>}
       {showDrawing && selectedNote && <Suspense fallback={<div className="modal-backdrop"><div className="loading-screen">Otwieram edytor SVG…</div></div>}><VectorEditor asset={editingAsset} onClose={() => { setShowDrawing(false); setEditingAsset(undefined) }} onSave={svg => void saveDrawing(svg)} /></Suspense>}
       {showReviewSessionDialog && <ReviewSessionDialog
@@ -2496,7 +2641,8 @@ function App() {
       />}
       {showNoteEmbedDialog && selectedNote && <NoteLinkDialog notes={notes} currentNoteId={selectedNote.id} purpose="embed" onSelect={note => { dispatchWikiEmbedInsert({ noteId: selectedNote.id, target: note.title || note.id }); setShowNoteEmbedDialog(false) }} onClose={() => setShowNoteEmbedDialog(false)} />}
       {showAiEdit && selectedNote && <AiSelectionEditDialog selectedText={selectionText} model={ollamaModel} baseUrl={ollamaBaseUrl} onApply={replacement => dispatchAiReplaceSelection({ noteId: selectedNote.id, replacement })} onClose={() => setShowAiEdit(false)} />}
-      {aiNoteTool && selectedNote && <AiNoteToolsDialog kind={aiNoteTool} note={selectedNote} attachments={attachments.filter(attachment => featureFlags.audioNotes || !attachment.mimeType.startsWith('audio/'))} baseUrl={ollamaBaseUrl} model={ollamaModel} onApply={value => appendAiTextToNote(value, aiNoteTool)} onCreateFlashcard={(noteId, question, answer) => createFlashcard(noteId, question, answer)} onTranscribeAudio={featureFlags.audioNotes ? transcribeAudioAttachment : undefined} onClose={() => setAiNoteTool(null)} />}
+      {aiNoteTool && aiDialogNote && <AiNoteToolsDialog kind={aiNoteTool} note={aiDialogNote} attachments={attachments.filter(attachment => featureFlags.audioNotes || !attachment.mimeType.startsWith('audio/'))} existingQuestions={flashcards.filter(card => card.noteId === aiDialogNote.id).map(card => card.question)} sourceText={flashcardGenerationScope?.kind === 'selection' ? flashcardGenerationScope.text : undefined} sourcePage={flashcardGenerationScope?.kind === 'pdf-page' ? { attachmentId: flashcardGenerationScope.attachmentId, page: flashcardGenerationScope.page } : undefined} sourceLabel={flashcardGenerationScope?.label} baseUrl={ollamaBaseUrl} model={ollamaModel} onApply={value => appendAiTextToNote(value, aiNoteTool)} onCreateFlashcard={(noteId, question, answer) => createFlashcard(noteId, question, answer)} onTranscribeAudio={featureFlags.audioNotes ? transcribeAudioAttachment : undefined} onClose={() => { setAiNoteTool(null); setFlashcardGenerationScope(null) }} />}
+      {selectedTextFlashcard && notes.find(note => note.id === selectedTextFlashcard.noteId) && <SelectedTextFlashcardDialog noteTitle={notes.find(note => note.id === selectedTextFlashcard.noteId)?.title ?? ''} selectedText={selectedTextFlashcard.text} onSave={(question, answer) => { createFlashcard(selectedTextFlashcard.noteId, question, answer); setSelectedTextFlashcard(null) }} onClose={() => setSelectedTextFlashcard(null)} />}
       {showNoteHistory && selectedNote && historyDialogNoteId === selectedNote.id && <NoteHistoryDialog note={selectedNote} attachments={currentAttachments} versions={noteVersions} loading={noteVersionsLoading} onRestore={restoreNoteVersion} onClose={closeNoteHistory} />}
       {showFeatureManager && <FeatureManagerDialog features={featureFlags} onToggle={toggleFeature} onConfigureLock={() => setShowLockSetup(true)} onClose={() => setShowFeatureManager(false)} />}
       {showLockSetup && featureFlags.appLock && <AppLockDialog mode="setup" onSetPin={configureAppLockPin} onUnlock={async () => false} onClose={() => setShowLockSetup(false)} />}

@@ -332,17 +332,25 @@ function normalizeFlashcards(value: unknown): Flashcard[] {
     if (!item || typeof item !== 'object') return []
     const card = item as Partial<Flashcard>
     if (typeof card.id !== 'string' || typeof card.noteId !== 'string' || typeof card.question !== 'string' || typeof card.answer !== 'string') return []
+    const imageOcclusion = card.imageOcclusion && typeof card.imageOcclusion.imageDataUrl === 'string' && Array.isArray(card.imageOcclusion.regions)
+      ? { imageDataUrl: card.imageOcclusion.imageDataUrl, fileName: typeof card.imageOcclusion.fileName === 'string' ? card.imageOcclusion.fileName : 'obraz', regions: card.imageOcclusion.regions.flatMap(region => region && typeof region.id === 'string' && [region.x, region.y, region.width, region.height].every(value => typeof value === 'number' && Number.isFinite(value)) ? [{ id: region.id, x: Math.max(0, Math.min(1, region.x)), y: Math.max(0, Math.min(1, region.y)), width: Math.max(0, Math.min(1, region.width)), height: Math.max(0, Math.min(1, region.height)), label: typeof region.label === 'string' ? region.label : '' }] : []) }
+      : undefined
     return [{
       id: card.id,
       noteId: card.noteId,
       question: card.question,
       answer: card.answer,
+      kind: card.kind === 'cloze' || card.kind === 'image-occlusion' ? card.kind : 'basic',
+      tags: Array.isArray(card.tags) ? card.tags.filter((tag): tag is string => typeof tag === 'string') : [],
+      imageOcclusion,
+      suspended: card.suspended === true,
       dueAt: typeof card.dueAt === 'number' ? card.dueAt : Date.now(),
       intervalDays: typeof card.intervalDays === 'number' ? Math.max(0, card.intervalDays) : 0,
       ease: typeof card.ease === 'number' ? Math.max(1.3, card.ease) : 2.5,
       repetitions: typeof card.repetitions === 'number' ? Math.max(0, card.repetitions) : 0,
       lapses: typeof card.lapses === 'number' ? Math.max(0, card.lapses) : 0,
       lastReviewedAt: typeof card.lastReviewedAt === 'number' ? card.lastReviewedAt : undefined,
+      reviewHistory: Array.isArray(card.reviewHistory) ? card.reviewHistory.flatMap(event => event && typeof event.at === 'number' && ['again', 'hard', 'good', 'easy'].includes(event.grade) ? [{ at: event.at, grade: event.grade as NonNullable<Flashcard['reviewHistory']>[number]['grade'] }] : []).slice(-500) : [],
     }]
   })
 }

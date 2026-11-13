@@ -47,15 +47,16 @@ export async function pdfAttachmentToVisionPages(dataUrl: string, pageLimit: num
   }
 }
 
-export async function pdfAttachmentToText(dataUrl: string, pageLimit = 40, characterLimit = 16_000): Promise<PdfTextResult> {
+export async function pdfAttachmentToText(dataUrl: string, pageLimit = 40, characterLimit = 16_000, pageStart = 1): Promise<PdfTextResult> {
   const loadingTask = getDocument({ data: dataUrlBytes(dataUrl) })
   const document = await loadingTask.promise
   try {
-    const pagesToRead = Math.min(document.numPages, Math.max(0, Math.floor(pageLimit)))
+    const firstPage = Math.min(document.numPages + 1, Math.max(1, Math.floor(pageStart)))
+    const lastPage = Math.min(document.numPages, firstPage + Math.max(0, Math.floor(pageLimit)) - 1)
     const sections: string[] = []
     let characterCount = 0
     let pagesRead = 0
-    for (let pageNumber = 1; pageNumber <= pagesToRead && characterCount < characterLimit; pageNumber += 1) {
+    for (let pageNumber = firstPage; pageNumber <= lastPage && characterCount < characterLimit; pageNumber += 1) {
       const page = await document.getPage(pageNumber)
       const content = await page.getTextContent()
       const pageText = content.items.map(item => {
@@ -68,7 +69,7 @@ export async function pdfAttachmentToText(dataUrl: string, pageLimit = 40, chara
         sections.push(section.slice(0, remaining))
         characterCount += Math.min(section.length, remaining)
       }
-      pagesRead = pageNumber
+      pagesRead += 1
       page.cleanup()
     }
     return { text: sections.join('\n\n'), totalPages: document.numPages, pagesRead }
