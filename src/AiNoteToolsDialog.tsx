@@ -1,12 +1,13 @@
 import { useMemo, useRef, useState } from 'react'
 import { Check, LoaderCircle, Maximize2, Minimize2, Plus, Sparkles, Trash2, X } from 'lucide-react'
-import type { Note, NoteAttachment } from './types'
+import { FLASHCARD_STUDY_MODES, type Flashcard, type FlashcardStudyMode, type Note, type NoteAttachment } from './types'
 import { imageAttachmentToPngBase64, streamOllamaMessage } from './ollama'
 
 export type AiNoteTool = 'summary' | 'tasks' | 'flashcards' | 'quiz'
 
-type FlashcardDraft = { id: number; question: string; answer: string }
-type ParsedFlashcard = Omit<FlashcardDraft, 'id'>
+type FlashcardVariantDraft = { question: string; answer: string; distractors: string[]; trueFalseAnswer: boolean }
+type FlashcardDraft = { id: number; selectedMode?: FlashcardStudyMode; variants: Record<FlashcardStudyMode, FlashcardVariantDraft> }
+type ParsedFlashcard = Omit<FlashcardDraft, 'id' | 'selectedMode'>
 
 const MAX_AI_CONTEXT_IMAGES = 20
 const MAX_AI_NOTE_TEXT = 28_000
@@ -47,18 +48,41 @@ function parseFlashcards(value: string, existingQuestions: readonly string[] = [
   const cards = parsed.flatMap(item => {
     if (!item || typeof item !== 'object') return []
     const row = item as Record<string, unknown>
-    const question = typeof row.question === 'string' ? row.question.trim() : typeof row.pytanie === 'string' ? row.pytanie.trim() : ''
-    const answer = typeof row.answer === 'string' ? row.answer.trim() : typeof row.odpowiedz === 'string' ? row.odpowiedz.trim() : ''
-    return question && answer ? [{ question, answer }] : []
+    const hasStructuredVariants = Boolean(row.variants && typeof row.variants === 'object')
+    const variants = hasStructuredVariants ? row.variants as Record<string, unknown> : row
+    const legacyQuestion = typeof row.question === 'string' ? row.question.trim() : typeof row.pytanie === 'string' ? row.pytanie.trim() : ''
+    const legacyAnswer = typeof row.answer === 'string' ? row.answer.trim() : typeof row.odpowiedz === 'string' ? row.odpowiedz.trim() : ''
+    const readVariant = (mode: FlashcardStudyMode, key: string): FlashcardVariantDraft | null => {
+      const alias = mode === 'multiple-choice' ? 'multiple-choice' : mode === 'true-false' ? 'true-false' : mode === 'timed-exam' ? 'timed-exam' : ''
+      const raw = variants[key] ?? (alias ? variants[alias] : undefined)
+      const variant = raw && typeof raw === 'object' ? raw as Record<string, unknown> : {}
+      const question = typeof variant.question === 'string' ? variant.question.trim() : legacyQuestion
+      const answer = typeof variant.answer === 'string' ? variant.answer.trim() : legacyAnswer
+      if (!question || !answer) return null
+      const distractors = Array.isArray(variant.distractors) ? variant.distractors.filter((item): item is string => typeof item === 'string' && item.trim().length > 0).map(item => item.trim()).slice(0, 8) : []
+      const truthValue = variant.correct ?? variant.isTrue
+      if (mode === 'true-false' && hasStructuredVariants && typeof truthValue !== 'boolean') return null
+      const trueFalseAnswer = truthValue === false || truthValue === 'false' ? false : true
+      return { question, answer, distractors, trueFalseAnswer }
+    }
+    const parsedVariants = {
+      flip: readVariant('flip', 'flip'),
+      'multiple-choice': readVariant('multiple-choice', 'multipleChoice'),
+      'true-false': readVariant('true-false', 'trueFalse'),
+      explain: readVariant('explain', 'explain'),
+      'timed-exam': readVariant('timed-exam', 'timedExam'),
+    }
+    if (Object.values(parsedVariants).some(variant => !variant)) return []
+    return [{ variants: parsedVariants as Record<FlashcardStudyMode, FlashcardVariantDraft> }]
   })
   const seen = new Set(existingQuestions.map(normalizeQuestion).filter(Boolean))
   const uniqueCards = cards.filter(card => {
-    const key = normalizeQuestion(card.question)
+    const key = normalizeQuestion(card.variants.flip.question)
     if (seen.has(key)) return false
     seen.add(key)
     return true
   })
-  if (!uniqueCards.length) throw new Error('Wszystkie wygenerowane pytania są już w puli albo nie udało się odczytać fiszek. Zmień wskazówki i spróbuj ponownie.')
+  if (!uniqueCards.length) throw new Error('Model nie zwrócił kompletnych pięciu wariantów albo wszystkie pytania są już w puli. Zmień wskazówki i spróbuj ponownie.')
   return uniqueCards
 }
 
@@ -73,7 +97,7 @@ export function AiNoteToolsDialog({ kind, note, attachments, existingQuestions =
   baseUrl: string
   model: string
   onApply: (generated: string) => void
-  onCreateFlashcard: (noteId: string, question: string, answer: string) => void
+  onCreateFlashcard: (noteId: string, question: string, answer: string, metadata: Partial<Flashcard>) => void
   onTranscribeAudio?: (attachment: NoteAttachment) => Promise<string>
   onClose: () => void
 }) {
@@ -91,11 +115,16 @@ export function AiNoteToolsDialog({ kind, note, attachments, existingQuestions =
   const [created, setCreated] = useState(false)
   const nextCardId = useRef(0)
   const isFlashcards = toolKind === 'flashcards'
-  const hasIncompleteCard = flashcards.some(card => !card.question.trim() || !card.answer.trim())
+  const hasIncompleteCard = flashcards.some(card => {
+    if (!card.selectedMode) return true
+    const selected = card.variants[card.selectedMode]
+    return !selected.question.trim() || !selected.answer.trim() || (card.selectedMode === 'multiple-choice' && selected.distractors.length < 2)
+  })
   const hasDuplicateCard = (() => {
     const seen = new Set(existingQuestions.map(normalizeQuestion).filter(Boolean))
     return flashcards.some(card => {
-      const key = normalizeQuestion(card.question)
+      if (!card.selectedMode) return false
+      const key = normalizeQuestion(card.variants[card.selectedMode].question)
       if (!key || seen.has(key)) return true
       seen.add(key)
       return false
@@ -112,11 +141,11 @@ export function AiNoteToolsDialog({ kind, note, attachments, existingQuestions =
     }
     let result = ''
     const flashcardInstructions = [
-      `Utwórz ${flashcardCount} wysokiej jakości fiszek do nauki na podstawie wyłącznie materiału źródłowego. Przygotuj tę liczbę, jeśli źródło zawiera wystarczająco dużo informacji; w przeciwnym razie utwórz mniej i nie powtarzaj kart.`,
-      'Każda fiszka ma sprawdzać jedną konkretną, istotną rzecz. Pytanie powinno być jasne i zrozumiałe bez zgadywania kontekstu, a odpowiedź krótka, precyzyjna i wystarczająca do samodzielnej nauki.',
+      `Utwórz ${flashcardCount} wysokiej jakości zagadnień do nauki na podstawie wyłącznie materiału źródłowego. Dla każdego zagadnienia przygotuj dokładnie pięć wariantów tej samej wiedzy: standardowy, wielokrotnego wyboru, prawda/fałsz, opisowy i egzaminacyjny na czas. Przygotuj wskazaną liczbę zagadnień, jeśli materiał zawiera wystarczająco dużo informacji; w przeciwnym razie utwórz mniej.`,
+      'Każdy wariant ma sprawdzać tę samą konkretną, istotną rzecz, ale w formie odpowiedniej dla danego trybu. Pytania muszą być jasne bez zgadywania kontekstu, a odpowiedzi krótkie, precyzyjne i zgodne wyłącznie ze źródłem.',
       'Wybieraj ważne pojęcia, zależności, przyczyny i skutki, warunki, różnice, etapy procesów oraz informacje, które łatwo pomylić. Unikaj pytań ogólnikowych, banalnych, wieloczęściowych i powtarzających tę samą wiedzę.',
       'Nie dopowiadaj faktów spoza materiału. Jeśli źródło nie zawiera dość treści na wiele dobrych fiszek, utwórz mniej zamiast wypełniać listę słabymi kartami.',
-      'Zwróć wyłącznie poprawną tablicę JSON obiektów z polami string `question` i `answer`. Nie dodawaj Markdown ani tekstu przed lub po JSON.',
+      'Zwróć wyłącznie poprawną tablicę JSON. Każdy element ma mieć obiekt `variants` z dokładnie pięcioma kluczami: `flip`, `multipleChoice`, `trueFalse`, `explain`, `timedExam`. Każdy wariant ma pola string `question` i `answer`. `multipleChoice` ma dodatkowo tablicę trzech stringów `distractors` zawierającą wiarygodne błędne odpowiedzi. `trueFalse.question` ma być samodzielnym stwierdzeniem, `trueFalse.answer` krótkim uzasadnieniem, a `trueFalse.correct` wartością boolean określającą, czy stwierdzenie jest prawdziwe. `explain` ma wymagać samodzielnego opisania odpowiedzi. `timedExam` ma być krótkim pytaniem egzaminacyjnym z konkretną odpowiedzią wzorcową. Nie dodawaj Markdown ani tekstu przed lub po JSON.',
       extraGuidance.trim() ? `DODATKOWE WSKAZÓWKI UŻYTKOWNIKA:\n${extraGuidance.trim()}` : '',
     ].filter(Boolean).join('\n\n')
     const instructions: Record<AiNoteTool, string> = {
@@ -209,7 +238,16 @@ export function AiNoteToolsDialog({ kind, note, attachments, existingQuestions =
     if (created || busy) return
     if (isFlashcards) {
       if (!flashcards.length || hasIncompleteCard || hasDuplicateCard) return
-      for (const card of flashcards) onCreateFlashcard(sourceNote.id, card.question.trim(), card.answer.trim())
+      for (const card of flashcards) {
+        const selectedMode = card.selectedMode
+        if (!selectedMode) continue
+        const variant = card.variants[selectedMode]
+        onCreateFlashcard(sourceNote.id, variant.question.trim(), variant.answer.trim(), {
+          studyMode: selectedMode,
+          aiDistractors: selectedMode === 'multiple-choice' ? variant.distractors : undefined,
+          trueFalseAnswer: selectedMode === 'true-false' ? variant.trueFalseAnswer : undefined,
+        })
+      }
     } else {
       if (!generated.trim()) return
       onApply(generated.trim())
@@ -217,9 +255,32 @@ export function AiNoteToolsDialog({ kind, note, attachments, existingQuestions =
     setCreated(true)
   }
 
-  function updateCard(id: number, field: 'question' | 'answer', value: string) {
-    setFlashcards(current => current.map(card => card.id === id ? { ...card, [field]: value } : card))
+  function updateVariant(id: number, mode: FlashcardStudyMode, field: 'question' | 'answer', value: string) {
+    setFlashcards(current => current.map(card => card.id === id ? { ...card, variants: { ...card.variants, [mode]: { ...card.variants[mode], [field]: value } } } : card))
     setCreated(false)
+  }
+
+  function updateMode(id: number, selectedMode: FlashcardStudyMode) {
+    setFlashcards(current => current.map(card => card.id === id ? { ...card, selectedMode } : card))
+    setCreated(false)
+  }
+
+  function updateDistractors(id: number, mode: FlashcardStudyMode, value: string) {
+    setFlashcards(current => current.map(card => card.id === id ? { ...card, variants: { ...card.variants, [mode]: { ...card.variants[mode], distractors: value.split('\n').map(item => item.trim()).filter(Boolean) } } } : card))
+    setCreated(false)
+  }
+
+  function updateTrueFalseAnswer(id: number, mode: FlashcardStudyMode, value: boolean) {
+    setFlashcards(current => current.map(card => card.id === id ? { ...card, variants: { ...card.variants, [mode]: { ...card.variants[mode], trueFalseAnswer: value } } } : card))
+    setCreated(false)
+  }
+
+  function blankFlashcard(id: number): FlashcardDraft {
+    const createVariant = (): FlashcardVariantDraft => ({ question: '', answer: '', distractors: [], trueFalseAnswer: true })
+    const variants: Record<FlashcardStudyMode, FlashcardVariantDraft> = {
+      flip: createVariant(), 'multiple-choice': createVariant(), 'true-false': createVariant(), explain: createVariant(), 'timed-exam': createVariant(),
+    }
+    return { id, variants }
   }
 
   if (minimized) return <aside className="ai-note-tools-minimized" aria-label="Zminimalizowany generator fiszek">
@@ -243,18 +304,29 @@ export function AiNoteToolsDialog({ kind, note, attachments, existingQuestions =
           <div className="ai-note-tools-guidance">
             <div className="ai-note-tools-prompt-controls"><label><span>Profil fiszek</span><select aria-label="Profil promptu fiszek" value={promptPreset} onChange={event => { const preset = event.target.value as keyof typeof flashcardPromptPresets | 'custom'; setPromptPreset(preset); if (preset !== 'custom') setExtraGuidance(flashcardPromptPresets[preset]) }} disabled={busy}><option value="balanced">Zrównoważone</option><option value="definitions">Definicje</option><option value="causes">Przyczyny i skutki</option><option value="comparisons">Porównania</option><option value="exam">Egzamin</option><option value="custom">Własne wskazówki</option></select></label><label><span>Liczba fiszek</span><input aria-label="Liczba generowanych fiszek" type="number" min={1} max={50} value={flashcardCount} onChange={event => setFlashcardCount(Math.max(1, Math.min(50, Number(event.target.value) || 1)))} disabled={busy} /></label></div>
             <label><span>Doprecyzuj prompt</span><textarea aria-label="Dodatkowe wskazówki do fiszek" value={extraGuidance} onChange={event => { setExtraGuidance(event.target.value); setPromptPreset('custom') }} placeholder="Np. skup się na pojęciach i różnicach, zadawaj pytania wymagające krótkiego wyjaśnienia…" disabled={busy} /></label>
-            <small>Model przygotuje najwyżej 50 kart, a duplikaty zostaną pominięte.</small>
+            <small>Model przygotuje najwyżej 50 zagadnień z pięcioma wariantami każde; do puli trafi wybrany wariant.</small>
           </div>
           {busy && <p className="ai-note-tools-progress" role="status"><LoaderCircle className="spin" size={15} />{sourceLabel ? `Czytam ${sourceLabel} i przygotowuję fiszki. ` : 'Czytam notatkę i jej załączniki, a potem przygotuję fiszki. '}Możesz zminimalizować to okno i wrócić później.</p>}
           {flashcards.length > 0 && <section className="ai-note-tools-flashcards" aria-label="Edytuj wygenerowane fiszki">
-            <div className="ai-note-tools-cards-heading"><div><h3>Przejrzyj fiszki</h3><p>Popraw pytania i odpowiedzi przed dodaniem ich do puli.</p></div><span>{flashcards.length}</span></div>
+            <div className="ai-note-tools-cards-heading"><div><h3>Wybierz wariant fiszki</h3><p>Dla każdego zagadnienia wybierz formę nauki i popraw jej treść.</p></div><span>{flashcards.length}</span></div>
             <div className="ai-note-tools-card-list">{flashcards.map((card, index) => <article className="ai-note-tools-card" key={card.id}>
               <header><strong>Fiszka {index + 1}</strong><button type="button" className="icon-button" aria-label={`Usuń fiszkę ${index + 1}`} title="Usuń fiszkę" disabled={busy || created} onClick={() => { setFlashcards(current => current.filter(item => item.id !== card.id)); setCreated(false) }}><Trash2 size={15} /></button></header>
-              <label><span>Pytanie</span><textarea value={card.question} onChange={event => updateCard(card.id, 'question', event.target.value)} disabled={busy || created} /></label>
-              <label><span>Odpowiedź</span><textarea value={card.answer} onChange={event => updateCard(card.id, 'answer', event.target.value)} disabled={busy || created} /></label>
+              <div className="ai-note-tools-study-modes" role="group" aria-label={`Wariant fiszki ${index + 1}`}>
+                {FLASHCARD_STUDY_MODES.map(mode => <button type="button" key={mode.value} className={card.selectedMode === mode.value ? 'active' : ''} aria-pressed={card.selectedMode === mode.value} disabled={busy || created} onClick={() => updateMode(card.id, mode.value)}>{mode.label}</button>)}
+              </div>
+              {card.selectedMode ? (() => {
+                const selectedMode = card.selectedMode!
+                const variant = card.variants[selectedMode]
+                return <>
+                  <label><span>{selectedMode === 'true-false' ? 'Stwierdzenie' : 'Pytanie'}</span><textarea value={variant.question} onChange={event => updateVariant(card.id, selectedMode, 'question', event.target.value)} disabled={busy || created} /></label>
+                  <label><span>{selectedMode === 'true-false' ? 'Uzasadnienie odpowiedzi' : 'Odpowiedź wzorcowa'}</span><textarea value={variant.answer} onChange={event => updateVariant(card.id, selectedMode, 'answer', event.target.value)} disabled={busy || created} /></label>
+                  {selectedMode === 'multiple-choice' && <label><span>Błędne warianty odpowiedzi, po jednym w wierszu</span><textarea value={variant.distractors.join('\n')} onChange={event => updateDistractors(card.id, selectedMode, event.target.value)} disabled={busy || created} /></label>}
+                  {selectedMode === 'true-false' && <label><span>Poprawna ocena stwierdzenia</span><select value={String(variant.trueFalseAnswer)} onChange={event => updateTrueFalseAnswer(card.id, selectedMode, event.target.value === 'true')} disabled={busy || created}><option value="true">Prawda</option><option value="false">Fałsz</option></select></label>}
+                </>
+              })() : <p className="ai-note-tools-validation">Wybierz wariant, który chcesz dodać do puli.</p>}
             </article>)}</div>
-            <button type="button" className="button secondary ai-note-tools-add-card" disabled={busy || created} onClick={() => { setFlashcards(current => [...current, { id: nextCardId.current++, question: '', answer: '' }]); setCreated(false) }}><Plus size={14} />Dodaj fiszkę</button>
-            {hasIncompleteCard && <p className="ai-note-tools-validation" role="status">Uzupełnij pytanie i odpowiedź w każdej fiszce, aby ją zapisać.</p>}
+            <button type="button" className="button secondary ai-note-tools-add-card" disabled={busy || created} onClick={() => { setFlashcards(current => [...current, blankFlashcard(nextCardId.current++)]); setCreated(false) }}><Plus size={14} />Dodaj fiszkę</button>
+            {hasIncompleteCard && <p className="ai-note-tools-validation" role="status">Wybierz wariant i uzupełnij jego treść w każdej fiszce. Dla wariantu odpowiedzi wielokrotnego wyboru podaj co najmniej dwa błędne warianty.</p>}
             {hasDuplicateCard && <p className="ai-note-tools-validation" role="status">Usuń lub zmień powtarzające się pytania. W puli są już karty o takim samym pytaniu.</p>}
           </section>}
           {!flashcards.length && !busy && <p className="ai-note-tools-help">{sourceLabel ? `Fiszki powstaną na podstawie zakresu: ${sourceLabel}.` : 'Model przeanalizuje notatkę i jej załączniki. Obrazy oraz skanowane PDF-y wymagają modelu obsługującego obrazy; audio bez transkrypcji zostanie przetworzone przez skonfigurowaną usługę.'} Przed dodaniem możesz poprawić lub usunąć każdą fiszkę.</p>}

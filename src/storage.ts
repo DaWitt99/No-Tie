@@ -3,7 +3,7 @@ import { documentDir, join } from '@tauri-apps/api/path'
 import { exists, mkdir, readDir, readFile, readTextFile, remove, rename, stat, writeFile, writeTextFile } from '@tauri-apps/plugin-fs'
 import { markdownToNote, noteToMarkdown, sanitizeSvg } from './content'
 import { fileFingerprint } from './fileFingerprint'
-import type { Flashcard, FlashcardTrashEntry, Note, NoteAsset, NoteAttachment, NoteAttachmentHistory, NoteAttachmentReference, NoteTemplate, NoteVersion, ReviewSession, ReviewSessionStatus, SavedSearch, TrashEntry } from './types'
+import { isFlashcardStudyMode, type Flashcard, type FlashcardTrashEntry, type Note, type NoteAsset, type NoteAttachment, type NoteAttachmentHistory, type NoteAttachmentReference, type NoteTemplate, type NoteVersion, type ReviewSession, type ReviewSessionStatus, type SavedSearch, type TrashEntry } from './types'
 
 const DATABASE = 'no-tie-notes'
 const DATABASE_VERSION = 4
@@ -349,6 +349,8 @@ function normalizeFlashcards(value: unknown): Flashcard[] {
       question: card.question,
       answer: card.answer,
       kind: validKinds.includes(card.kind ?? '') ? card.kind : 'basic',
+      studyMode: isFlashcardStudyMode(card.studyMode) ? card.studyMode : 'flip',
+      trueFalseAnswer: typeof card.trueFalseAnswer === 'boolean' ? card.trueFalseAnswer : undefined,
       template: templateValues.includes(card.template ?? '') ? card.template : undefined,
       tags: Array.isArray(card.tags) ? card.tags.filter((tag): tag is string => typeof tag === 'string') : [],
       imageOcclusion,

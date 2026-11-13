@@ -59,6 +59,17 @@ export type TrashEntry = {
 
 export type FlashcardKind = 'basic' | 'cloze' | 'image-occlusion' | 'sequence' | 'numeric' | 'audio' | 'video'
 export type FlashcardTemplate = 'definition' | 'cause-effect' | 'comparison' | 'vocabulary' | 'process' | 'formula'
+export const FLASHCARD_STUDY_MODES = [
+  { value: 'flip', label: 'Pokaż odpowiedź' },
+  { value: 'multiple-choice', label: 'Warianty odpowiedzi' },
+  { value: 'true-false', label: 'Prawda / fałsz' },
+  { value: 'explain', label: 'Odpowiedź opisowa' },
+  { value: 'timed-exam', label: 'Odpowiedź na czas' },
+] as const
+export type FlashcardStudyMode = typeof FLASHCARD_STUDY_MODES[number]['value']
+export function isFlashcardStudyMode(value: unknown): value is FlashcardStudyMode {
+  return FLASHCARD_STUDY_MODES.some(mode => mode.value === value)
+}
 
 export type FlashcardOcclusionRegion = { id: string; x: number; y: number; width: number; height: number; label: string }
 export type FlashcardImageOcclusion = { imageDataUrl: string; fileName: string; regions: FlashcardOcclusionRegion[] }
@@ -76,6 +87,8 @@ export type Flashcard = {
   question: string
   answer: string
   kind?: FlashcardKind
+  studyMode: FlashcardStudyMode
+  trueFalseAnswer?: boolean
   template?: FlashcardTemplate
   tags?: string[]
   imageOcclusion?: FlashcardImageOcclusion
