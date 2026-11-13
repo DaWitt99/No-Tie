@@ -5,6 +5,7 @@ GlobalWorkerOptions.workerSrc = pdfWorkerUrl
 
 export type PdfVisionPage = { base64: string; pageNumber: number; totalPages: number }
 export type PdfVisionResult = { pages: PdfVisionPage[]; totalPages: number }
+export type PdfTextResult = { text: string; totalPages: number; pagesRead: number }
 
 function dataUrlBytes(dataUrl: string): Uint8Array {
   const comma = dataUrl.indexOf(',')
@@ -41,6 +42,36 @@ export async function pdfAttachmentToVisionPages(dataUrl: string, pageLimit: num
       canvas.height = 1
     }
     return { pages, totalPages: document.numPages }
+  } finally {
+    await loadingTask.destroy()
+  }
+}
+
+export async function pdfAttachmentToText(dataUrl: string, pageLimit = 40, characterLimit = 16_000): Promise<PdfTextResult> {
+  const loadingTask = getDocument({ data: dataUrlBytes(dataUrl) })
+  const document = await loadingTask.promise
+  try {
+    const pagesToRead = Math.min(document.numPages, Math.max(0, Math.floor(pageLimit)))
+    const sections: string[] = []
+    let characterCount = 0
+    let pagesRead = 0
+    for (let pageNumber = 1; pageNumber <= pagesToRead && characterCount < characterLimit; pageNumber += 1) {
+      const page = await document.getPage(pageNumber)
+      const content = await page.getTextContent()
+      const pageText = content.items.map(item => {
+        if (!('str' in item) || typeof item.str !== 'string') return ''
+        return `${item.str}${'hasEOL' in item && item.hasEOL ? '\n' : ' '}`
+      }).join('').replace(/[ \t]+\n/g, '\n').trim()
+      const section = pageText ? `Strona ${pageNumber}:\n${pageText}` : ''
+      if (section) {
+        const remaining = characterLimit - characterCount
+        sections.push(section.slice(0, remaining))
+        characterCount += Math.min(section.length, remaining)
+      }
+      pagesRead = pageNumber
+      page.cleanup()
+    }
+    return { text: sections.join('\n\n'), totalPages: document.numPages, pagesRead }
   } finally {
     await loadingTask.destroy()
   }

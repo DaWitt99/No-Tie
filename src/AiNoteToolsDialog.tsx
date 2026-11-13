@@ -1,12 +1,16 @@
-import { useRef, useState } from 'react'
+import { useMemo, useRef, useState } from 'react'
 import { Check, LoaderCircle, Maximize2, Minimize2, Plus, Sparkles, Trash2, X } from 'lucide-react'
 import type { Note, NoteAttachment } from './types'
-import { streamOllamaMessage } from './ollama'
+import { imageAttachmentToPngBase64, streamOllamaMessage } from './ollama'
 
 export type AiNoteTool = 'summary' | 'tasks' | 'flashcards' | 'quiz'
 
 type FlashcardDraft = { id: number; question: string; answer: string }
 type ParsedFlashcard = Omit<FlashcardDraft, 'id'>
+
+const MAX_AI_CONTEXT_IMAGES = 20
+const MAX_AI_NOTE_TEXT = 28_000
+const MAX_AI_ATTACHMENT_TEXT = 14_000
 
 const toolLabels: Record<AiNoteTool, string> = {
   summary: 'Podsumowanie i konspekt',
@@ -39,7 +43,7 @@ function parseFlashcards(value: string): ParsedFlashcard[] {
   return cards
 }
 
-export function AiNoteToolsDialog({ kind, note, attachments, baseUrl, model, onApply, onCreateFlashcard, onClose }: {
+export function AiNoteToolsDialog({ kind, note, attachments, baseUrl, model, onApply, onCreateFlashcard, onTranscribeAudio, onClose }: {
   kind: AiNoteTool
   note: Note
   attachments: NoteAttachment[]
@@ -47,10 +51,11 @@ export function AiNoteToolsDialog({ kind, note, attachments, baseUrl, model, onA
   model: string
   onApply: (generated: string) => void
   onCreateFlashcard: (noteId: string, question: string, answer: string) => void
+  onTranscribeAudio?: (attachment: NoteAttachment) => Promise<string>
   onClose: () => void
 }) {
   const [sourceNote] = useState(note)
-  const [sourceAttachments] = useState(attachments)
+  const sourceAttachments = useMemo(() => attachments.filter(attachment => attachment.noteId === sourceNote.id), [attachments, sourceNote.id])
   const [toolKind] = useState(kind)
   const [generated, setGenerated] = useState('')
   const [flashcards, setFlashcards] = useState<FlashcardDraft[]>([])
@@ -72,11 +77,6 @@ export function AiNoteToolsDialog({ kind, note, attachments, baseUrl, model, onA
       setCreated(false)
     }
     let result = ''
-    const attachmentText = sourceAttachments.flatMap(item => {
-      const text = item.transcript?.trim() || item.extractedText?.trim()
-      return text ? [`\n\nZAŁĄCZNIK: ${item.fileName}\n${text}`] : []
-    }).join('')
-    const content = `Tytuł: ${sourceNote.title || 'Bez tytułu'}\nTagi: ${sourceNote.tags.join(', ') || 'brak'}\n\n${sourceNote.content}${attachmentText}`.slice(0, 48_000)
     const flashcardInstructions = [
       'Utwórz maksymalnie 12 wysokiej jakości fiszek do nauki na podstawie wyłącznie materiału źródłowego.',
       'Każda fiszka ma sprawdzać jedną konkretną, istotną rzecz. Pytanie powinno być jasne i zrozumiałe bez zgadywania kontekstu, a odpowiedź krótka, precyzyjna i wystarczająca do samodzielnej nauki.',
@@ -92,7 +92,66 @@ export function AiNoteToolsDialog({ kind, note, attachments, baseUrl, model, onA
       quiz: 'Utwórz krótki quiz sprawdzający zrozumienie materiału: 5 pytań wielokrotnego wyboru, po 4 odpowiedzi A–D, dokładnie jedna poprawna. Najpierw pokaż wszystkie pytania bez ujawniania odpowiedzi, a na końcu dodaj osobny klucz odpowiedzi z krótkim uzasadnieniem. Użyj Markdown i nie dodawaj faktów spoza materiału.',
     }
     try {
-      await streamOllamaMessage(baseUrl, model, [{ role: 'user', content: `${instructions[toolKind]}\n\nMATERIAŁ ŹRÓDŁOWY:\n${content}` }], chunk => {
+      const attachmentTextSections: string[] = []
+      const attachmentImages: string[] = []
+      const imageLabels: string[] = []
+      let omittedVisuals = 0
+      let omittedPdfPages = 0
+
+      for (const attachment of sourceAttachments) {
+        let transcript = attachment.transcript?.trim() || attachment.transcriptSegments?.map(segment => segment.text.trim()).filter(Boolean).join('\n') || ''
+        if (attachment.mimeType.startsWith('audio/') && !transcript) {
+          if (!onTranscribeAudio) throw new Error(`Załącznik audio „${attachment.fileName}” nie ma transkrypcji.`)
+          transcript = (await onTranscribeAudio(attachment)).trim()
+          if (!transcript) throw new Error(`Nie udało się uzyskać transkrypcji załącznika „${attachment.fileName}”.`)
+        }
+
+        const textSections = [transcript, attachment.extractedText?.trim() ?? ''].filter(Boolean)
+        if (attachment.pdfAnnotations?.length) {
+          textSections.push(attachment.pdfAnnotations.map(annotation => `Strona ${annotation.page}${annotation.quote ? `, cytat: „${annotation.quote}”` : ''}: ${annotation.text}`).join('\n'))
+        }
+
+        if (attachment.mimeType === 'application/pdf' && !attachment.extractedText?.trim()) {
+          const { pdfAttachmentToText } = await import('./pdfVision')
+          const pdfText = await pdfAttachmentToText(attachment.dataUrl)
+          if (pdfText.text.trim()) {
+            textSections.push(pdfText.text.trim())
+            omittedPdfPages += Math.max(0, pdfText.totalPages - pdfText.pagesRead)
+          } else if (attachmentImages.length < MAX_AI_CONTEXT_IMAGES) {
+            const { pdfAttachmentToVisionPages } = await import('./pdfVision')
+            const pages = await pdfAttachmentToVisionPages(attachment.dataUrl, MAX_AI_CONTEXT_IMAGES - attachmentImages.length)
+            for (const page of pages.pages) {
+              attachmentImages.push(page.base64)
+              imageLabels.push(`PDF „${attachment.fileName}”, strona ${page.pageNumber} z ${page.totalPages}`)
+            }
+            omittedVisuals += Math.max(0, pages.totalPages - pages.pages.length)
+          } else {
+            omittedVisuals += pdfText.totalPages
+          }
+        } else if (attachment.mimeType.startsWith('image/') && !attachment.extractedText?.trim()) {
+          if (attachmentImages.length < MAX_AI_CONTEXT_IMAGES) {
+            attachmentImages.push(await imageAttachmentToPngBase64(attachment.dataUrl))
+            imageLabels.push(`Obraz „${attachment.fileName}”`)
+          } else omittedVisuals += 1
+        }
+
+        if (textSections.length) attachmentTextSections.push(`ZAŁĄCZNIK „${attachment.fileName}”:\n${textSections.join('\n\n')}`)
+      }
+
+      const noteSource = `Tytuł: ${sourceNote.title || 'Bez tytułu'}\nTagi: ${sourceNote.tags.join(', ') || 'brak'}\n\n${sourceNote.content}`
+      const allAttachmentSource = attachmentTextSections.join('\n\n')
+      const attachmentSource = allAttachmentSource.slice(0, MAX_AI_ATTACHMENT_TEXT)
+      const contentParts = [
+        noteSource.slice(0, MAX_AI_NOTE_TEXT),
+        noteSource.length > MAX_AI_NOTE_TEXT ? '[Dalsza część notatki została pominięta z powodu limitu kontekstu.]' : '',
+        attachmentSource ? `\n\nTREŚĆ ZAŁĄCZNIKÓW:\n${attachmentSource}` : '',
+        allAttachmentSource.length > MAX_AI_ATTACHMENT_TEXT ? '[Tekst załączników został skrócony z powodu limitu kontekstu.]' : '',
+        imageLabels.length ? `\n\nZAŁĄCZNIKI OBRAZOWE W TEJ SAMEJ KOLEJNOŚCI CO OBRAZY:\n${imageLabels.map((label, index) => `${index + 1}. ${label}`).join('\n')}` : '',
+        omittedPdfPages ? `\nPominięto tekst z ${omittedPdfPages} dalszych stron PDF.` : '',
+        omittedVisuals ? `\nPominięto ${omittedVisuals} obrazów lub stron PDF z powodu limitu ${MAX_AI_CONTEXT_IMAGES} obrazów.` : '',
+      ].filter(Boolean)
+      const content = contentParts.join('\n\n').slice(0, 48_000)
+      await streamOllamaMessage(baseUrl, model, [{ role: 'user', content: `${instructions[toolKind]}\n\nMATERIAŁ ŹRÓDŁOWY:\n${content}`, images: attachmentImages.length ? attachmentImages : undefined }], chunk => {
         result += chunk
         if (!isFlashcards) setGenerated(result)
       })
@@ -143,7 +202,7 @@ export function AiNoteToolsDialog({ kind, note, attachments, baseUrl, model, onA
         {error && <p className="ai-note-tools-error" role="alert">{error}</p>}
         {isFlashcards ? <>
           <label className="ai-note-tools-guidance"><span>Jakie fiszki przygotować?</span><textarea aria-label="Dodatkowe wskazówki do fiszek" value={extraGuidance} onChange={event => setExtraGuidance(event.target.value)} placeholder="Np. skup się na pojęciach i różnicach, zadawaj pytania wymagające krótkiego wyjaśnienia…" disabled={busy} /><small>Twoje wskazówki uzupełnią kryteria jakości i treść notatki.</small></label>
-          {busy && <p className="ai-note-tools-progress" role="status"><LoaderCircle className="spin" size={15} />Czytam notatkę i przygotowuję fiszki. Możesz zminimalizować to okno i wrócić później.</p>}
+          {busy && <p className="ai-note-tools-progress" role="status"><LoaderCircle className="spin" size={15} />Czytam notatkę i jej załączniki, a potem przygotuję fiszki. Możesz zminimalizować to okno i wrócić później.</p>}
           {flashcards.length > 0 && <section className="ai-note-tools-flashcards" aria-label="Edytuj wygenerowane fiszki">
             <div className="ai-note-tools-cards-heading"><div><h3>Przejrzyj fiszki</h3><p>Popraw pytania i odpowiedzi przed dodaniem ich do puli.</p></div><span>{flashcards.length}</span></div>
             <div className="ai-note-tools-card-list">{flashcards.map((card, index) => <article className="ai-note-tools-card" key={card.id}>
@@ -154,7 +213,7 @@ export function AiNoteToolsDialog({ kind, note, attachments, baseUrl, model, onA
             <button type="button" className="button secondary ai-note-tools-add-card" disabled={busy || created} onClick={() => { setFlashcards(current => [...current, { id: nextCardId.current++, question: '', answer: '' }]); setCreated(false) }}><Plus size={14} />Dodaj fiszkę</button>
             {hasIncompleteCard && <p className="ai-note-tools-validation" role="status">Uzupełnij pytanie i odpowiedź w każdej fiszce, aby ją zapisać.</p>}
           </section>}
-          {!flashcards.length && !busy && <p className="ai-note-tools-help">Model przeanalizuje notatkę oraz zapisane transkrypcje i teksty załączników. Przed dodaniem możesz poprawić lub usunąć każdą fiszkę.</p>}
+          {!flashcards.length && !busy && <p className="ai-note-tools-help">Model przeanalizuje notatkę i jej załączniki. Obrazy oraz skanowane PDF-y wymagają modelu obsługującego obrazy; audio bez transkrypcji zostanie przetworzone przez skonfigurowaną usługę. Przed dodaniem możesz poprawić lub usunąć każdą fiszkę.</p>}
         </> : <>
           {generated && <textarea className="ai-note-tools-result" aria-label="Wynik wygenerowany przez AI" value={generated} onChange={event => { setGenerated(event.target.value); setCreated(false) }} />}
           {!generated && <p className="ai-note-tools-help">Model przeanalizuje treść notatki oraz zapisane transkrypcje i teksty załączników.</p>}

@@ -1393,7 +1393,7 @@
 .ai-note-tools-card textarea { min-height: 58px; font-size: 11px; font-weight: 400; }
 .ai-note-tools-add-card { justify-self: start; min-height: 30px; }
 .ai-note-tools-validation { margin: 0; color: #b64b53; font-size: 9px; }
-.ai-note-tools-minimized { position: fixed; z-index: 125; right: 18px; bottom: 18px; display: flex; width: min(430px, calc(100vw - 24px)); align-items: center; justify-content: space-between; gap: 12px; padding: 10px 11px; border: 1px solid #dfe4f2; border-radius: 12px; background: #fff; box-shadow: 0 12px 36px #17213c2e; }
+.ai-note-tools-minimized { position: fixed; z-index: 125; top: calc(env(safe-area-inset-top, 0px) + 66px); right: 18px; display: flex; width: min(430px, calc(100vw - 24px)); align-items: center; justify-content: space-between; gap: 12px; padding: 10px 11px; border: 1px solid #dfe4f2; border-radius: 12px; background: #fff; box-shadow: 0 12px 36px #17213c2e; }
 .ai-note-tools-minimized-status { display: flex; min-width: 0; align-items: center; gap: 9px; }
 .ai-note-tools-minimized-mark { display: grid; width: 31px; height: 31px; flex: 0 0 31px; place-items: center; border-radius: 9px; color: #6275d5; background: #f0f2ff; }
 .ai-note-tools-minimized-status > span:last-child { display: grid; min-width: 0; gap: 3px; }
@@ -1403,6 +1403,9 @@
 .ai-note-tools-minimized-actions { display: flex; flex: 0 0 auto; align-items: center; gap: 4px; }
 .ai-note-tools-minimized-actions .button { min-height: 30px; padding: 0 9px; font-size: 9px; white-space: nowrap; }
 .ai-note-tools-minimized-actions .icon-button { width: 28px; height: 28px; }
+@media (min-width: 701px) {
+  html.tauri-android .ai-note-tools-minimized { top: max(90px, calc(env(safe-area-inset-top, 0px) + 66px)); }
+}
 .pdf-preview-layout { display: flex; min-height: 0; flex: 1; overflow: hidden; }
 .attachment-preview-dialog.has-pdf-annotations { width: min(1100px, calc(100vw - 24px)); height: min(88vh, 900px); }
 .pdf-preview-layout > iframe { min-width: 0; flex: 1; border: 0; background: #f4f5f8; }
@@ -1439,7 +1442,7 @@
   .feature-manager-dialog, .duplicate-manager-dialog, .attachment-manager-dialog, .note-board-dialog, .project-dashboard-dialog, .ai-note-tools-dialog { width: calc(100vw - 18px); max-height: 90dvh; }
   .ai-note-tools-body { padding-right: 14px; padding-left: 14px; }
   .ai-note-tools-dialog > footer { padding-right: 14px; padding-left: 14px; }
-  .ai-note-tools-minimized { right: 8px; bottom: max(8px, env(safe-area-inset-bottom, 0px)); width: calc(100vw - 16px); }
+  .ai-note-tools-minimized { top: calc(env(safe-area-inset-top, 0px) + 60px); right: 8px; width: calc(100vw - 16px); }
   .duplicate-pair { grid-template-columns: 1fr; }
   .duplicate-score { grid-column: auto; }
   .duplicate-pair > div { display: grid; }
