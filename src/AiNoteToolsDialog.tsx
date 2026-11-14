@@ -24,6 +24,13 @@ function formatTaskDuration(milliseconds: number) {
   return hours ? `${hours}:${minutes}:${seconds}` : `${minutes}:${seconds}`
 }
 
+function flashcardGenerationOptions(requestedCount: number, promptLength: number) {
+  const numPredict = Math.min(24_576, Math.max(4_096, requestedCount * 480))
+  const estimatedPromptTokens = Math.ceil(promptLength / 3.2)
+  const numCtx = Math.min(32_768, Math.max(8_192, estimatedPromptTokens + numPredict + 1_024))
+  return { numPredict, numCtx }
+}
+
 const toolLabels: Record<AiNoteTool, string> = {
   summary: 'Podsumowanie i konspekt',
   tasks: 'Zadania do wykonania',
@@ -116,28 +123,80 @@ function extractCompleteJsonObjectBlocks(value: string) {
   return readCompleteJsonObjectBlocks(value, { cursor: 0, start: -1, depth: 0, inString: false, escapeNext: false })
 }
 
+function extractNestedCompleteJsonObjects(value: string): string[] {
+  const blocks: string[] = []
+  const starts: number[] = []
+  let inString = false
+  let escapeNext = false
+  for (let index = 0; index < value.length; index += 1) {
+    const character = value[index]
+    if (inString) {
+      if (escapeNext) escapeNext = false
+      else if (character === '\\') escapeNext = true
+      else if (character === '"') inString = false
+      continue
+    }
+    if (character === '"') inString = true
+    else if (character === '{') starts.push(index)
+    else if (character === '}' && starts.length) {
+      const start = starts.pop()!
+      blocks.push(value.slice(start, index + 1))
+    }
+  }
+  return blocks
+}
+
+function unwrapFlashcardRows(value: unknown): unknown[] {
+  if (Array.isArray(value)) return value
+  if (!value || typeof value !== 'object') return []
+  const row = value as Record<string, unknown>
+  for (const key of ['flashcards', 'flashcard', 'cards', 'fiszki', 'fiszka', 'items', 'results', 'data']) {
+    const nested = row[key]
+    if (Array.isArray(nested)) return nested
+    if (nested && typeof nested === 'object') {
+      const rows = unwrapFlashcardRows(nested)
+      if (rows.length) return rows
+    }
+  }
+  return [value]
+}
+
+function isFlashcardRow(value: unknown): value is Record<string, unknown> {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return false
+  const row = value as Record<string, unknown>
+  const hasNamedVariants = Object.keys(row).some(key => normalizeFlashcardVariantKey(key) && row[key] && typeof row[key] === 'object')
+  return Boolean(row.variants && typeof row.variants === 'object') || hasNamedVariants || ['question', 'pytanie', 'front'].some(key => typeof row[key] === 'string')
+}
+
+function isStructuredFlashcardRow(value: unknown): value is Record<string, unknown> {
+  return isFlashcardRow(value) && Boolean(value.variants && typeof value.variants === 'object')
+}
+
 function parseFlashcards(value: string, existingQuestions: readonly string[] = []): ParsedFlashcardsResult {
   const fenced = value.match(/```(?:json)?\s*([\s\S]*?)```/i)?.[1]
   const candidate = fenced?.trim() || value.trim()
   if (!candidate) throw new Error('Model nie zwrócił listy fiszek. Spróbuj wygenerować je ponownie.')
 
-  let parsed: unknown
-  try { parsed = JSON.parse(candidate) } catch {
-    const blocks = extractCompleteJsonObjectBlocks(candidate)
-    parsed = blocks.flatMap(block => {
+  let rows: unknown[]
+  try { rows = unwrapFlashcardRows(JSON.parse(candidate)) }
+  catch {
+    const completeRows = extractCompleteJsonObjectBlocks(candidate).flatMap(block => {
       try { return [JSON.parse(block)] } catch { return [] }
-    })
-    if (!Array.isArray(parsed) || !parsed.length) throw new Error('Odpowiedź modelu nie zawiera poprawnej listy fiszek. Spróbuj wygenerować je ponownie.')
+    }).filter(isFlashcardRow)
+    const recoveredRows = completeRows.length ? completeRows : extractNestedCompleteJsonObjects(candidate).flatMap(block => {
+      try { return [JSON.parse(block)] } catch { return [] }
+    }).filter(isStructuredFlashcardRow)
+    rows = recoveredRows
+    if (!rows.length) throw new Error('Odpowiedź modelu nie zawiera poprawnej listy fiszek. Spróbuj wygenerować je ponownie.')
   }
-  if (!Array.isArray(parsed)) parsed = parsed && typeof parsed === 'object' ? [parsed] : []
-  if (!Array.isArray(parsed)) throw new Error('Model nie zwrócił listy fiszek.')
+  if (!rows.length) throw new Error('Model nie zwrócił listy fiszek.')
 
   const cards: ParsedFlashcard[] = []
   let incompleteRows = 0
   let incompleteVariants = 0
   let duplicateQuestions = 0
   const seen = new Set(existingQuestions.map(normalizeQuestion).filter(Boolean))
-  for (const item of parsed) {
+  for (const item of rows) {
     if (!item || typeof item !== 'object') { incompleteRows += 1; continue }
     const row = item as Record<string, unknown>
     const hasStructuredVariants = Boolean(row.variants && typeof row.variants === 'object')
@@ -357,15 +416,27 @@ export function AiNoteToolsDialog({ kind, note, attachments, existingQuestions =
       let firstStageError: unknown
       const jsonObjectScanState: JsonObjectScanState = { cursor: 0, start: -1, depth: 0, inString: false, escapeNext: false }
       let hasStreamedFlashcards = false
+      const streamedCards: ParsedFlashcard[] = []
+      let streamedIncompleteRows = 0
+      let streamedIncompleteVariants = 0
+      let streamedDuplicateQuestions = 0
+      const firstStagePrompt = `${instructions[toolKind]}\n\nMATERIAŁ ŹRÓDŁOWY:\n${content}`
+      const firstStageOptions = isFlashcards ? flashcardGenerationOptions(flashcardCount, firstStagePrompt.length) : undefined
       try {
-        await streamOllamaMessage(baseUrl, model, [{ role: 'user', content: `${instructions[toolKind]}\n\nMATERIAŁ ŹRÓDŁOWY:\n${content}`, images: attachmentImages.length ? attachmentImages : undefined }], chunk => {
+        await streamOllamaMessage(baseUrl, model, [{ role: 'user', content: firstStagePrompt, images: attachmentImages.length ? attachmentImages : undefined }], chunk => {
           result += chunk
           if (!isFlashcards) setGenerated(result)
           else {
             const blocks = readCompleteJsonObjectBlocks(result, jsonObjectScanState)
             const newCards = blocks.flatMap(block => {
-              try { return parseFlashcards(block, existingQuestions).cards }
-              catch { return [] }
+              try {
+                const blockResult = parseFlashcards(block, [...existingQuestions, ...streamedCards.map(card => card.variants.flip.question)])
+                streamedIncompleteRows += blockResult.incompleteRows
+                streamedIncompleteVariants += blockResult.incompleteVariants
+                streamedDuplicateQuestions += blockResult.duplicateQuestions
+                streamedCards.push(...blockResult.cards)
+                return blockResult.cards
+              } catch { return [] }
             }).map(card => ({ ...card, id: nextCardId.current++ }))
             if (newCards.length) {
               if (hasStreamedFlashcards) setFlashcards(current => [...current, ...newCards])
@@ -374,7 +445,7 @@ export function AiNoteToolsDialog({ kind, note, attachments, existingQuestions =
               setCreated(false)
             }
           }
-        })
+        }, undefined, firstStageOptions)
       } catch (generationError) {
         if (!isFlashcards || !result.trim()) throw generationError
         firstStageError = generationError
@@ -385,6 +456,9 @@ export function AiNoteToolsDialog({ kind, note, attachments, existingQuestions =
         let firstStageParseError: unknown
         try { firstStageParsed = parseFlashcards(result, existingQuestions) }
         catch (parseError) { firstStageParseError = parseError }
+        if (!firstStageParsed && streamedCards.length) {
+          firstStageParsed = { cards: streamedCards, incompleteRows: streamedIncompleteRows, incompleteVariants: streamedIncompleteVariants, duplicateQuestions: streamedDuplicateQuestions }
+        }
 
         setFlashcardGenerationStage('review')
         setGenerationNotice('AI sprawdza składnię i kompletność JSON-u fiszek…')
@@ -392,7 +466,8 @@ export function AiNoteToolsDialog({ kind, note, attachments, existingQuestions =
         let reviewedParsed: ParsedFlashcardsResult | undefined
         let reviewError: unknown
         try {
-          await streamOllamaMessage(baseUrl, model, [{ role: 'user', content: flashcardJsonReviewPrompt(result, flashcardCount) }], chunk => { reviewedResult += chunk })
+          const reviewPrompt = flashcardJsonReviewPrompt(result, flashcardCount)
+          await streamOllamaMessage(baseUrl, model, [{ role: 'user', content: reviewPrompt }], chunk => { reviewedResult += chunk }, undefined, flashcardGenerationOptions(flashcardCount, reviewPrompt.length))
           if (!reviewedResult.trim()) throw new Error('AI zwróciło pustą odpowiedź podczas sprawdzania JSON-u.')
           reviewedParsed = parseFlashcards(reviewedResult, existingQuestions)
         } catch (error) {

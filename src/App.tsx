@@ -2741,7 +2741,7 @@ function App() {
           </aside>
         })}
       </div>}
-      {toast && <div className="app-toast" role="status"><Check size={16} />{toast}</div>}
+      {toast && <div className="app-toast" role="status"><span className="app-toast-mark"><Check size={16} /></span><span>{toast}</span></div>}
       {mobileDrawer !== 'none' && <button className="drawer-scrim" aria-label="Zamknij menu" onClick={() => setMobileDrawer('none')} />}
     </main>
   )

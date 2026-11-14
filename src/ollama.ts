@@ -58,6 +58,11 @@ export type OllamaMessage = {
   images?: string[]
 }
 
+export type OllamaGenerationOptions = {
+  numPredict?: number
+  numCtx?: number
+}
+
 export async function imageAttachmentToPngBase64(dataUrl: string): Promise<string> {
   const image = new Image()
   await new Promise<void>((resolve, reject) => {
@@ -205,7 +210,7 @@ async function consumeOllamaStream(response: Response, onChunk: (content: string
   if (pending.trim()) readOllamaStreamLine(pending, onChunk)
 }
 
-export async function streamOllamaMessage(baseUrl: string, model: string, messages: OllamaMessage[], onChunk: (content: string) => void, signal?: AbortSignal): Promise<void> {
+export async function streamOllamaMessage(baseUrl: string, model: string, messages: OllamaMessage[], onChunk: (content: string) => void, signal?: AbortSignal, generationOptions?: OllamaGenerationOptions): Promise<void> {
   if (!model.trim()) throw new Error('Wybierz model w ustawieniach Ollama.')
   if (signal?.aborted) return
   if (isTauri()) {
@@ -219,7 +224,7 @@ export async function streamOllamaMessage(baseUrl: string, model: string, messag
         cancelNativeRequest()
         return
       }
-      await invoke<void>('ollama_chat_stream', { baseUrl, model, messages, requestId, onChunk: onChunkChannel })
+      await invoke<void>('ollama_chat_stream', { baseUrl, model, messages, requestId, onChunk: onChunkChannel, generationOptions: generationOptions ?? null })
     } catch (error) {
       if (signal?.aborted) return
       if (typeof error === 'string') throw new Error(error)
@@ -230,12 +235,12 @@ export async function streamOllamaMessage(baseUrl: string, model: string, messag
     return
   }
   try {
-    const timeoutSignal = AbortSignal.timeout(5 * 60_000)
+    const timeoutSignal = AbortSignal.timeout(generationOptions ? 15 * 60_000 : 5 * 60_000)
     const requestSignal = signal ? AbortSignal.any([signal, timeoutSignal]) : timeoutSignal
     const response = await fetch(apiUrl(baseUrl, 'chat'), {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ model, messages, stream: true }),
+      body: JSON.stringify({ model, messages, stream: true, options: generationOptions ? { num_predict: generationOptions.numPredict, num_ctx: generationOptions.numCtx } : undefined }),
       signal: requestSignal,
     })
     await consumeOllamaStream(response, onChunk)

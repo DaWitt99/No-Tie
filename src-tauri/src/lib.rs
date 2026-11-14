@@ -101,6 +101,15 @@ struct OllamaMessage {
     images: Option<Vec<String>>,
 }
 
+#[derive(Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct OllamaGenerationOptions {
+    #[serde(default)]
+    num_predict: Option<i32>,
+    #[serde(default)]
+    num_ctx: Option<u32>,
+}
+
 #[derive(Deserialize)]
 struct OllamaChatStreamChunk {
     #[serde(default)]
@@ -266,6 +275,7 @@ async fn ollama_chat_stream(
     messages: Vec<OllamaMessage>,
     request_id: String,
     on_chunk: tauri::ipc::Channel<String>,
+    generation_options: Option<OllamaGenerationOptions>,
     requests: tauri::State<'_, OllamaChatRequests>,
 ) -> Result<(), String> {
     let (cancel_sender, mut cancel_receiver) = watch::channel(false);
@@ -280,7 +290,7 @@ async fn ollama_chat_stream(
         registry.active.insert(request_id.clone(), cancel_sender);
     }
 
-    let result = ollama_chat_stream_inner(base_url, model, messages, &on_chunk, &mut cancel_receiver).await;
+    let result = ollama_chat_stream_inner(base_url, model, messages, generation_options, &on_chunk, &mut cancel_receiver).await;
     if let Ok(mut registry) = requests.0.lock() {
         registry.active.remove(&request_id);
         registry.cancelled.remove(&request_id);
@@ -292,6 +302,7 @@ async fn ollama_chat_stream_inner(
     base_url: String,
     model: String,
     messages: Vec<OllamaMessage>,
+    generation_options: Option<OllamaGenerationOptions>,
     on_chunk: &tauri::ipc::Channel<String>,
     cancel: &mut watch::Receiver<bool>,
 ) -> Result<(), String> {
@@ -300,16 +311,25 @@ async fn ollama_chat_stream_inner(
         return Err("Wybierz model w ustawieniach Ollama.".into());
     }
     let url = ollama_api_url(&base_url, "chat")?;
+    let request_timeout = if generation_options.is_some() { 15 * 60 } else { 300 };
     let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(300))
+        .timeout(std::time::Duration::from_secs(request_timeout))
         .build()
         .map_err(|error| format!("Nie udało się przygotować połączenia: {error}"))?;
-    let send_future = Box::pin(
-        client
-            .post(url)
-            .json(&serde_json::json!({ "model": model, "messages": messages, "stream": true }))
-            .send(),
-    );
+    let mut request_body = serde_json::json!({ "model": model, "messages": messages, "stream": true });
+    if let Some(generation_options) = generation_options {
+        let mut options = serde_json::Map::new();
+        if let Some(num_predict) = generation_options.num_predict {
+            options.insert("num_predict".into(), serde_json::json!(num_predict));
+        }
+        if let Some(num_ctx) = generation_options.num_ctx {
+            options.insert("num_ctx".into(), serde_json::json!(num_ctx));
+        }
+        if !options.is_empty() {
+            request_body["options"] = serde_json::Value::Object(options);
+        }
+    }
+    let send_future = Box::pin(client.post(url).json(&request_body).send());
     let cancel_future = Box::pin(cancel.changed());
     let response = match select(cancel_future, send_future).await {
         Either::Left(_) => return Ok(()),
