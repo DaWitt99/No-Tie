@@ -8,6 +8,7 @@ export type AiNoteTool = 'summary' | 'tasks' | 'flashcards' | 'quiz'
 type FlashcardVariantDraft = { question: string; answer: string; distractors: string[]; trueFalseAnswer: boolean }
 type FlashcardDraft = { id: number; selectedMode?: FlashcardStudyMode; variants: Record<FlashcardStudyMode, FlashcardVariantDraft> }
 type ParsedFlashcard = Omit<FlashcardDraft, 'id' | 'selectedMode'>
+type ParsedFlashcardsResult = { cards: ParsedFlashcard[]; incompleteRows: number; incompleteVariants: number; duplicateQuestions: number }
 
 const MAX_AI_CONTEXT_IMAGES = 20
 const MAX_AI_NOTE_TEXT = 28_000
@@ -40,7 +41,7 @@ function normalizeQuestion(value: string) {
   return value.normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLocaleLowerCase('pl').replace(/[^\p{L}\p{N}]+/gu, ' ').trim()
 }
 
-function parseFlashcards(value: string, existingQuestions: readonly string[] = []): ParsedFlashcard[] {
+function parseFlashcards(value: string, existingQuestions: readonly string[] = []): ParsedFlashcardsResult {
   const fenced = value.match(/```(?:json)?\s*([\s\S]*?)```/i)?.[1]
   const start = value.indexOf('[')
   const end = value.lastIndexOf(']')
@@ -53,25 +54,29 @@ function parseFlashcards(value: string, existingQuestions: readonly string[] = [
   }
   if (!Array.isArray(parsed)) throw new Error('Model nie zwrócił listy fiszek.')
 
-  const cards = parsed.flatMap(item => {
-    if (!item || typeof item !== 'object') return []
+  const cards: ParsedFlashcard[] = []
+  let incompleteRows = 0
+  let incompleteVariants = 0
+  let duplicateQuestions = 0
+  const seen = new Set(existingQuestions.map(normalizeQuestion).filter(Boolean))
+  for (const item of parsed) {
+    if (!item || typeof item !== 'object') { incompleteRows += 1; continue }
     const row = item as Record<string, unknown>
     const hasStructuredVariants = Boolean(row.variants && typeof row.variants === 'object')
     const variants = hasStructuredVariants ? row.variants as Record<string, unknown> : row
     const legacyQuestion = typeof row.question === 'string' ? row.question.trim() : typeof row.pytanie === 'string' ? row.pytanie.trim() : ''
     const legacyAnswer = typeof row.answer === 'string' ? row.answer.trim() : typeof row.odpowiedz === 'string' ? row.odpowiedz.trim() : ''
-    const readVariant = (mode: FlashcardStudyMode, key: string): FlashcardVariantDraft | null => {
+    const readVariant = (mode: FlashcardStudyMode, key: string): { draft: FlashcardVariantDraft; complete: boolean } => {
       const alias = mode === 'multiple-choice' ? 'multiple-choice' : mode === 'true-false' ? 'true-false' : mode === 'timed-exam' ? 'timed-exam' : ''
       const raw = variants[key] ?? (alias ? variants[alias] : undefined)
       const variant = raw && typeof raw === 'object' ? raw as Record<string, unknown> : {}
       const question = typeof variant.question === 'string' ? variant.question.trim() : legacyQuestion
       const answer = typeof variant.answer === 'string' ? variant.answer.trim() : legacyAnswer
-      if (!question || (!answer && mode !== 'true-false')) return null
       const distractors = Array.isArray(variant.distractors) ? variant.distractors.filter((item): item is string => typeof item === 'string' && item.trim().length > 0).map(item => item.trim()).slice(0, 8) : []
       const truthValue = variant.correct ?? variant.isTrue
-      if (mode === 'true-false' && hasStructuredVariants && typeof truthValue !== 'boolean') return null
       const trueFalseAnswer = truthValue === false || truthValue === 'false' ? false : true
-      return { question, answer, distractors, trueFalseAnswer }
+      const complete = Boolean(question) && (mode === 'true-false' ? !hasStructuredVariants || typeof truthValue === 'boolean' : Boolean(answer) && (mode !== 'multiple-choice' || distractors.length >= 2))
+      return { draft: { question, answer, distractors, trueFalseAnswer }, complete }
     }
     const parsedVariants = {
       flip: readVariant('flip', 'flip'),
@@ -80,18 +85,18 @@ function parseFlashcards(value: string, existingQuestions: readonly string[] = [
       explain: readVariant('explain', 'explain'),
       'timed-exam': readVariant('timed-exam', 'timedExam'),
     }
-    if (Object.values(parsedVariants).some(variant => !variant)) return []
-    return [{ variants: parsedVariants as Record<FlashcardStudyMode, FlashcardVariantDraft> }]
-  })
-  const seen = new Set(existingQuestions.map(normalizeQuestion).filter(Boolean))
-  const uniqueCards = cards.filter(card => {
-    const key = normalizeQuestion(card.variants.flip.question)
-    if (seen.has(key)) return false
-    seen.add(key)
-    return true
-  })
-  if (!uniqueCards.length) throw new Error('Model nie zwrócił kompletnych pięciu wariantów albo wszystkie pytania są już w puli. Zmień wskazówki i spróbuj ponownie.')
-  return uniqueCards
+    const parsedValues = Object.values(parsedVariants)
+    if (!parsedValues.some(variant => variant.draft.question)) { incompleteRows += 1; continue }
+    incompleteVariants += parsedValues.filter(variant => !variant.complete).length
+    const questionKey = normalizeQuestion(parsedVariants.flip.draft.question)
+    if (questionKey) {
+      if (seen.has(questionKey)) duplicateQuestions += 1
+      else seen.add(questionKey)
+    }
+    cards.push({ variants: Object.fromEntries(Object.entries(parsedVariants).map(([mode, value]) => [mode, value.draft])) as Record<FlashcardStudyMode, FlashcardVariantDraft> })
+  }
+  if (!cards.length) throw new Error('Model nie zwrócił żadnych pytań, które można wyświetlić. Zmniejsz liczbę fiszek albo doprecyzuj wskazówki i spróbuj ponownie.')
+  return { cards, incompleteRows, incompleteVariants, duplicateQuestions }
 }
 
 export function AiNoteToolsDialog({ kind, note, attachments, existingQuestions = [], sourceText, sourcePage, sourceLabel, baseUrl, model, onApply, onCreateFlashcard, onTranscribeAudio, onClose }: {
@@ -123,6 +128,7 @@ export function AiNoteToolsDialog({ kind, note, attachments, existingQuestions =
   const [taskNow, setTaskNow] = useState(() => Date.now())
   const [minimized, setMinimized] = useState(false)
   const [error, setError] = useState('')
+  const [generationNotice, setGenerationNotice] = useState('')
   const [created, setCreated] = useState(false)
   const nextCardId = useRef(0)
   const isFlashcards = toolKind === 'flashcards'
@@ -157,6 +163,7 @@ export function AiNoteToolsDialog({ kind, note, attachments, existingQuestions =
     setTaskNow(startedAt)
     setBusy(true)
     setError('')
+    setGenerationNotice('')
     if (!isFlashcards) {
       setGenerated('')
       setCreated(false)
@@ -247,9 +254,16 @@ export function AiNoteToolsDialog({ kind, note, attachments, existingQuestions =
       })
       if (!result.trim()) throw new Error('Model zwrócił pustą odpowiedź.')
       if (isFlashcards) {
-        const parsed = parseFlashcards(result, existingQuestions).slice(0, flashcardCount)
-        setFlashcards(parsed.map(card => ({ ...card, id: nextCardId.current++ })))
+        const parsed = parseFlashcards(result, existingQuestions)
+        const cards = parsed.cards.slice(0, flashcardCount)
+        setFlashcards(cards.map(card => ({ ...card, id: nextCardId.current++ })))
         setCreated(false)
+        const notices: string[] = []
+        if (cards.length < flashcardCount) notices.push(`Model zwrócił ${cards.length} z ${flashcardCount} żądanych pozycji.`)
+        if (parsed.incompleteRows) notices.push(`Pominięto ${parsed.incompleteRows} pozycji bez pytania.`)
+        if (parsed.incompleteVariants) notices.push(`${parsed.incompleteVariants} wariantów nie ma jeszcze kompletnych wymaganych pól; wybierz gotowy wariant lub uzupełnij go ręcznie.`)
+        if (parsed.duplicateQuestions) notices.push(`${parsed.duplicateQuestions} pytań powtarza się z pulą albo między nowymi fiszkami. Możesz je zmienić przed dodaniem.`)
+        setGenerationNotice(notices.join(' '))
       }
     } catch (generationError) {
       setError(generationError instanceof Error ? generationError.message : 'Nie udało się wygenerować treści.')
@@ -368,6 +382,7 @@ export function AiNoteToolsDialog({ kind, note, attachments, existingQuestions =
             <small>Model przygotuje najwyżej 50 zagadnień z pięcioma wariantami każde; do puli trafi wybrany wariant.</small>
           </div>
           {taskStartedAt !== null && <p className="ai-note-tools-progress"><span className="ai-note-tools-progress-mark">{busy ? <LoaderCircle className="spin" size={15} /> : <Check size={15} />}</span><span><strong role="status" aria-live="polite">{busy ? 'AI pracuje' : 'AI zakończyło zadanie'}</strong><small aria-live="off">Generowanie fiszek · {busy ? 'trwa' : 'czas'}: {taskDuration}</small>{busy && <small>{sourceLabel ? `Czytam ${sourceLabel} i przygotowuję fiszki. ` : 'Czytam notatkę i jej załączniki, a potem przygotuję fiszki. '}Możesz zminimalizować to okno i wrócić później.</small>}</span></p>}
+          {generationNotice && <p className="ai-note-tools-generation-notice" role="status">{generationNotice}</p>}
           {flashcards.length > 0 && <section className="ai-note-tools-flashcards" aria-label="Edytuj wygenerowane fiszki">
             <div className="ai-note-tools-cards-heading"><div><h3>Wybierz wariant fiszki</h3><p>Dla każdego zagadnienia wybierz formę nauki i popraw jej treść.</p></div><span>{flashcards.length}</span></div>
             <div className="ai-note-tools-card-list">{flashcards.map((card, index) => <article className="ai-note-tools-card" key={card.id}>

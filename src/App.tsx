@@ -20,7 +20,7 @@ import { NoteAttachmentsPanel } from './NoteAttachmentsPanel'
 import { AttachmentPreviewDialog } from './AttachmentPreviewDialog'
 import { HelpDialog } from './HelpDialog'
 import { BackupTrashDialog } from './BackupTrashDialog'
-import type { FlashcardAiAction } from './FlashcardsPage'
+import type { FlashcardAiAction, FlashcardAiTaskNotice } from './FlashcardsPage'
 import { SelectedTextFlashcardDialog } from './SelectedTextFlashcardDialog'
 import { CreateNoteDialog } from './CreateNoteDialog'
 import { NoteCollectionPage } from './NoteCollectionPage'
@@ -279,6 +279,13 @@ const entryColors: EntryColor[] = [
   { value: '#459d9d', label: 'Morski' },
 ]
 const entryColorStyle = (color?: string): CSSProperties | undefined => color ? { '--entry-color': color } as CSSProperties : undefined
+function formatFlashcardAiDuration(milliseconds: number) {
+  const totalSeconds = Math.max(0, Math.floor(milliseconds / 1000))
+  const seconds = String(totalSeconds % 60).padStart(2, '0')
+  const minutes = String(Math.floor(totalSeconds / 60) % 60).padStart(2, '0')
+  const hours = Math.floor(totalSeconds / 3600)
+  return hours ? `${hours}:${minutes}:${seconds}` : `${minutes}:${seconds}`
+}
 const makeNote = (folder: string, template?: NoteTemplate): Note => {
   const now = Date.now()
   return {
@@ -365,6 +372,8 @@ function App() {
   const [trashEntries, setTrashEntries] = useState<TrashEntry[]>([])
   const [flashcards, setFlashcards] = useState<Flashcard[]>([])
   const [flashcardTrash, setFlashcardTrash] = useState<FlashcardTrashEntry[]>([])
+  const [flashcardAiTasks, setFlashcardAiTasks] = useState<FlashcardAiTaskNotice[]>([])
+  const nextFlashcardAiTaskId = useRef(0)
   const [autoBackups, setAutoBackups] = useState<AutoBackupInfo[]>([])
   const [showBackupTrash, setShowBackupTrash] = useState(false)
   const [showCreateNoteDialog, setShowCreateNoteDialog] = useState(false)
@@ -2084,6 +2093,19 @@ function App() {
     try { await deleteAutoBackup(fileName); setAutoBackups(await getAutoBackups()) } catch (error) { reportDiskSaveError(error) }
   }
 
+  function beginFlashcardAiTask(label: string) {
+    const id = ++nextFlashcardAiTaskId.current
+    setFlashcardAiTasks(current => [...current, { id, label, startedAt: Date.now(), state: 'running' }])
+    return id
+  }
+  function finishFlashcardAiTask(id: number, failed = false) {
+    const finishedAt = Date.now()
+    setFlashcardAiTasks(current => current.map(task => task.id === id ? { ...task, finishedAt, state: failed ? 'error' : 'done' } : task))
+    window.setTimeout(() => setFlashcardAiTasks(current => current.filter(task => task.id !== id)), 3500)
+  }
+  function dismissFlashcardAiTask(id: number) {
+    setFlashcardAiTasks(current => current.filter(task => task.id !== id))
+  }
   function createFlashcard(noteId: string, question: string, answer: string, kind: FlashcardKind = 'basic', tags: string[] = [], imageOcclusion?: FlashcardImageOcclusion, metadata: Partial<Flashcard> = {}) {
     const now = Date.now()
     setFlashcards(current => [{ id: crypto.randomUUID(), noteId, question, answer, kind, tags, ...metadata, studyMode: metadata.studyMode ?? 'flip', imageOcclusion: kind === 'image-occlusion' ? imageOcclusion : undefined, dueAt: now, intervalDays: 0, ease: 2.5, repetitions: 0, lapses: 0 }, ...current])
@@ -2589,7 +2611,7 @@ function App() {
         ) : showingFavoriteNotesPage ? (
           <NoteCollectionPage kind="favorites" notes={notes} recentIds={recentNoteIds} onOpen={openLinkedNote} />
         ) : showingFlashcardsPage ? (
-          <Suspense fallback={<div className="editor-loading">Otwieram fiszki…</div>}><FlashcardsPage cards={flashcards} notes={notes} attachments={attachments} trash={flashcardTrash} onCreate={createFlashcard} onUpdate={updateFlashcard} onReview={rateFlashcard} onSetDueAt={setFlashcardDueAt} onToggleSuspend={toggleFlashcardSuspended} onDelete={trashFlashcard} onRestoreTrash={restoreFlashcardTrash} onPurgeTrash={id => setFlashcardTrash(current => current.filter(entry => entry.id !== id))} onRegenerate={regenerateFlashcard} onFindSimilar={findSimilarFlashcards} onAiAssist={assistFlashcards} onOpenNote={noteId => { setActiveReviewSessionId(''); openLinkedNote(noteId) }} /></Suspense>
+          <Suspense fallback={<div className="editor-loading">Otwieram fiszki…</div>}><FlashcardsPage cards={flashcards} notes={notes} attachments={attachments} trash={flashcardTrash} aiTaskNotices={flashcardAiTasks} onBeginAiTask={beginFlashcardAiTask} onFinishAiTask={finishFlashcardAiTask} onCreate={createFlashcard} onUpdate={updateFlashcard} onReview={rateFlashcard} onSetDueAt={setFlashcardDueAt} onToggleSuspend={toggleFlashcardSuspended} onDelete={trashFlashcard} onRestoreTrash={restoreFlashcardTrash} onPurgeTrash={id => setFlashcardTrash(current => current.filter(entry => entry.id !== id))} onRegenerate={regenerateFlashcard} onFindSimilar={findSimilarFlashcards} onAiAssist={assistFlashcards} onOpenNote={noteId => { setActiveReviewSessionId(''); openLinkedNote(noteId) }} /></Suspense>
         ) : showingReviewSessionsOverview ? (
           <ReviewSessionsOverview
             sessions={reviewSessions}
@@ -2698,6 +2720,15 @@ function App() {
       {showProjectDashboard && featureFlags.projectDashboard && <ProjectDashboardDialog notes={notes} tasks={parsedTasks} onOpenNote={id => { setShowProjectDashboard(false); openLinkedNote(id) }} onClose={() => setShowProjectDashboard(false)} />}
       {showDuplicateManager && featureFlags.duplicateManager && <DuplicateManagerDialog notes={notes} onOpen={id => { setShowDuplicateManager(false); openLinkedNote(id) }} onMerge={(targetId, sourceId) => void mergeDuplicateNotes(targetId, sourceId)} onClose={() => setShowDuplicateManager(false)} />}
       {showAttachmentManager && featureFlags.attachmentManager && <AttachmentManagerDialog notes={notes} attachments={attachments.filter(attachment => featureFlags.audioNotes || !attachment.mimeType.startsWith('audio/')).map(attachment => featureFlags.attachmentIndex ? attachment : { ...attachment, extractedText: undefined })} indexing={attachmentIndexing} onOpenNote={id => { setShowAttachmentManager(false); openLinkedNote(id) }} onPreview={attachment => setPreviewAttachmentId(attachment.id)} onDelete={attachment => void deleteAttachment(attachment)} onIndex={featureFlags.attachmentIndex ? attachment => void indexAttachment(attachment) : undefined} onClose={() => setShowAttachmentManager(false)} />}
+      {flashcardAiTasks.map((task, index) => {
+        const duration = formatFlashcardAiDuration((task.finishedAt ?? reviewClockNow) - task.startedAt)
+        const stateLabel = task.state === 'running' ? 'AI pracuje' : task.state === 'error' ? 'AI zakończyło się błędem' : 'AI zakończyło zadanie'
+        const durationLabel = task.state === 'running' ? `Trwa: ${duration}` : `Czas zadania: ${duration}`
+        return <aside key={task.id} className={`flashcard-ai-task-notification is-${task.state}`} style={{ top: `calc(env(safe-area-inset-top, 0px) + ${122 + index * 64}px)` }} aria-label={`Zadanie AI: ${task.label}`}>
+          <div className="flashcard-ai-task-notification-status"><span className="flashcard-ai-task-notification-mark">{task.state === 'running' ? <Sparkles className="spin" size={16} /> : task.state === 'done' ? <Check size={16} /> : <X size={16} />}</span><span><strong role="status" aria-live="polite">{stateLabel}</strong><small aria-live="off">{task.label} · {durationLabel}</small></span></div>
+          <button type="button" className="icon-button" aria-label={`Usuń powiadomienie: ${task.label}`} title="Usuń powiadomienie" onClick={() => dismissFlashcardAiTask(task.id)}><X size={16} /></button>
+        </aside>
+      })}
       {toast && <div className="app-toast" role="status"><Check size={16} />{toast}</div>}
       {mobileDrawer !== 'none' && <button className="drawer-scrim" aria-label="Zamknij menu" onClick={() => setMobileDrawer('none')} />}
     </main>

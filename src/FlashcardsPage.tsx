@@ -21,6 +21,10 @@ type FlashcardCardAiResult = { action: FlashcardCardAiAction; state: 'running' |
 const DECK_STORAGE_KEY = 'no-tie-flashcard-decks'
 const FLASHCARD_REMINDER_KEY = 'no-tie-flashcard-reminder'
 const FLASHCARD_GOAL_KEY = 'no-tie-flashcard-daily-goal'
+const FLASHCARD_DECK_GOALS_KEY = 'no-tie-flashcard-deck-goals'
+const FLASHCARD_DECK_EXAM_DATES_KEY = 'no-tie-flashcard-deck-exam-dates'
+const FLASHCARD_DECK_WEEKDAYS_KEY = 'no-tie-flashcard-deck-weekdays'
+const FLASHCARD_DECK_REMINDERS_KEY = 'no-tie-flashcard-deck-reminders'
 const CLOZE_PATTERN = /\{\{c\d+::([\s\S]*?)(?:::([\s\S]*?))?\}\}/gi
 const REVIEW_INTERVALS: Record<string, number> = { hour: 60 * 60_000, day: 86_400_000, week: 7 * 86_400_000, month: 30 * 86_400_000 }
 const FLASHCARD_TEMPLATE_PROMPTS: Record<FlashcardTemplate, string> = {
@@ -47,21 +51,76 @@ const FLASHCARD_DIFFICULTY_LABELS: Record<NonNullable<Flashcard['difficulty']>, 
   advanced: 'Zaawansowany',
 }
 
-type FlashcardAiTaskNotice = { id: number; label: string; startedAt: number; finishedAt?: number; state: 'running' | 'done' | 'error' }
-
-function formatAiDuration(milliseconds: number) {
-  const totalSeconds = Math.max(0, Math.floor(milliseconds / 1000))
-  const seconds = String(totalSeconds % 60).padStart(2, '0')
-  const minutes = String(Math.floor(totalSeconds / 60) % 60).padStart(2, '0')
-  const hours = Math.floor(totalSeconds / 3600)
-  return hours ? `${hours}:${minutes}:${seconds}` : `${minutes}:${seconds}`
-}
+export type FlashcardAiTaskNotice = { id: number; label: string; startedAt: number; finishedAt?: number; state: 'running' | 'done' | 'error' }
 
 function readDecks(): FlashcardDeck[] {
   try {
     const value: unknown = JSON.parse(localStorage.getItem(DECK_STORAGE_KEY) ?? '[]')
     return Array.isArray(value) ? value.filter((item): item is FlashcardDeck => Boolean(item && typeof item === 'object' && typeof item.id === 'string' && typeof item.name === 'string' && Array.isArray(item.noteIds) && item.noteIds.every((id: unknown) => typeof id === 'string') && typeof item.includeUnlinkedCards === 'boolean')) : []
   } catch { return [] }
+}
+
+function cardBelongsToDeck(card: Flashcard, deck: FlashcardDeck, notes: Note[], now: number) {
+  if (deck.cardIds) return deck.cardIds.includes(card.id)
+  if (deck.dynamicRule) {
+    const rule = deck.dynamicRule
+    if (rule.tag && !card.tags?.includes(rule.tag)) return false
+    if (rule.noteId && card.noteId !== rule.noteId) return false
+    if (rule.dueOnly && card.dueAt > now) return false
+    return true
+  }
+  const note = card.noteId ? resolveWikiTarget(notes, card.noteId) : undefined
+  return note ? deck.noteIds.includes(note.id) : deck.includeUnlinkedCards
+}
+
+function readDeckNumberSettings(storageKey: string, legacyKey: string, fallback: number): Record<string, number> {
+  let settings: Record<string, number> = {}
+  try {
+    const value: unknown = JSON.parse(localStorage.getItem(storageKey) ?? '{}')
+    if (value && typeof value === 'object' && !Array.isArray(value)) {
+      settings = Object.fromEntries(Object.entries(value).filter((entry): entry is [string, number] => typeof entry[1] === 'number' && Number.isFinite(entry[1])))
+    }
+  } catch { /* Migrate the previous single value below. */ }
+  const firstDeck = readDecks()[0]
+  if (firstDeck && settings[firstDeck.id] === undefined) {
+    const legacyValue = Number(localStorage.getItem(legacyKey) ?? fallback)
+    settings[firstDeck.id] = Number.isFinite(legacyValue) ? Math.max(1, Math.min(200, Math.round(legacyValue))) : fallback
+  }
+  return settings
+}
+
+function readDeckDateSettings(): Record<string, string> {
+  let settings: Record<string, string> = {}
+  try {
+    const value: unknown = JSON.parse(localStorage.getItem(FLASHCARD_DECK_EXAM_DATES_KEY) ?? '{}')
+    if (value && typeof value === 'object' && !Array.isArray(value)) {
+      settings = Object.fromEntries(Object.entries(value).filter((entry): entry is [string, string] => typeof entry[1] === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(entry[1])))
+    }
+  } catch { /* Migrate the previous single exam date below. */ }
+  const firstDeck = readDecks()[0]
+  const legacyDate = localStorage.getItem('no-tie-flashcard-exam-date') ?? ''
+  if (firstDeck && settings[firstDeck.id] === undefined && /^\d{4}-\d{2}-\d{2}$/.test(legacyDate)) settings[firstDeck.id] = legacyDate
+  return settings
+}
+
+function readGlobalStudyWeekdays() {
+  try {
+    const value: unknown = JSON.parse(localStorage.getItem('no-tie-flashcard-weekdays') ?? '[1,2,3,4,5]')
+    return Array.isArray(value) ? value.filter((day): day is number => Number.isInteger(day) && day >= 0 && day <= 6) : [1, 2, 3, 4, 5]
+  } catch { return [1, 2, 3, 4, 5] }
+}
+
+function readDeckWeekdaySettings(): Record<string, number[]> {
+  let settings: Record<string, number[]> = {}
+  try {
+    const value: unknown = JSON.parse(localStorage.getItem(FLASHCARD_DECK_WEEKDAYS_KEY) ?? '{}')
+    if (value && typeof value === 'object' && !Array.isArray(value)) {
+      settings = Object.fromEntries(Object.entries(value).filter((entry): entry is [string, number[]] => Array.isArray(entry[1]) && entry[1].every(day => Number.isInteger(day) && day >= 0 && day <= 6)))
+    }
+  } catch { /* Migrate the previous global schedule below. */ }
+  const firstDeck = readDecks()[0]
+  if (firstDeck && settings[firstDeck.id] === undefined) settings[firstDeck.id] = readGlobalStudyWeekdays()
+  return settings
 }
 
 function readReminderPreference() {
@@ -73,6 +132,49 @@ function readReminderPreference() {
     }
   } catch { /* Use the default reminder settings when browser storage is unavailable. */ }
   return { enabled: false, time: '09:00' }
+}
+
+function readDeckReminderSettings(): Record<string, ReturnType<typeof readReminderPreference>> {
+  let settings: Record<string, ReturnType<typeof readReminderPreference>> = {}
+  try {
+    const value: unknown = JSON.parse(localStorage.getItem(FLASHCARD_DECK_REMINDERS_KEY) ?? '{}')
+    if (value && typeof value === 'object' && !Array.isArray(value)) {
+      const entries = Object.entries(value).filter(([, item]) => {
+        if (!item || typeof item !== 'object') return false
+        const reminder = item as { enabled?: unknown; time?: unknown }
+        return typeof reminder.enabled === 'boolean' && typeof reminder.time === 'string' && /^([01]\d|2[0-3]):[0-5]\d$/.test(reminder.time)
+      }).map(([id, item]) => [id, item as ReturnType<typeof readReminderPreference>])
+      settings = Object.fromEntries(entries)
+    }
+  } catch { /* Migrate the previous global reminder below. */ }
+  const firstDeck = readDecks()[0]
+  if (firstDeck && settings[firstDeck.id] === undefined) settings[firstDeck.id] = readReminderPreference()
+  return settings
+}
+
+function deckTagMasteryKey(deckId: string, tag: string) { return `deck:${deckId}:tag:${tag}` }
+
+function readMasteryRuleSettings(): Record<string, number> {
+  let settings: Record<string, number> = {}
+  try {
+    const value: unknown = JSON.parse(localStorage.getItem('no-tie-flashcard-mastery-rules') ?? '{}')
+    if (value && typeof value === 'object' && !Array.isArray(value)) {
+      settings = Object.fromEntries(Object.entries(value).filter((entry): entry is [string, number] => typeof entry[1] === 'number' && Number.isFinite(entry[1])))
+    }
+  } catch { /* Use default mastery thresholds when storage is unavailable. */ }
+  const decks = readDecks()
+  const firstDeck = decks[0]
+  if (firstDeck) {
+    for (const [key, target] of Object.entries(settings)) {
+      const isDeckRule = decks.some(deck => key === `deck:${deck.id}`)
+      const isScopedTagRule = decks.some(deck => key.startsWith(`deck:${deck.id}:tag:`))
+      if (!isDeckRule && !isScopedTagRule) {
+        settings[deckTagMasteryKey(firstDeck.id, key)] ??= target
+        delete settings[key]
+      }
+    }
+  }
+  return settings
 }
 
 function localDateKey(date: Date) {
@@ -304,11 +406,14 @@ function FlashcardImageOcclusionField({ value, onChange }: { value?: FlashcardIm
   </div>
 }
 
-export function FlashcardsPage({ cards, notes, attachments = [], trash = [], onCreate, onUpdate, onReview, onSetDueAt, onToggleSuspend, onDelete, onRestoreTrash, onPurgeTrash, onRegenerate, onFindSimilar, onAiAssist, onOpenNote }: {
+export function FlashcardsPage({ cards, notes, attachments = [], trash = [], aiTaskNotices, onBeginAiTask, onFinishAiTask, onCreate, onUpdate, onReview, onSetDueAt, onToggleSuspend, onDelete, onRestoreTrash, onPurgeTrash, onRegenerate, onFindSimilar, onAiAssist, onOpenNote }: {
   cards: readonly Flashcard[]
   notes: Note[]
   attachments?: NoteAttachment[]
   trash?: FlashcardTrashEntry[]
+  aiTaskNotices: FlashcardAiTaskNotice[]
+  onBeginAiTask: (label: string) => number
+  onFinishAiTask: (id: number, failed?: boolean) => void
   onCreate: (noteId: string, question: string, answer: string, kind: FlashcardKind, tags: string[], imageOcclusion?: FlashcardImageOcclusion, metadata?: Partial<Flashcard>) => void
   onUpdate: (id: string, edit: FlashcardEdit) => void
   onReview: (id: string, grade: FlashcardGrade, metadata?: FlashcardReviewMeta) => void
@@ -354,6 +459,7 @@ export function FlashcardsPage({ cards, notes, attachments = [], trash = [], onC
   const [cardsPage, setCardsPage] = useState(1)
   const [decks, setDecks] = useState<FlashcardDeck[]>(readDecks)
   const [selectedDeckId, setSelectedDeckId] = useState('')
+  const [progressDeckId, setProgressDeckId] = useState(() => localStorage.getItem('no-tie-flashcard-progress-deck') ?? readDecks()[0]?.id ?? '')
   const [deckName, setDeckName] = useState('')
   const [deckCreateMode, setDeckCreateMode] = useState<'sources' | 'selected' | 'dynamic'>('sources')
   const [dynamicDeckTag, setDynamicDeckTag] = useState('')
@@ -385,9 +491,7 @@ export function FlashcardsPage({ cards, notes, attachments = [], trash = [], onC
   const [examExpired, setExamExpired] = useState(false)
   const [aiEvaluation, setAiEvaluation] = useState('')
   const [aiBusy, setAiBusy] = useState('')
-  const [aiTaskNotices, setAiTaskNotices] = useState<FlashcardAiTaskNotice[]>([])
   const [cardAiResults, setCardAiResults] = useState<Record<string, FlashcardCardAiResult>>({})
-  const nextAiTaskId = useRef(0)
   const [aiReport, setAiReport] = useState('')
   const [aiReportExpanded, setAiReportExpanded] = useState(false)
   const [aiError, setAiError] = useState('')
@@ -404,30 +508,44 @@ export function FlashcardsPage({ cards, notes, attachments = [], trash = [], onC
   const [similarMatches, setSimilarMatches] = useState<SimilarFlashcardMatch[] | null>(null)
   const [similarBusy, setSimilarBusy] = useState(false)
   const [similarError, setSimilarError] = useState('')
-  const [dailyGoal, setDailyGoal] = useState(() => {
-    const value = Number(localStorage.getItem(FLASHCARD_GOAL_KEY) ?? '20')
-    return Number.isFinite(value) ? Math.max(1, Math.min(200, Math.round(value))) : 20
-  })
-  const [reminderEnabled, setReminderEnabled] = useState(() => readReminderPreference().enabled)
-  const [reminderTime, setReminderTime] = useState(() => readReminderPreference().time)
-  const [studyWeekdays, setStudyWeekdays] = useState<number[]>(() => {
-    try { const value: unknown = JSON.parse(localStorage.getItem('no-tie-flashcard-weekdays') ?? '[1,2,3,4,5]'); return Array.isArray(value) ? value.filter((day): day is number => Number.isInteger(day) && day >= 0 && day <= 6) : [1, 2, 3, 4, 5] } catch { return [1, 2, 3, 4, 5] }
-  })
-  const [examDate, setExamDate] = useState(() => localStorage.getItem('no-tie-flashcard-exam-date') ?? '')
-  const [masteryRules, setMasteryRules] = useState<Record<string, number>>(() => {
-    try { const value: unknown = JSON.parse(localStorage.getItem('no-tie-flashcard-mastery-rules') ?? '{}'); return value && typeof value === 'object' ? value as Record<string, number> : {} } catch { return {} }
-  })
+  const [dailyGoals, setDailyGoals] = useState<Record<string, number>>(() => readDeckNumberSettings(FLASHCARD_DECK_GOALS_KEY, FLASHCARD_GOAL_KEY, 20))
+  const [defaultReminderPreference] = useState(readReminderPreference)
+  const [reminderSettings, setReminderSettings] = useState<Record<string, ReturnType<typeof readReminderPreference>>>(readDeckReminderSettings)
+  const [defaultStudyWeekdays] = useState<number[]>(readGlobalStudyWeekdays)
+  const [weekdayPlans, setWeekdayPlans] = useState<Record<string, number[]>>(readDeckWeekdaySettings)
+  const [examDates, setExamDates] = useState<Record<string, string>>(readDeckDateSettings)
+  const [masteryRules, setMasteryRules] = useState<Record<string, number>>(readMasteryRuleSettings)
 
   const hasRunningAiTask = aiTaskNotices.some(task => task.state === 'running')
   useEffect(() => { const interval = examDeadline || breakDeadline || hasRunningAiTask ? 1000 : 60_000; const timer = window.setInterval(() => setNow(Date.now()), interval); return () => window.clearInterval(timer) }, [examDeadline, breakDeadline, hasRunningAiTask])
   useEffect(() => { try { localStorage.setItem(DECK_STORAGE_KEY, JSON.stringify(decks)) } catch { /* Decks remain available in memory if storage is full. */ } }, [decks])
-  useEffect(() => { try { localStorage.setItem(FLASHCARD_GOAL_KEY, String(dailyGoal)) } catch { /* Keep the goal in memory if storage is unavailable. */ } }, [dailyGoal])
+  useEffect(() => { try { localStorage.setItem('no-tie-flashcard-progress-deck', progressDeckId) } catch { /* Keep the selected progress deck in memory if storage is unavailable. */ } }, [progressDeckId])
+  useEffect(() => { try { localStorage.setItem(FLASHCARD_DECK_GOALS_KEY, JSON.stringify(dailyGoals)) } catch { /* Keep goals in memory if storage is unavailable. */ } }, [dailyGoals])
   useEffect(() => {
-    const previous = readReminderPreference()
-    try { localStorage.setItem(FLASHCARD_REMINDER_KEY, JSON.stringify({ ...previous, enabled: reminderEnabled, time: reminderTime })) } catch { /* Reminders stay available in memory until the page closes. */ }
-  }, [reminderEnabled, reminderTime])
-  useEffect(() => { try { localStorage.setItem('no-tie-flashcard-weekdays', JSON.stringify(studyWeekdays)) } catch { /* Weekday preferences stay available until the page closes. */ } }, [studyWeekdays])
-  useEffect(() => { try { localStorage.setItem('no-tie-flashcard-exam-date', examDate) } catch { /* Keep the exam date in memory if storage is unavailable. */ } }, [examDate])
+    const firstDeck = decks[0]
+    if (!firstDeck || dailyGoals[firstDeck.id] !== undefined) return
+    const legacyGoal = Number(localStorage.getItem(FLASHCARD_GOAL_KEY) ?? '20')
+    setDailyGoals(current => current[firstDeck.id] !== undefined ? current : { ...current, [firstDeck.id]: Number.isFinite(legacyGoal) ? Math.max(1, Math.min(200, Math.round(legacyGoal))) : 20 })
+  }, [decks, dailyGoals])
+  useEffect(() => { try { localStorage.setItem(FLASHCARD_DECK_REMINDERS_KEY, JSON.stringify(reminderSettings)) } catch { /* Reminder settings stay available in memory until the page closes. */ } }, [reminderSettings])
+  useEffect(() => {
+    const firstDeck = decks[0]
+    if (!firstDeck || reminderSettings[firstDeck.id] !== undefined) return
+    setReminderSettings(current => current[firstDeck.id] !== undefined ? current : { ...current, [firstDeck.id]: defaultReminderPreference })
+  }, [decks, reminderSettings, defaultReminderPreference])
+  useEffect(() => { try { localStorage.setItem(FLASHCARD_DECK_WEEKDAYS_KEY, JSON.stringify(weekdayPlans)) } catch { /* Weekday plans stay available until the page closes. */ } }, [weekdayPlans])
+  useEffect(() => {
+    const firstDeck = decks[0]
+    if (!firstDeck || weekdayPlans[firstDeck.id] !== undefined) return
+    setWeekdayPlans(current => current[firstDeck.id] !== undefined ? current : { ...current, [firstDeck.id]: defaultStudyWeekdays })
+  }, [decks, weekdayPlans, defaultStudyWeekdays])
+  useEffect(() => { try { localStorage.setItem(FLASHCARD_DECK_EXAM_DATES_KEY, JSON.stringify(examDates)) } catch { /* Keep exam dates in memory if storage is unavailable. */ } }, [examDates])
+  useEffect(() => {
+    const firstDeck = decks[0]
+    const legacyDate = localStorage.getItem('no-tie-flashcard-exam-date') ?? ''
+    if (!firstDeck || examDates[firstDeck.id] !== undefined || !/^\d{4}-\d{2}-\d{2}$/.test(legacyDate)) return
+    setExamDates(current => current[firstDeck.id] !== undefined ? current : { ...current, [firstDeck.id]: legacyDate })
+  }, [decks, examDates])
   useEffect(() => { try { localStorage.setItem('no-tie-flashcard-mastery-rules', JSON.stringify(masteryRules)) } catch { /* Keep mastery rules in memory if storage is unavailable. */ } }, [masteryRules])
 
   const excludedIds = useMemo(() => new Set(excludedNoteIds), [excludedNoteIds])
@@ -437,19 +555,16 @@ export function FlashcardsPage({ cards, notes, attachments = [], trash = [], onC
   }), [cards, notes, excludedIds, includeUnlinkedCards])
   const unlinkedCardCount = useMemo(() => cards.filter(card => !card.noteId || !resolveWikiTarget(notes, card.noteId)).length, [cards, notes])
   const selectedDeck = decks.find(deck => deck.id === selectedDeckId)
-  const deckFilteredCards = useMemo(() => sourceFilteredCards.filter(card => {
-    if (!selectedDeck) return true
-    if (selectedDeck.cardIds) return selectedDeck.cardIds.includes(card.id)
-    if (selectedDeck.dynamicRule) {
-      const rule = selectedDeck.dynamicRule
-      if (rule.tag && !card.tags?.includes(rule.tag)) return false
-      if (rule.noteId && card.noteId !== rule.noteId) return false
-      if (rule.dueOnly && card.dueAt > now) return false
-      return true
-    }
-    const note = card.noteId ? resolveWikiTarget(notes, card.noteId) : undefined
-    return note ? selectedDeck.noteIds.includes(note.id) : selectedDeck.includeUnlinkedCards
-  }), [sourceFilteredCards, selectedDeck, notes, now])
+  const progressDeck = decks.find(deck => deck.id === progressDeckId) ?? decks[0]
+  const dailyGoal = progressDeck ? dailyGoals[progressDeck.id] ?? 20 : 20
+  const examDate = progressDeck ? examDates[progressDeck.id] ?? '' : ''
+  const progressStudyWeekdays = progressDeck ? weekdayPlans[progressDeck.id] ?? defaultStudyWeekdays : defaultStudyWeekdays
+  const progressReminder = progressDeck ? reminderSettings[progressDeck.id] ?? defaultReminderPreference : defaultReminderPreference
+  const reminderEnabled = progressReminder.enabled
+  const reminderTime = progressReminder.time
+  const studyWeekdays = selectedDeck ? weekdayPlans[selectedDeck.id] ?? defaultStudyWeekdays : defaultStudyWeekdays
+  const deckFilteredCards = useMemo(() => sourceFilteredCards.filter(card => !selectedDeck || cardBelongsToDeck(card, selectedDeck, notes, now)), [sourceFilteredCards, selectedDeck, notes, now])
+  const progressDeckCards = useMemo(() => progressDeck ? cards.filter(card => cardBelongsToDeck(card, progressDeck, notes, now)) : [], [cards, progressDeck, notes, now])
   const taggedCards = useMemo(() => tagFilter ? deckFilteredCards.filter(card => card.tags?.includes(tagFilter)) : deckFilteredCards, [deckFilteredCards, tagFilter])
   const activeCards = useMemo(() => taggedCards.filter(card => !card.suspended), [taggedCards])
   const due = useMemo(() => activeCards.filter(card => card.dueAt <= now).sort((a, b) => a.dueAt - b.dueAt), [activeCards, now])
@@ -481,25 +596,27 @@ export function FlashcardsPage({ cards, notes, attachments = [], trash = [], onC
 
   const dayStart = new Date()
   dayStart.setHours(0, 0, 0, 0)
-  const reviewEvents = taggedCards.flatMap(card => card.reviewHistory ?? [])
+  const progressActiveCards = progressDeckCards.filter(card => !card.suspended)
+  const progressDueCards = progressActiveCards.filter(card => card.dueAt <= now)
+  const reviewEvents = progressDeckCards.flatMap(card => card.reviewHistory ?? [])
   const eventsToday = reviewEvents.filter(event => event.at >= dayStart.getTime())
-  const legacyReviewsToday = taggedCards.filter(card => !card.reviewHistory?.length && (card.lastReviewedAt ?? 0) >= dayStart.getTime()).length
+  const legacyReviewsToday = progressDeckCards.filter(card => !card.reviewHistory?.length && (card.lastReviewedAt ?? 0) >= dayStart.getTime()).length
   const reviewsToday = eventsToday.length + legacyReviewsToday
   const successfulReviews = reviewEvents.filter(event => event.grade !== 'again').length
   const successRate = reviewEvents.length ? Math.round(successfulReviews / reviewEvents.length * 100) : undefined
   const isMastered = (card: Flashcard) => {
-    const deckTarget = selectedDeck ? masteryRules['deck:' + selectedDeck.id] : undefined
-    const configured = (card.tags ?? []).map(tag => masteryRules[tag]).filter((value): value is number => Number.isFinite(value))
+    const deckTarget = progressDeck ? masteryRules['deck:' + progressDeck.id] : undefined
+    const configured = (card.tags ?? []).map(tag => masteryRules[deckTagMasteryKey(progressDeck?.id ?? '', tag)]).filter((value): value is number => Number.isFinite(value))
     const target = Math.max(1, Math.min(50, Math.round(deckTarget ?? (configured.length ? Math.max(...configured) : 4))))
     return card.repetitions >= target
   }
-  const masteredCount = taggedCards.filter(isMastered).length
+  const masteredCount = progressDeckCards.filter(isMastered).length
   const activityByDay = new Map<string, number>()
   for (const event of reviewEvents) {
     const key = localDateKey(new Date(event.at))
     activityByDay.set(key, (activityByDay.get(key) ?? 0) + 1)
   }
-  for (const card of taggedCards) {
+  for (const card of progressDeckCards) {
     if (!card.reviewHistory?.length && card.lastReviewedAt) {
       const key = localDateKey(new Date(card.lastReviewedAt))
       activityByDay.set(key, (activityByDay.get(key) ?? 0) + 1)
@@ -523,7 +640,8 @@ export function FlashcardsPage({ cards, notes, attachments = [], trash = [], onC
     activityCalendar.push({ key, title: `${new Intl.DateTimeFormat('pl-PL', { dateStyle: 'medium' }).format(calendarCursor)} · ${count} powtórek`, count, level: count === 0 ? 0 : count === 1 ? 1 : count <= 3 ? 2 : count <= 6 ? 3 : 4, monthLabel: calendarCursor.getDate() === 1 || activityCalendar.length === 0 ? new Intl.DateTimeFormat('pl-PL', { month: 'short' }).format(calendarCursor) : '' })
     calendarCursor.setDate(calendarCursor.getDate() + 1)
   }
-  const averageResponseMs = Math.round(reviewEvents.reduce((total, event) => total + (event.responseMs ?? 25_000), 0) / Math.max(1, reviewEvents.length))
+  const sessionReviewEvents = taggedCards.flatMap(card => card.reviewHistory ?? [])
+  const averageResponseMs = Math.round(sessionReviewEvents.reduce((total, event) => total + (event.responseMs ?? 25_000), 0) / Math.max(1, sessionReviewEvents.length))
   const weakCards = activeCards.filter(card => card.lapses > 0 || card.ease < 2.2 || card.reviewHistory?.slice(-2).some(event => event.grade === 'again' || event.grade === 'hard'))
   const weakCardIds = new Set(weakCards.map(card => card.id))
   const activeModeCards = activeCards.filter(card => (card.studyMode ?? 'flip') === answerMode)
@@ -534,8 +652,9 @@ export function FlashcardsPage({ cards, notes, attachments = [], trash = [], onC
   const sessionCardLimit = timeSized ? Math.max(1, Math.min(100, Math.floor(sessionMinutes * 60_000 / Math.max(5_000, averageResponseMs)))) : sessionLimit
   const activeMedia = current?.mediaClip ? attachments.find(item => item.id === current.mediaClip?.attachmentId) : undefined
   const availableTags = [...new Set(cards.flatMap(card => card.tags ?? []))].sort((a, b) => a.localeCompare(b, 'pl'))
+  const progressAvailableTags = [...new Set(progressDeckCards.flatMap(card => card.tags ?? []))].sort((a, b) => a.localeCompare(b, 'pl'))
   const examDaysRemaining = examDate ? Math.max(0, Math.ceil((new Date(examDate + 'T23:59:59').getTime() - now) / 86_400_000)) : 0
-  const examDailyTarget = examDaysRemaining ? Math.ceil(Math.max(0, taggedCards.length - masteredCount) / examDaysRemaining) : 0
+  const examDailyTarget = examDaysRemaining ? Math.ceil(Math.max(0, progressDeckCards.length - masteredCount) / examDaysRemaining) : 0
   const trueFalseStatement = useMemo(() => {
     if (!current) return { answer: '', isTrue: true }
     if (current.studyMode === 'true-false') return { answer: current.answer, isTrue: current.trueFalseAnswer ?? true }
@@ -768,23 +887,10 @@ export function FlashcardsPage({ cards, notes, attachments = [], trash = [], onC
     setExamDeadline(null)
     setBreakDeadline(null)
   }
-  function beginAiTask(label: string) {
-    const id = ++nextAiTaskId.current
-    setAiTaskNotices(current => [...current, { id, label, startedAt: Date.now(), state: 'running' }])
-    return id
-  }
-  function finishAiTask(id: number, failed = false) {
-    const finishedAt = Date.now()
-    setAiTaskNotices(current => current.map(task => task.id === id ? { ...task, finishedAt, state: failed ? 'error' : 'done' } : task))
-    window.setTimeout(() => setAiTaskNotices(current => current.filter(task => task.id !== id)), 3500)
-  }
-  function dismissAiTask(id: number) {
-    setAiTaskNotices(current => current.filter(task => task.id !== id))
-  }
   async function runAi(action: FlashcardAiAction, card?: Flashcard, input?: string) {
     if (!onAiAssist || aiBusy) return ''
     const cardAction: FlashcardCardAiAction | undefined = card && (action === 'distractors' || action === 'example' || action === 'mnemonic' || action === 'difficulty') ? action : undefined
-    const taskId = beginAiTask(FLASHCARD_AI_TASK_LABELS[action])
+    const taskId = onBeginAiTask(FLASHCARD_AI_TASK_LABELS[action])
     let failed = false
     setAiError(''); setAiBusy(action)
     if (card && cardAction) setCardAiResults(current => ({ ...current, [card.id]: { action: cardAction, state: 'running', message: 'AI pracuje nad tą fiszką…' } }))
@@ -827,7 +933,7 @@ export function FlashcardsPage({ cards, notes, attachments = [], trash = [], onC
       if (card && cardAction) setCardAiResults(current => ({ ...current, [card.id]: { action: cardAction, state: 'error', message } }))
       else setAiError(message)
       return ''
-    } finally { setAiBusy(''); finishAiTask(taskId, failed) }
+    } finally { setAiBusy(''); onFinishAiTask(taskId, failed) }
   }
   function mergeCards(first: Flashcard, second: Flashcard) {
     onUpdate(first.id, {
@@ -859,23 +965,24 @@ export function FlashcardsPage({ cards, notes, attachments = [], trash = [], onC
   }
   async function checkSimilarCards() {
     if (!onFindSimilar || similarBusy) return
-    const taskId = beginAiTask('Wykrywanie podobnych fiszek')
+    const taskId = onBeginAiTask('Wykrywanie podobnych fiszek')
     let failed = false
     setSimilarError('')
     setSimilarBusy(true)
     try { setSimilarMatches(await onFindSimilar(visibleCards)) }
     catch (error) { failed = true; setSimilarError(error instanceof Error ? error.message : typeof error === 'string' && error.trim() ? error : 'Nie udało się porównać pytań.') }
-    finally { setSimilarBusy(false); finishAiTask(taskId, failed) }
+    finally { setSimilarBusy(false); onFinishAiTask(taskId, failed) }
   }
   async function setReminder(value: boolean) {
+    if (!progressDeck) return
     if (value && 'Notification' in window && Notification.permission === 'default') {
       try { await Notification.requestPermission() } catch { /* The app can still show an in-app reminder. */ }
     }
-    setReminderEnabled(value)
+    setReminderSettings(current => ({ ...current, [progressDeck.id]: { ...(current[progressDeck.id] ?? defaultReminderPreference), enabled: value } }))
   }
   async function regenerate(card: Flashcard) {
     if (!onRegenerate || regeneratingId) return
-    const taskId = beginAiTask('Poprawa fiszki przy pomocy AI')
+    const taskId = onBeginAiTask('Poprawa fiszki przy pomocy AI')
     let failed = false
     setRegenerateError('')
     setRegeneratingId(card.id)
@@ -886,21 +993,11 @@ export function FlashcardsPage({ cards, notes, attachments = [], trash = [], onC
       if (duplicate) throw new Error('AI wygenerowało pytanie, które już istnieje dla tej notatki.')
       onUpdate(card.id, { question: regenerated.question, answer: regenerated.answer, kind: 'basic', tags: card.tags ?? [] })
     } catch (error) { failed = true; setRegenerateError(error instanceof Error ? error.message : 'Nie udało się poprawić fiszki.') }
-    finally { setRegeneratingId(''); finishAiTask(taskId, failed) }
+    finally { setRegeneratingId(''); onFinishAiTask(taskId, failed) }
   }
 
   return (<section className="flashcards-page" aria-labelledby="flashcards-title">
     <header className="flashcards-page-heading"><span className="folder-dialog-mark"><Brain size={19} /></span><div><h1 id="flashcards-title">Fiszki</h1><p>{due.length} do powtórki · {sourceFilteredCards.length} w wybranych źródłach · {selectedCount} notatek</p></div><button type="button" className={`flashcard-trash-shortcut${tab === 'trash' ? ' active' : ''}`} aria-label={`Otwórz kosz fiszek, ${trash.length} elementów`} aria-pressed={tab === 'trash'} title={`Kosz fiszek (${trash.length})`} onClick={() => setTab('trash')}><Trash2 size={17} />{trash.length > 0 && <span>{trash.length}</span>}</button></header>
-
-    {aiTaskNotices.map((task, index) => {
-      const duration = formatAiDuration((task.finishedAt ?? now) - task.startedAt)
-      const stateLabel = task.state === 'running' ? 'AI pracuje' : task.state === 'error' ? 'AI zakończyło się błędem' : 'AI zakończyło zadanie'
-      const durationLabel = task.state === 'running' ? `Trwa: ${duration}` : `Czas zadania: ${duration}`
-      return <aside key={task.id} className={`flashcard-ai-task-notification is-${task.state}`} style={{ top: `calc(env(safe-area-inset-top, 0px) + ${122 + index * 64}px)` }} aria-label={`Zadanie AI: ${task.label}`}>
-        <div className="flashcard-ai-task-notification-status"><span className="flashcard-ai-task-notification-mark">{task.state === 'running' ? <Sparkles className="spin" size={16} /> : <Check size={16} />}</span><span><strong role="status" aria-live="polite">{stateLabel}</strong><small aria-live="off">{task.label} · {durationLabel}</small></span></div>
-        <button type="button" className="icon-button" aria-label={`Usuń powiadomienie: ${task.label}`} title="Usuń powiadomienie" onClick={() => dismissAiTask(task.id)}><X size={16} /></button>
-      </aside>
-    })}
 
     {aiReport && <aside className={`flashcard-ai-report-notification${aiReportExpanded ? ' is-expanded' : ''}`} style={aiTaskNotices.length ? { top: `calc(env(safe-area-inset-top, 0px) + ${122 + aiTaskNotices.length * 64}px)` } : undefined} aria-label="Powiadomienie o raporcie AI">
       <div className="flashcard-ai-report-notification-status" role="status" aria-live="polite"><span className="flashcard-ai-report-notification-mark"><Sparkles size={16} /></span><span><strong>Raport AI gotowy</strong><small>{aiReportExpanded ? 'Pełna analiza' : 'Rozwiń, aby przeczytać całość'}</small></span></div>
@@ -916,27 +1013,29 @@ export function FlashcardsPage({ cards, notes, attachments = [], trash = [], onC
     </nav>
 
     {tab === 'progress' ? <section className="flashcard-page-panel flashcard-progress-panel" aria-label="Postępy i planowanie">
-      <header className="flashcard-panel-heading"><div><h2>Postępy i planowanie</h2><p>Seria {studyStreak} dni · {reviewsToday}/{dailyGoal} powtórek dzisiaj · {due.length} do powtórki</p></div></header>
+      <header className="flashcard-panel-heading flashcard-progress-heading"><div><h2>Postępy i planowanie</h2><p>{progressDeck ? `${progressDeck.name} · ${progressDeckCards.length} fiszek · seria ${studyStreak} dni · ${reviewsToday}/${dailyGoal} powtórek dzisiaj · ${progressDueCards.length} do powtórki` : 'Wybierz talię, aby zobaczyć jej postępy i plan nauki.'}</p></div><label className="flashcard-progress-deck-picker"><span>Talia dla postępów i planowania</span><select aria-label="Talia dla postępów i planowania" value={progressDeck?.id ?? ''} disabled={!decks.length} onChange={event => setProgressDeckId(event.target.value)}><option value="" disabled>Wybierz talię</option>{decks.map(deck => <option key={deck.id} value={deck.id}>{deck.name}</option>)}</select></label></header>
       <div className="flashcard-progress-content">
-    <section className="flashcard-stats" aria-label="Statystyki nauki">
-      <article><span>Do powtórki</span><strong>{due.length}</strong></article>
-      <article><span>Powtórki dzisiaj</span><strong>{reviewsToday}</strong></article>
-      <article><span>Skuteczność</span><strong>{successRate === undefined ? '—' : `${successRate}%`}</strong></article>
-      <article><span>Utrwalone</span><strong>{masteredCount}</strong></article>
-    </section>
+        {!progressDeck ? <div className="flashcard-progress-empty"><p>Najpierw utwórz talię, aby śledzić postępy i planować naukę dla jej kart.</p><button type="button" className="button secondary" onClick={() => setTab('review')}>Przejdź do talii</button></div> : <>
+          <section className="flashcard-stats" aria-label={`Statystyki nauki: ${progressDeck.name}`}>
+            <article><span>Do powtórki</span><strong>{progressDueCards.length}</strong></article>
+            <article><span>Powtórki dzisiaj</span><strong>{reviewsToday}</strong></article>
+            <article><span>Skuteczność</span><strong>{successRate === undefined ? '—' : `${successRate}%`}</strong></article>
+            <article><span>Utrwalone</span><strong>{masteredCount}</strong></article>
+          </section>
 
-    <section className="flashcard-learning-tools" aria-label="Cel i przypomnienia nauki">
-      <div className="flashcard-daily-goal"><div className="flashcard-learning-heading"><span><Flame size={15} />Seria: {studyStreak} {studyStreak === 1 ? 'dzień' : 'dni'}</span><label>Cel dzienny<input aria-label="Dzienny cel powtórek" type="number" min="1" max="200" value={dailyGoal} onChange={event => setDailyGoal(Math.max(1, Math.min(200, Number(event.target.value) || 1)))} /></label></div><div className="flashcard-goal-progress"><span style={{ width: `${Math.min(100, reviewsToday / dailyGoal * 100)}%` }} /></div><small>{reviewsToday} z {dailyGoal} powtórek dzisiaj</small></div>
-      <div className="flashcard-reminder-settings"><div className="flashcard-learning-heading"><span><Bell size={15} />Przypomnienie</span><label className="flashcard-reminder-toggle"><input type="checkbox" checked={reminderEnabled} onChange={event => void setReminder(event.target.checked)} /><span>{reminderEnabled ? 'Włączone' : 'Wyłączone'}</span></label></div><label className="flashcard-reminder-time">Codziennie o <input type="time" value={reminderTime} disabled={!reminderEnabled} onChange={event => setReminderTime(event.target.value)} /></label><small>Powiadomienie pojawia się przy kartach do powtórki, gdy aplikacja jest uruchomiona.</small></div>
-    </section>
+          <section className="flashcard-learning-tools" aria-label={`Cel i przypomnienia nauki dla talii ${progressDeck.name}`}>
+            <div className="flashcard-daily-goal"><div className="flashcard-learning-heading"><span><Flame size={15} />Seria: {studyStreak} {studyStreak === 1 ? 'dzień' : 'dni'}</span><label>Cel dzienny<input aria-label="Dzienny cel powtórek" type="number" min="1" max="200" value={dailyGoal} onChange={event => setDailyGoals(value => ({ ...value, [progressDeck.id]: Math.max(1, Math.min(200, Number(event.target.value) || 1)) }))} /></label></div><div className="flashcard-goal-progress"><span style={{ width: `${Math.min(100, reviewsToday / dailyGoal * 100)}%` }} /></div><small>{reviewsToday} z {dailyGoal} powtórek dzisiaj w tej talii</small></div>
+            <div className="flashcard-reminder-settings"><div className="flashcard-learning-heading"><span><Bell size={15} />Przypomnienie</span><label className="flashcard-reminder-toggle"><input type="checkbox" checked={reminderEnabled} onChange={event => void setReminder(event.target.checked)} /><span>{reminderEnabled ? 'Włączone' : 'Wyłączone'}</span></label></div><label className="flashcard-reminder-time">Codziennie o <input type="time" value={reminderTime} disabled={!reminderEnabled} onChange={event => setReminderSettings(value => ({ ...value, [progressDeck.id]: { ...(value[progressDeck.id] ?? defaultReminderPreference), time: event.target.value } }))} /></label><small>Powiadomienie pojawia się przy kartach do powtórki, gdy aplikacja jest uruchomiona.</small></div>
+          </section>
 
-    <section className="flashcard-planning-tools" aria-label="Plan nauki">
-      <div><strong>Dni nauki</strong><div className="flashcard-weekdays">{['Nd', 'Pn', 'Wt', 'Śr', 'Cz', 'Pt', 'Sb'].map((day, index) => <label key={day}><input type="checkbox" checked={studyWeekdays.includes(index)} onChange={() => setStudyWeekdays(value => value.includes(index) ? value.filter(item => item !== index) : [...value, index].sort())} /><span>{day}</span></label>)}</div><small>Terminy powtórek przesuną się na wybrane dni.</small></div>
-      <div><strong>Plan do egzaminu</strong><label>Data egzaminu <input type="date" value={examDate} onChange={event => setExamDate(event.target.value)} /></label><small>{examDate ? examDaysRemaining ? examDaysRemaining + ' dni · około ' + examDailyTarget + ' nowych kart dziennie' : 'Data egzaminu już minęła.' : 'Ustaw datę, aby wyliczyć tempo nauki.'}</small></div>
-      <div className="flashcard-mastery-rules"><strong>Utrwalenie kart według tagu i talii</strong>{selectedDeck && <label>{selectedDeck.name}<select aria-label={'Liczba powtórek do utrwalenia w talii: ' + selectedDeck.name} value={masteryRules['deck:' + selectedDeck.id] ?? 4} onChange={event => setMasteryRules(value => ({ ...value, ['deck:' + selectedDeck.id]: Number(event.target.value) }))}>{[2, 3, 4, 5, 6, 8, 10].map(count => <option key={count} value={count}>{count} powtórek</option>)}</select></label>}{availableTags.length ? availableTags.slice(0, 8).map(tag => <label key={tag}>{tag}<select aria-label={'Liczba powtórek do utrwalenia: ' + tag} value={masteryRules[tag] ?? 4} onChange={event => setMasteryRules(value => ({ ...value, [tag]: Number(event.target.value) }))}>{[2, 3, 4, 5, 6, 8, 10].map(count => <option key={count} value={count}>{count} powtórek</option>)}</select></label>) : <small>Dodaj tagi, aby ustawić reguły.</small>}</div>
-    </section>
+          <section className="flashcard-planning-tools" aria-label={`Plan nauki dla talii ${progressDeck.name}`}>
+            <div><strong>Dni nauki</strong><div className="flashcard-weekdays">{['Nd', 'Pn', 'Wt', 'Śr', 'Cz', 'Pt', 'Sb'].map((day, index) => <label key={day}><input type="checkbox" checked={progressStudyWeekdays.includes(index)} onChange={() => setWeekdayPlans(value => { const current = value[progressDeck.id] ?? defaultStudyWeekdays; return { ...value, [progressDeck.id]: current.includes(index) ? current.filter(item => item !== index) : [...current, index].sort() } })} /><span>{day}</span></label>)}</div><small>Terminy powtórek kart z tej talii przesuną się na wybrane dni.</small></div>
+            <div><strong>Plan do egzaminu</strong><label>Data egzaminu <input type="date" value={examDate} onChange={event => setExamDates(value => ({ ...value, [progressDeck.id]: event.target.value }))} /></label><small>{examDate ? examDaysRemaining ? examDaysRemaining + ' dni · około ' + examDailyTarget + ' nowych kart dziennie z tej talii' : 'Data egzaminu już minęła.' : 'Ustaw datę, aby wyliczyć tempo nauki dla tej talii.'}</small></div>
+            <div className="flashcard-mastery-rules"><strong>Utrwalenie według tagów i talii</strong><label className="flashcard-mastery-deck-rule"><span title={progressDeck.name}>{progressDeck.name}</span><select aria-label={'Liczba powtórek do utrwalenia w talii: ' + progressDeck.name} value={masteryRules['deck:' + progressDeck.id] ?? 4} onChange={event => setMasteryRules(value => ({ ...value, ['deck:' + progressDeck.id]: Number(event.target.value) }))}>{[2, 3, 4, 5, 6, 8, 10].map(count => <option key={count} value={count}>{count} powtórek</option>)}</select></label><div className="flashcard-mastery-tag-rules">{progressAvailableTags.length ? progressAvailableTags.map(tag => <label key={tag}><span title={tag}>{tag}</span><select aria-label={'Liczba powtórek do utrwalenia: ' + tag} value={masteryRules[deckTagMasteryKey(progressDeck.id, tag)] ?? 4} onChange={event => setMasteryRules(value => ({ ...value, [deckTagMasteryKey(progressDeck.id, tag)]: Number(event.target.value) }))}>{[2, 3, 4, 5, 6, 8, 10].map(count => <option key={count} value={count}>{count} powtórek</option>)}</select></label>) : <small>Ta talia nie ma kart z tagami.</small>}</div></div>
+          </section>
 
-    <section className="flashcard-activity" aria-label="Kalendarz aktywności nauki"><div className="flashcard-activity-heading"><span><CalendarDays size={15} />Aktywność z ostatnich 12 tygodni</span><small>{activityCalendar.reduce((sum, day) => sum + day.count, 0)} powtórek</small></div><div className="flashcard-activity-months">{activityCalendar.filter(day => day.monthLabel).map(day => <span key={day.key}>{day.monthLabel}</span>)}</div><div className="flashcard-activity-grid">{activityCalendar.map(day => <span key={day.key} role="img" title={day.title} aria-label={day.title} data-level={day.level} />)}</div><div className="flashcard-activity-legend"><span>Mniej</span>{[0, 1, 2, 3, 4].map(level => <i key={level} data-level={level} />)}<span>Więcej</span></div></section>
+          <section className="flashcard-activity" aria-label={`Kalendarz aktywności dla talii ${progressDeck.name}`}><div className="flashcard-activity-heading"><span><CalendarDays size={15} />Aktywność z ostatnich 12 tygodni · {progressDeck.name}</span><small>{activityCalendar.reduce((sum, day) => sum + day.count, 0)} powtórek</small></div><div className="flashcard-activity-months">{activityCalendar.filter(day => day.monthLabel).map(day => <span key={day.key}>{day.monthLabel}</span>)}</div><div className="flashcard-activity-grid">{activityCalendar.map(day => <span key={day.key} role="img" title={day.title} aria-label={day.title} data-level={day.level} />)}</div><div className="flashcard-activity-legend"><span>Mniej</span>{[0, 1, 2, 3, 4].map(level => <i key={level} data-level={level} />)}<span>Więcej</span></div></section>
+        </>}
       </div>
     </section> : tab === 'create' ? <section className="flashcard-page-panel flashcard-create-panel" aria-label="Dodaj fiszkę">
       <header className="flashcard-panel-heading"><div><h2>Dodaj fiszkę</h2><p>Wybierz typ nauki i uzupełnij treść fiszki.</p></div><output className="flashcard-create-scope-count" aria-live="polite"><Layers size={15} /><span>Fiszki w bieżącym zakresie</span><strong>{deckFilteredCards.length}</strong></output></header>
