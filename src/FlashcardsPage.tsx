@@ -453,7 +453,7 @@ export function FlashcardsPage({ cards, notes, attachments = [], trash = [], aiT
   const [mediaEnd, setMediaEnd] = useState('')
   const [relatedDraft, setRelatedDraft] = useState<string[]>([])
   const [glossaryDraft, setGlossaryDraft] = useState('')
-  const [tab, setTab] = useState<'review' | 'cards' | 'create' | 'progress' | 'trash'>('review')
+  const [tab, setTab] = useState<'review' | 'scope' | 'cards' | 'create' | 'progress' | 'trash'>('review')
   const [now, setNow] = useState(() => Date.now())
   const [excludedNoteIds, setExcludedNoteIds] = useState<string[]>([])
   const [includeUnlinkedCards, setIncludeUnlinkedCards] = useState(true)
@@ -463,6 +463,7 @@ export function FlashcardsPage({ cards, notes, attachments = [], trash = [], aiT
   const [cardsPage, setCardsPage] = useState(1)
   const [decks, setDecks] = useState<FlashcardDeck[]>(readDecks)
   const [selectedDeckId, setSelectedDeckId] = useState('')
+  const [sessionDeckId, setSessionDeckId] = useState('')
   const [progressDeckId, setProgressDeckId] = useState(() => localStorage.getItem('no-tie-flashcard-progress-deck') ?? readDecks()[0]?.id ?? '')
   const [deckName, setDeckName] = useState('')
   const [deckCreateMode, setDeckCreateMode] = useState<'sources' | 'selected' | 'dynamic'>('sources')
@@ -569,6 +570,7 @@ export function FlashcardsPage({ cards, notes, attachments = [], trash = [], aiT
   }), [cards, notes, excludedIds, includeUnlinkedCards])
   const unlinkedCardCount = useMemo(() => cards.filter(card => !card.noteId || !resolveWikiTarget(notes, card.noteId)).length, [cards, notes])
   const selectedDeck = decks.find(deck => deck.id === selectedDeckId)
+  const sessionDeck = decks.find(deck => deck.id === sessionDeckId)
   const progressDeck = decks.find(deck => deck.id === progressDeckId) ?? decks[0]
   const dailyGoal = progressDeck ? dailyGoals[progressDeck.id] ?? 20 : 20
   const examDate = progressDeck ? examDates[progressDeck.id] ?? '' : ''
@@ -576,14 +578,21 @@ export function FlashcardsPage({ cards, notes, attachments = [], trash = [], aiT
   const progressReminder = progressDeck ? reminderSettings[progressDeck.id] ?? defaultReminderPreference : defaultReminderPreference
   const reminderEnabled = progressReminder.enabled
   const reminderTime = progressReminder.time
-  const studyWeekdays = selectedDeck ? weekdayPlans[selectedDeck.id] ?? defaultStudyWeekdays : defaultStudyWeekdays
+  const studyWeekdays = sessionDeck ? weekdayPlans[sessionDeck.id] ?? defaultStudyWeekdays : defaultStudyWeekdays
   const deckFilteredCards = useMemo(() => sourceFilteredCards.filter(card => !selectedDeck || cardBelongsToDeck(card, selectedDeck, notes, now)), [sourceFilteredCards, selectedDeck, notes, now])
+  const dynamicDeckPreviewCount = useMemo(() => cards.filter(card =>
+    (!dynamicDeckTag || card.tags?.includes(dynamicDeckTag)) &&
+    (!dynamicDeckNote || card.noteId === dynamicDeckNote) &&
+    (!dynamicDueOnly || card.dueAt <= now)
+  ).length, [cards, dynamicDeckTag, dynamicDeckNote, dynamicDueOnly, now])
+  const sessionDeckCards = useMemo(() => cards.filter(card => !sessionDeck || cardBelongsToDeck(card, sessionDeck, notes, now)), [cards, sessionDeck, notes, now])
   const progressDeckCards = useMemo(() => progressDeck ? cards.filter(card => cardBelongsToDeck(card, progressDeck, notes, now)) : [], [cards, progressDeck, notes, now])
-  const taggedCards = useMemo(() => tagFilter ? deckFilteredCards.filter(card => card.tags?.includes(tagFilter)) : deckFilteredCards, [deckFilteredCards, tagFilter])
-  const activeCards = useMemo(() => taggedCards.filter(card => !card.suspended), [taggedCards])
-  const due = useMemo(() => activeCards.filter(card => card.dueAt <= now).sort((a, b) => a.dueAt - b.dueAt), [activeCards, now])
+  const taggedCards = useMemo(() => tagFilter ? cards.filter(card => card.tags?.includes(tagFilter)) : cards, [cards, tagFilter])
+  const activeCards = useMemo(() => sessionDeckCards.filter(card => !card.suspended), [sessionDeckCards])
+  const sessionDueCount = activeCards.filter(card => card.dueAt <= now).length
+  const due = useMemo(() => cards.filter(card => !card.suspended && card.dueAt <= now).sort((a, b) => a.dueAt - b.dueAt), [cards, now])
   const currentId = sessionQueue?.[0]
-  const current = currentId ? deckFilteredCards.find(card => card.id === currentId) : undefined
+  const current = currentId ? cards.find(card => card.id === currentId) : undefined
   const currentNote = current && current.noteId ? resolveWikiTarget(notes, current.noteId) : undefined
   const selectedCount = notes.length - excludedNoteIds.filter(id => notes.some(note => note.id === id)).length
   const allNotesSelected = selectedCount === notes.length
@@ -605,8 +614,13 @@ export function FlashcardsPage({ cards, notes, attachments = [], trash = [], aiT
   const firstVisibleCard = (currentCardsPage - 1) * cardsPerPage
   const lastVisibleCard = Math.min(firstVisibleCard + cardsPerPage, visibleCards.length)
   const pageCards = visibleCards.slice(firstVisibleCard, lastVisibleCard)
+  const cardDeckMembership = useMemo(() => {
+    const memberships = new Map<string, FlashcardDeck[]>()
+    for (const card of pageCards) memberships.set(card.id, decks.filter(deck => cardBelongsToDeck(card, deck, notes, now)))
+    return memberships
+  }, [pageCards, decks, notes, now])
   const selectedCards = useMemo(() => cards.filter(card => selectedCardIds.includes(card.id)), [cards, selectedCardIds])
-  useEffect(() => { setCardsPage(1) }, [query, tagFilter, selectedDeckId, excludedNoteIds, includeUnlinkedCards])
+  useEffect(() => { setCardsPage(1) }, [query, tagFilter])
   useEffect(() => { setSimilarMatches(null) }, [visibleCards])
 
   const dayStart = new Date()
@@ -655,7 +669,7 @@ export function FlashcardsPage({ cards, notes, attachments = [], trash = [], aiT
     activityCalendar.push({ key, title: `${new Intl.DateTimeFormat('pl-PL', { dateStyle: 'medium' }).format(calendarCursor)} · ${count} powtórek`, count, level: count === 0 ? 0 : count === 1 ? 1 : count <= 3 ? 2 : count <= 6 ? 3 : 4, monthLabel: calendarCursor.getDate() === 1 || activityCalendar.length === 0 ? new Intl.DateTimeFormat('pl-PL', { month: 'short' }).format(calendarCursor) : '' })
     calendarCursor.setDate(calendarCursor.getDate() + 1)
   }
-  const sessionReviewEvents = taggedCards.flatMap(card => card.reviewHistory ?? [])
+  const sessionReviewEvents = sessionDeckCards.flatMap(card => card.reviewHistory ?? [])
   const averageResponseMs = Math.round(sessionReviewEvents.reduce((total, event) => total + (event.responseMs ?? 25_000), 0) / Math.max(1, sessionReviewEvents.length))
   const weakCards = activeCards.filter(card => card.lapses > 0 || card.ease < 2.2 || card.reviewHistory?.slice(-2).some(event => event.grade === 'again' || event.grade === 'hard'))
   const weakCardIds = new Set(weakCards.map(card => card.id))
@@ -891,6 +905,7 @@ export function FlashcardsPage({ cards, notes, attachments = [], trash = [], aiT
   function openRelatedCard(card: Flashcard) {
     setTab('review')
     setSelectedDeckId('')
+    setSessionDeckId('')
     setExcludedNoteIds([])
     setIncludeUnlinkedCards(true)
     setTagFilter('')
@@ -1032,12 +1047,67 @@ export function FlashcardsPage({ cards, notes, attachments = [], trash = [], aiT
     finally { setRegeneratingId(''); onFinishAiTask(taskId, failed, notificationResult) }
   }
 
+  const scopeAndDecksView = (
+    <section className="flashcard-page-panel flashcard-scope-panel" aria-label="Zakres fiszek i talie">
+      <header className="flashcard-panel-heading">
+        <div>
+          <h2>Zakres i talie</h2>
+          <p>Ustaw źródła i zarządzaj taliami. Lista kart zawsze obejmuje wszystkie fiszki.</p>
+        </div>
+      </header>
+      <div className="flashcard-scope-content">
+        <section className="flashcard-scope-block" aria-labelledby="flashcard-scope-sources-title">
+          <header className="flashcard-scope-section-heading">
+            <div><h3 id="flashcard-scope-sources-title">Źródła fiszek</h3><p>Wybierz notatki używane przy tworzeniu talii ze źródeł.</p></div>
+            <span className="flashcard-scope-selection-count">{selectedCount} / {notes.length} notatek</span>
+          </header>
+          <div className="flashcard-note-options">
+            <button type="button" onClick={() => { setExcludedNoteIds([]); setIncludeUnlinkedCards(true); setSelectedDeckId(''); setSessionQueue(null) }}>Wszystkie notatki i fiszki</button>
+            {notes.map(note => <button type="button" key={note.id} className="flashcard-note-option" aria-pressed={!excludedIds.has(note.id)} onClick={() => toggleSourceNote(note.id)}><span className="flashcard-note-option-mark" aria-hidden="true">{!excludedIds.has(note.id) && <Check size={11} />}</span><span>{note.folder ? `${note.folder} / ` : ''}{note.title || 'Bez tytułu'}</span></button>)}
+            <button type="button" className="flashcard-note-option" aria-pressed={includeUnlinkedCards} onClick={() => { setIncludeUnlinkedCards(value => !value); setSelectedDeckId(''); setSessionQueue(null) }}><span className="flashcard-note-option-mark" aria-hidden="true">{includeUnlinkedCards && <Check size={11} />}</span><span>Fiszki bez notatki ({unlinkedCardCount})</span></button>
+          </div>
+          <small className="flashcard-scope-help">Bieżący zakres: {deckFilteredCards.length} fiszek · fiszki bez notatki {includeUnlinkedCards ? 'włączone' : 'wyłączone'}.</small>
+        </section>
+
+        <div className="flashcard-scope-deck-layout">
+          <section className="flashcard-scope-block flashcard-saved-deck-block" aria-labelledby="flashcard-saved-decks-title">
+            <header className="flashcard-scope-section-heading"><div><h3 id="flashcard-saved-decks-title">Zapisane talie</h3><p>Wybierz talię, aby podejrzeć jej zawartość lub ją usunąć.</p></div></header>
+            <label className="flashcard-scope-field"><span>Podgląd talii</span><select aria-label="Zapisana talia" value={selectedDeckId} onChange={event => chooseDeck(event.target.value)}><option value="">Bieżący zakres źródeł</option>{decks.map(deck => <option key={deck.id} value={deck.id}>{deck.name}</option>)}</select></label>
+            <div className="flashcard-scope-deck-summary"><Layers size={15} /><span><strong>{selectedDeck?.name ?? 'Bieżący wybór źródeł'}</strong><small>{deckFilteredCards.length} fiszek · {selectedDeck?.dynamicRule ? 'reguły dynamiczne' : selectedDeck?.cardIds ? 'ręcznie wybrane karty' : selectedDeck ? 'wybrane źródła' : sourceFilterLabel}</small></span></div>
+            {selectedDeck && <button type="button" className="button secondary flashcard-delete-deck-button" onClick={() => { setDecks(current => current.filter(deck => deck.id !== selectedDeckId)); if (sessionDeckId === selectedDeckId) setSessionDeckId(''); setSelectedDeckId('') }}><Trash2 size={14} />Usuń tę talię</button>}
+          </section>
+
+          <section className="flashcard-scope-block flashcard-create-deck-block" aria-labelledby="flashcard-create-deck-title">
+            <header className="flashcard-scope-section-heading"><div><h3 id="flashcard-create-deck-title">Utwórz talię</h3><p>Wybierz sposób, w jaki talia ma dobierać fiszki.</p></div></header>
+            <label className="flashcard-scope-field"><span>Sposób doboru fiszek</span><select value={deckCreateMode} onChange={event => setDeckCreateMode(event.target.value as typeof deckCreateMode)}><option value="sources">Z wybranych źródeł</option><option value="selected">Zaznaczone ręcznie karty</option><option value="dynamic">Według reguł dynamicznych</option></select></label>
+            {deckCreateMode === 'sources' && <p className="flashcard-deck-mode-help">Talia zapisze wybrane notatki oraz ustawienie fiszek bez notatki z sekcji „Źródła fiszek”.</p>}
+            {deckCreateMode === 'selected' && <div className="flashcard-deck-mode-help"><span>{selectedCardIds.length ? `Do talii trafi ${selectedCardIds.length} zaznaczonych kart.` : 'Najpierw zaznacz karty na liście w widoku Karty.'}</span><button type="button" className="link-button" onClick={() => setTab('cards')}>Otwórz karty</button></div>}
+            {deckCreateMode === 'dynamic' && <fieldset className="flashcard-dynamic-rules">
+              <legend>Reguły dynamiczne</legend>
+              <div className="flashcard-dynamic-rules-heading"><p>Każdy ustawiony warunek musi pasować. Puste pola nie ograniczają talii; reguły sprawdzają wszystkie fiszki.</p><output aria-live="polite"><strong>{dynamicDeckPreviewCount}</strong><span>pasujących fiszek</span></output></div>
+              <div className="flashcard-dynamic-rule-controls">
+                <label><span>Tag</span><select value={dynamicDeckTag} onChange={event => setDynamicDeckTag(event.target.value)}><option value="">Dowolny tag</option>{availableTags.map(tag => <option key={tag} value={tag}>{tag}</option>)}</select><small>Wybierz tag, który musi mieć fiszka.</small></label>
+                <label><span>Notatka źródłowa</span><select value={dynamicDeckNote} onChange={event => setDynamicDeckNote(event.target.value)}><option value="">Dowolna notatka</option>{notes.map(note => <option key={note.id} value={note.id}>{note.folder ? `${note.folder} / ` : ''}{note.title || 'Bez tytułu'}</option>)}</select><small>Ogranicz talię do jednej notatki.</small></label>
+                <label className="flashcard-dynamic-due-toggle"><input type="checkbox" checked={dynamicDueOnly} onChange={event => setDynamicDueOnly(event.target.checked)} /><span><strong>Tylko do powtórki</strong><small>Do talii trafią karty z upłyniętym terminem powtórki.</small></span></label>
+              </div>
+            </fieldset>}
+            <div className="flashcard-create-deck-footer">
+              <label className="flashcard-scope-field"><span>Nazwa talii</span><input aria-label="Nazwa nowej talii" value={deckName} onChange={event => setDeckName(event.target.value)} placeholder="np. Biologia — egzamin" /></label>
+              <button type="button" className="button primary" disabled={!deckName.trim() || (deckCreateMode === 'selected' && !selectedCardIds.length)} onClick={saveDeck}><Plus size={14} />Zapisz talię</button>
+            </div>
+          </section>
+        </div>
+      </div>
+    </section>
+  )
+
   return (<section className="flashcards-page" aria-labelledby="flashcards-title">
-    <header className="flashcards-page-heading"><span className="folder-dialog-mark"><Brain size={19} /></span><div><h1 id="flashcards-title">Fiszki</h1><p>{due.length} do powtórki · {sourceFilteredCards.length} w wybranych źródłach · {selectedCount} notatek</p></div><button type="button" className={`flashcard-trash-shortcut${tab === 'trash' ? ' active' : ''}`} aria-label={`Otwórz kosz fiszek, ${trash.length} elementów`} aria-pressed={tab === 'trash'} title={`Kosz fiszek (${trash.length})`} onClick={() => setTab('trash')}><Trash2 size={17} />{trash.length > 0 && <span>{trash.length}</span>}</button></header>
+    <header className="flashcards-page-heading"><span className="folder-dialog-mark"><Brain size={19} /></span><div><h1 id="flashcards-title">Fiszki</h1><p>{due.length} do powtórki · {cards.length} fiszek · {notes.length} notatek</p></div><button type="button" className={`flashcard-trash-shortcut${tab === 'trash' ? ' active' : ''}`} aria-label={`Otwórz kosz fiszek, ${trash.length} elementów`} aria-pressed={tab === 'trash'} title={`Kosz fiszek (${trash.length})`} onClick={() => setTab('trash')}><Trash2 size={17} />{trash.length > 0 && <span>{trash.length}</span>}</button></header>
 
     <nav className="flashcard-view-tabs" aria-label="Widoki fiszek">
-      <button type="button" className={tab === 'review' ? 'active' : ''} aria-pressed={tab === 'review'} onClick={() => setTab('review')}>Nauka <span>{due.length}</span></button>
-      <button type="button" className={tab === 'cards' ? 'active' : ''} aria-pressed={tab === 'cards'} onClick={() => setTab('cards')}>Karty <span>{deckFilteredCards.length}</span></button>
+      <button type="button" className={tab === 'review' ? 'active' : ''} aria-pressed={tab === 'review'} onClick={() => setTab('review')}>Nauka <span>{sessionDueCount}</span></button>
+      <button type="button" className={tab === 'scope' ? 'active' : ''} aria-pressed={tab === 'scope'} onClick={() => setTab('scope')}>Zakres i talie</button>
+      <button type="button" className={tab === 'cards' ? 'active' : ''} aria-pressed={tab === 'cards'} onClick={() => setTab('cards')}>Karty <span>{cards.length}</span></button>
       <button type="button" className={tab === 'create' ? 'active' : ''} aria-pressed={tab === 'create'} onClick={() => setTab('create')}>Dodaj</button>
       <button type="button" className={tab === 'progress' ? 'active' : ''} aria-pressed={tab === 'progress'} onClick={() => setTab('progress')}>Postępy</button>
     </nav>
@@ -1045,7 +1115,7 @@ export function FlashcardsPage({ cards, notes, attachments = [], trash = [], aiT
     {tab === 'progress' ? <section className="flashcard-page-panel flashcard-progress-panel" aria-label="Postępy i planowanie">
       <header className="flashcard-panel-heading flashcard-progress-heading"><div><h2>Postępy i planowanie</h2><p>{progressDeck ? `${progressDeck.name} · ${progressDeckCards.length} fiszek · seria ${studyStreak} dni · ${reviewsToday}/${dailyGoal} powtórek dzisiaj · ${progressDueCards.length} do powtórki` : 'Wybierz talię, aby zobaczyć jej postępy i plan nauki.'}</p></div><label className="flashcard-progress-deck-picker"><span>Talia dla postępów i planowania</span><select aria-label="Talia dla postępów i planowania" value={progressDeck?.id ?? ''} disabled={!decks.length} onChange={event => setProgressDeckId(event.target.value)}><option value="" disabled>Wybierz talię</option>{decks.map(deck => <option key={deck.id} value={deck.id}>{deck.name}</option>)}</select></label></header>
       <div className="flashcard-progress-content">
-        {!progressDeck ? <div className="flashcard-progress-empty"><p>Najpierw utwórz talię, aby śledzić postępy i planować naukę dla jej kart.</p><button type="button" className="button secondary" onClick={() => setTab('review')}>Przejdź do talii</button></div> : <>
+        {!progressDeck ? <div className="flashcard-progress-empty"><p>Najpierw utwórz talię, aby śledzić postępy i planować naukę dla jej kart.</p><button type="button" className="button secondary" onClick={() => setTab('scope')}>Przejdź do talii</button></div> : <>
           <section className="flashcard-stats" aria-label={`Statystyki nauki: ${progressDeck.name}`}>
             <article><span>Do powtórki</span><strong>{progressDueCards.length}</strong></article>
             <article><span>Powtórki dzisiaj</span><strong>{reviewsToday}</strong></article>
@@ -1067,7 +1137,7 @@ export function FlashcardsPage({ cards, notes, attachments = [], trash = [], aiT
           <section className="flashcard-activity" aria-label={`Kalendarz aktywności dla talii ${progressDeck.name}`}><div className="flashcard-activity-heading"><span><CalendarDays size={15} />Aktywność z ostatnich 12 tygodni · {progressDeck.name}</span><small>{activityCalendar.reduce((sum, day) => sum + day.count, 0)} powtórek</small></div><div className="flashcard-activity-months">{activityCalendar.filter(day => day.monthLabel).map(day => <span key={day.key}>{day.monthLabel}</span>)}</div><div className="flashcard-activity-grid">{activityCalendar.map(day => <span key={day.key} role="img" title={day.title} aria-label={day.title} data-level={day.level} />)}</div><div className="flashcard-activity-legend"><span>Mniej</span>{[0, 1, 2, 3, 4].map(level => <i key={level} data-level={level} />)}<span>Więcej</span></div></section>
         </>}
       </div>
-    </section> : tab === 'create' ? <section className="flashcard-page-panel flashcard-create-panel" aria-label="Dodaj fiszkę">
+    </section> : tab === 'scope' ? scopeAndDecksView : tab === 'create' ? <section className="flashcard-page-panel flashcard-create-panel" aria-label="Dodaj fiszkę">
       <header className="flashcard-panel-heading"><div><h2>Dodaj fiszkę</h2><p>Wybierz typ nauki i uzupełnij treść fiszki.</p></div><output className="flashcard-create-scope-count" aria-live="polite"><Layers size={15} /><span>Fiszki w bieżącym zakresie</span><strong>{deckFilteredCards.length}</strong></output></header>
         <form className="flashcard-create-form" onSubmit={submit}>
           <select aria-label="Notatka dla karty" value={noteId} onChange={event => { setNoteId(event.target.value); setMediaAttachmentId('') }}>{notes.map(note => <option key={note.id} value={note.id}>{note.folder ? note.folder + ' / ' : ''}{note.title || 'Bez tytułu'}</option>)}</select>
@@ -1095,19 +1165,9 @@ export function FlashcardsPage({ cards, notes, attachments = [], trash = [], aiT
     </section> :
 
     tab === 'review' ? <div className="flashcard-review-workspace">
-      {sessionQueue === null && (
-        <section className="flashcard-page-panel flashcard-scope-panel" aria-label="Zakres fiszek i talie">
-      <header className="flashcard-panel-heading"><div><h2>Zakres i talie</h2><p>{sourceFilterLabel} · {selectedCount} notatek · {deckFilteredCards.length} kart w zakresie</p></div></header>
-      <div className="flashcard-scope-content">
-        <div className="flashcard-source-options-heading"><strong>Notatki źródłowe</strong><span>{sourceFilterLabel}</span></div><div className="flashcard-note-options"><button type="button" onClick={() => { setExcludedNoteIds([]); setIncludeUnlinkedCards(true); setSelectedDeckId(''); setSessionQueue(null) }}>Wszystkie notatki i fiszki</button>{notes.map(note => <button type="button" key={note.id} className="flashcard-note-option" aria-pressed={!excludedIds.has(note.id)} onClick={() => toggleSourceNote(note.id)}><span className="flashcard-note-option-mark" aria-hidden="true">{!excludedIds.has(note.id) && <Check size={11} />}</span><span>{note.folder ? `${note.folder} / ` : ''}{note.title || 'Bez tytułu'}</span></button>)}<button type="button" className="flashcard-note-option" aria-pressed={includeUnlinkedCards} onClick={() => { setIncludeUnlinkedCards(value => !value); setSelectedDeckId(''); setSessionQueue(null) }}><span className="flashcard-note-option-mark" aria-hidden="true">{includeUnlinkedCards && <Check size={11} />}</span><span>Fiszki bez notatki ({unlinkedCardCount})</span></button></div>
-
-    <div className="flashcard-deck-tools"><label><Layers size={15} /><select aria-label="Zapisana talia" value={selectedDeckId} onChange={event => chooseDeck(event.target.value)}><option value="">Bieżący wybór źródeł</option>{decks.map(deck => <option key={deck.id} value={deck.id}>{deck.name}</option>)}</select></label><label className="flashcard-deck-mode"><span>Nowa talia</span><select value={deckCreateMode} onChange={event => setDeckCreateMode(event.target.value as typeof deckCreateMode)}><option value="sources">Źródła zaznaczone</option><option value="selected">Zaznaczone karty ({selectedCardIds.length})</option><option value="dynamic">Reguły dynamiczne</option></select></label>{deckCreateMode === 'dynamic' && <><select aria-label="Tag dynamicznej talii" value={dynamicDeckTag} onChange={event => setDynamicDeckTag(event.target.value)}><option value="">Dowolny tag</option>{availableTags.map(tag => <option key={tag} value={tag}>{tag}</option>)}</select><select aria-label="Notatka dynamicznej talii" value={dynamicDeckNote} onChange={event => setDynamicDeckNote(event.target.value)}><option value="">Dowolna notatka</option>{notes.map(note => <option key={note.id} value={note.id}>{note.title || 'Bez tytułu'}</option>)}</select><label><input type="checkbox" checked={dynamicDueOnly} onChange={event => setDynamicDueOnly(event.target.checked)} />Tylko do powtórki</label></>}<input aria-label="Nazwa nowej talii" value={deckName} onChange={event => setDeckName(event.target.value)} placeholder="Nazwa talii" /><button type="button" className="button secondary" disabled={!deckName.trim() || (deckCreateMode === 'selected' && !selectedCardIds.length)} onClick={saveDeck}>Zapisz talię</button>{selectedDeckId && <button type="button" className="icon-button" aria-label="Usuń zapisaną talię" title="Usuń talię" onClick={() => { setDecks(current => current.filter(deck => deck.id !== selectedDeckId)); setSelectedDeckId('') }}><Trash2 size={15} /></button>}</div>
-      </div>
-    </section>
-      )}
-      {sessionQueue === null ? <div className="flashcard-session-setup"><div className="flashcard-session-heading"><span className="flashcard-session-mark"><Shuffle size={17} /></span><div><h2>Sesja nauki</h2><p>Wybierz zakres i czas. Sesja obejmie tylko karty typu „{FLASHCARD_STUDY_MODES.find(mode => mode.value === answerMode)?.label}”.</p></div></div><div className="flashcard-session-controls"><label>Zakres<select value={sessionMode} onChange={event => setSessionMode(event.target.value as SessionMode)}><option value="due">Tylko do powtórki ({dueModeCards.length})</option><option value="all">Wszystkie karty ({activeModeCards.length})</option><option value="weak">Słabe karty ({weakModeCards.length})</option></select></label><label>Typ kart<select value={answerMode} onChange={event => setAnswerMode(event.target.value as AnswerMode)}>{FLASHCARD_STUDY_MODES.map(mode => <option key={mode.value} value={mode.value}>{mode.label}</option>)}</select></label><label>Liczba kart<select value={sessionLimit} disabled={timeSized} onChange={event => setSessionLimit(Number(event.target.value))}>{[5, 10, 20, 50, 100].map(count => <option key={count} value={count}>{count}</option>)}</select></label></div><section className="flashcard-page-panel flashcard-session-options-panel"><header className="flashcard-panel-heading"><div><h3>Dodatkowe ustawienia sesji</h3><p>Ustaw limit czasu, kolejność i priorytet słabych kart.</p></div></header><div className="flashcard-session-option-controls"><label className="flashcard-shuffle-toggle"><input type="checkbox" checked={timeSized} onChange={event => setTimeSized(event.target.checked)} /><span>Sesja na czas</span></label>{(timeSized || answerMode === 'timed-exam') && <label>Czas<select value={sessionMinutes} onChange={event => setSessionMinutes(Number(event.target.value))}>{[5, 10, 15, 20, 30, 45, 60].map(count => <option key={count} value={count}>{count} min</option>)}</select></label>}<label className="flashcard-shuffle-toggle"><input type="checkbox" checked={shuffleSession} onChange={event => setShuffleSession(event.target.checked)} /><span>Mieszaj kolejność</span></label><label className="flashcard-shuffle-toggle"><input type="checkbox" checked={weakOnly} onChange={event => setWeakOnly(event.target.checked)} /><span>Skup się na słabych kartach</span></label></div></section><div className="flashcard-session-footer"><small>Szacunkowo: około {sessionCardLimit} kart przy średnim czasie odpowiedzi {Math.round(averageResponseMs / 1000)} s.</small><button type="button" className="button primary" disabled={!eligibleForSession.length} onClick={startSession}><Brain size={15} />Rozpocznij sesję ({Math.min(sessionCardLimit, eligibleForSession.length)})</button></div></div>
+      {sessionQueue === null ? <div className="flashcard-session-setup"><div className="flashcard-session-heading"><span className="flashcard-session-mark"><Shuffle size={17} /></span><div><h2>Sesja nauki</h2><p>Wybierz talię, zakres i typ kart. Sesja będzie korzystać wyłącznie z wybranej talii.</p></div></div><div className="flashcard-session-controls"><label>Talia do nauki<select value={sessionDeckId} onChange={event => { setSessionDeckId(event.target.value); setSessionQueue(null) }}><option value="">Wszystkie fiszki</option>{decks.map(deck => <option key={deck.id} value={deck.id}>{deck.name}</option>)}</select></label><label>Zakres<select value={sessionMode} onChange={event => setSessionMode(event.target.value as SessionMode)}><option value="due">Tylko do powtórki ({dueModeCards.length})</option><option value="all">Wszystkie karty ({activeModeCards.length})</option><option value="weak">Słabe karty ({weakModeCards.length})</option></select></label><label>Typ kart<select value={answerMode} onChange={event => setAnswerMode(event.target.value as AnswerMode)}>{FLASHCARD_STUDY_MODES.map(mode => <option key={mode.value} value={mode.value}>{mode.label}</option>)}</select></label><label>Liczba kart<select value={sessionLimit} disabled={timeSized} onChange={event => setSessionLimit(Number(event.target.value))}>{[5, 10, 20, 50, 100].map(count => <option key={count} value={count}>{count}</option>)}</select></label></div><section className="flashcard-page-panel flashcard-session-options-panel"><header className="flashcard-panel-heading"><div><h3>Dodatkowe ustawienia sesji</h3><p>Ustaw limit czasu, kolejność i priorytet słabych kart.</p></div></header><div className="flashcard-session-option-controls"><label className="flashcard-shuffle-toggle"><input type="checkbox" checked={timeSized} onChange={event => setTimeSized(event.target.checked)} /><span>Sesja na czas</span></label>{(timeSized || answerMode === 'timed-exam') && <label>Czas<select value={sessionMinutes} onChange={event => setSessionMinutes(Number(event.target.value))}>{[5, 10, 15, 20, 30, 45, 60].map(count => <option key={count} value={count}>{count} min</option>)}</select></label>}<label className="flashcard-shuffle-toggle"><input type="checkbox" checked={shuffleSession} onChange={event => setShuffleSession(event.target.checked)} /><span>Mieszaj kolejność</span></label><label className="flashcard-shuffle-toggle"><input type="checkbox" checked={weakOnly} onChange={event => setWeakOnly(event.target.checked)} /><span>Skup się na słabych kartach</span></label></div></section><div className="flashcard-session-footer"><small>Szacunkowo: około {sessionCardLimit} kart przy średnim czasie odpowiedzi {Math.round(averageResponseMs / 1000)} s.</small><button type="button" className="button primary" disabled={!eligibleForSession.length} onClick={startSession}><Brain size={15} />Rozpocznij sesję ({Math.min(sessionCardLimit, eligibleForSession.length)})</button></div></div>
         : current ? <div className="flashcard-review">
-          <div className="flashcard-review-progress"><span>{sessionCompleted + 1} / {sessionTotal}</span><button type="button" className="link-button" onClick={() => { setSessionQueue(null); setExamDeadline(null); setBreakDeadline(null) }}>Zakończ sesję</button></div>
+          <div className="flashcard-review-progress"><span>{sessionDeck?.name ?? 'Wszystkie fiszki'} · {sessionCompleted + 1} / {sessionTotal}</span><button type="button" className="link-button" onClick={() => { setSessionQueue(null); setExamDeadline(null); setBreakDeadline(null) }}>Zakończ sesję</button></div>
           {examDeadline && <div className="flashcard-exam-timer" role="timer">Egzamin · {Math.floor(Math.max(0, examDeadline - now) / 60_000)}:{String(Math.floor(Math.max(0, examDeadline - now) / 1000) % 60).padStart(2, '0')}</div>}
           {currentNote ? <button type="button" className="flashcard-note-path" onClick={() => onOpenNote(currentNote.id)}>{notePath(currentNote)}</button> : <small>{notePath(currentNote)}</small>}
           {current.tags?.length ? <small className="flashcard-review-tags">{current.tags.join(', ')}</small> : null}
@@ -1141,6 +1201,7 @@ export function FlashcardsPage({ cards, notes, attachments = [], trash = [], aiT
         {regenerateError && <p className="flashcard-form-error flashcard-regenerate-error" role="alert">{regenerateError}</p>}
         <div className="flashcard-list">{pageCards.map(card => {
           const note = cardNote(card)
+          const cardDecks = cardDeckMembership.get(card.id) ?? []
           const isEditing = editingCardId === card.id
           return <article key={card.id} className={isEditing ? 'is-editing' : ''}>
             {isEditing ? <div className="flashcard-edit-card">
@@ -1165,7 +1226,7 @@ export function FlashcardsPage({ cards, notes, attachments = [], trash = [], aiT
               <input className="flashcard-tags-input" aria-label="Tagi fiszki" value={editTags} onChange={event => setEditTags(event.target.value)} placeholder="Tagi, oddziel przecinkami" />
               <div className="flashcard-edit-actions"><button type="button" className="button secondary" onClick={() => setEditingCardId('')}>Anuluj</button><button type="button" className="button primary" onClick={() => saveEdit(card)}>Zapisz zmiany</button></div>
             </div> : <>
-              <label className="flashcard-card-select"><input type="checkbox" checked={selectedCardIds.includes(card.id)} onChange={event => setSelectedCardIds(value => event.target.checked ? [...new Set([...value, card.id])] : value.filter(id => id !== card.id))} /><span>Zaznacz kartę</span></label><div className="flashcard-list-content"><RichCardContent value={card.kind === 'cloze' ? clozeText(card.question, false) : card.question} />{card.kind === 'sequence' && card.sequenceItems?.length ? <small>Kolejność · {card.sequenceItems.length} kroków</small> : null}{card.kind === 'numeric' && card.numericAnswer ? <small>Odpowiedź liczbowa · tolerancja ±{card.numericAnswer.tolerance} {card.numericAnswer.unit}</small> : null}{card.mediaClip && <FlashcardMediaClip attachment={attachments.find(item => item.id === card.mediaClip?.attachmentId)} clip={card.mediaClip} />}{card.kind === 'image-occlusion' && card.imageOcclusion && <FlashcardOcclusionImage value={card.imageOcclusion} reveal={false} fallback="Odpowiedź" className="flashcard-image-occlusion-preview" />}<div className="flashcard-card-meta">{note ? <button type="button" className="flashcard-note-path" title={notePath(note)} onClick={() => onOpenNote(note.id)}>{notePath(note)}</button> : <small>Brak notatki</small>}<small>{card.suspended ? 'wstrzymana · ' : ''}{card.tags?.length ? `${card.tags.join(', ')} · ` : ''}{`${FLASHCARD_STUDY_MODES.find(mode => mode.value === (card.studyMode ?? 'flip'))?.label ?? 'Pokaż odpowiedź'} · `}{card.dueAt <= now ? 'do powtórzenia' : `następna: ${new Intl.DateTimeFormat('pl-PL', { dateStyle: 'medium' }).format(card.dueAt)}`}{card.kind === 'cloze' ? ' · luka' : card.kind === 'image-occlusion' ? ' · zakrywanie obrazu' : card.kind === 'sequence' ? ' · kolejność' : card.kind === 'numeric' ? ' · liczby' : card.kind === 'audio' ? ' · audio' : card.kind === 'video' ? ' · wideo' : ''}</small></div>{cardAiResults[card.id] && <FlashcardCardAiResultView result={cardAiResults[card.id]!} onDismiss={() => setCardAiResults(current => { const next = { ...current }; delete next[card.id]; return next })} />}</div>
+              <label className="flashcard-card-select"><input type="checkbox" checked={selectedCardIds.includes(card.id)} onChange={event => setSelectedCardIds(value => event.target.checked ? [...new Set([...value, card.id])] : value.filter(id => id !== card.id))} /><span>Zaznacz kartę</span></label><div className="flashcard-list-content"><RichCardContent value={card.kind === 'cloze' ? clozeText(card.question, false) : card.question} />{card.kind === 'sequence' && card.sequenceItems?.length ? <small>Kolejność · {card.sequenceItems.length} kroków</small> : null}{card.kind === 'numeric' && card.numericAnswer ? <small>Odpowiedź liczbowa · tolerancja ±{card.numericAnswer.tolerance} {card.numericAnswer.unit}</small> : null}{card.mediaClip && <FlashcardMediaClip attachment={attachments.find(item => item.id === card.mediaClip?.attachmentId)} clip={card.mediaClip} />}{card.kind === 'image-occlusion' && card.imageOcclusion && <FlashcardOcclusionImage value={card.imageOcclusion} reveal={false} fallback="Odpowiedź" className="flashcard-image-occlusion-preview" />}<div className="flashcard-card-meta">{note ? <button type="button" className="flashcard-note-path" title={notePath(note)} onClick={() => onOpenNote(note.id)}>{notePath(note)}</button> : <small>Brak notatki</small>}<small>{card.suspended ? 'wstrzymana · ' : ''}{card.tags?.length ? `${card.tags.join(', ')} · ` : ''}{`${FLASHCARD_STUDY_MODES.find(mode => mode.value === (card.studyMode ?? 'flip'))?.label ?? 'Pokaż odpowiedź'} · `}{card.dueAt <= now ? 'do powtórzenia' : `następna: ${new Intl.DateTimeFormat('pl-PL', { dateStyle: 'medium' }).format(card.dueAt)}`}{card.kind === 'cloze' ? ' · luka' : card.kind === 'image-occlusion' ? ' · zakrywanie obrazu' : card.kind === 'sequence' ? ' · kolejność' : card.kind === 'numeric' ? ' · liczby' : card.kind === 'audio' ? ' · audio' : card.kind === 'video' ? ' · wideo' : ''}</small><div className="flashcard-card-decks" aria-label={cardDecks.length ? `Talie: ${cardDecks.map(deck => deck.name).join(', ')}` : 'Karta bez talii'}><Layers size={12} aria-hidden="true" />{cardDecks.length ? cardDecks.map(deck => <span key={deck.id} title={deck.name}>{deck.name}</span>) : <small>Bez talii</small>}</div></div>{cardAiResults[card.id] && <FlashcardCardAiResultView result={cardAiResults[card.id]!} onDismiss={() => setCardAiResults(current => { const next = { ...current }; delete next[card.id]; return next })} />}</div>
               <div className="flashcard-row-actions"><button type="button" className="icon-button" aria-label="Edytuj fiszkę" title="Edytuj" onClick={() => beginEdit(card)}><Pencil size={15} /></button><details className="flashcard-row-more"><summary>Więcej<ChevronDown size={12} aria-hidden="true" /></summary><div className="flashcard-row-more-actions">{onAiAssist && <details className="flashcard-row-ai"><summary><Sparkles size={14} />AI</summary><div><button type="button" title="Tworzy błędne odpowiedzi do trybu nauki „Warianty odpowiedzi”." onClick={() => void runAi('distractors', card)}>Dystraktory</button><button type="button" title="Dodaje przykład i kontrprzykład wyjaśniający pojęcie z fiszki." onClick={() => void runAi('example', card)}>Przykład i kontrprzykład</button><button type="button" title="Dodaje mnemotechnikę, która ma pomóc zapamiętać odpowiedź." onClick={() => void runAi('mnemonic', card)}>Skojarzenie</button><label title="Przeredagowuje pytanie i odpowiedź na wybrany poziom trudności.">Poziom<select aria-label="Poziom trudności fiszki" value={card.difficulty ?? 'intermediate'} onChange={event => void runAi('difficulty', card, event.target.value)}><option value="beginner">Początkujący</option><option value="intermediate">Średni</option><option value="advanced">Zaawansowany</option></select></label></div></details>}{onRegenerate && card.kind === 'basic' && <button type="button" className="icon-button" aria-label="Popraw fiszkę przy pomocy AI" title="Popraw przy pomocy AI" disabled={Boolean(regeneratingId)} onClick={() => void regenerate(card)}>{regeneratingId === card.id ? <Sparkles className="spin" size={15} /> : <Sparkles size={15} />}</button>}<button type="button" className="icon-button" aria-label={card.suspended ? 'Wznów fiszkę' : 'Wstrzymaj fiszkę'} title={card.suspended ? 'Wznów fiszkę' : 'Wstrzymaj fiszkę'} onClick={() => onToggleSuspend(card.id)}>{card.suspended ? <Play size={15} /> : <Pause size={15} />}</button><label className="flashcard-postpone-mini"><Clock3 size={13} /><select aria-label="Odłóż fiszkę" defaultValue="" onChange={event => { postpone(card.id, event.target.value); event.target.value = '' }}><option value="" disabled>Odłóż</option><option value="hour">+1 godz.</option><option value="day">Jutro</option><option value="week">+7 dni</option><option value="month">+30 dni</option></select></label><label className="flashcard-date-mini"><input aria-label="Ustaw dokładny termin powtórki" type="datetime-local" value={dateTimeLocal(card.dueAt)} onChange={event => setManualDue(card.id, event.target.value)} /></label><button type="button" className="icon-button danger-icon" title="Usuń fiszkę" aria-label="Usuń fiszkę" onClick={() => onDelete(card)}><X size={15} /></button></div></details></div>
             </>}
           </article>
