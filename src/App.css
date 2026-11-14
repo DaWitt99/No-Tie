@@ -1813,8 +1813,10 @@
 .flashcard-session-option-controls select { height: 32px; border: 1px solid #e2e6ef; border-radius: 8px; padding: 0 9px; color: #46516a; background: #fff; font: inherit; font-size: 10px; }
 .flashcard-session-option-controls .flashcard-shuffle-toggle { display: flex; min-height: 32px; align-items: center; gap: 7px; color: #667187; font-size: 10px; }
 .flashcard-ai-task-notification-stack { position: fixed; z-index: 127; right: 18px; display: grid; width: min(430px, calc(100vw - 24px)); align-content: start; gap: 8px; overflow: auto; padding: 0 2px 4px 0; }
-.flashcard-ai-task-notification { position: relative; display: grid; width: 100%; grid-template-columns: minmax(0, 1fr) auto; align-items: center; gap: 10px; padding: 10px 11px; border: 1px solid #dfe4f2; border-radius: 12px; background: #fff; box-shadow: 0 12px 36px #17213c2e; }
-.flashcard-ai-task-notification.is-error { border-color: #f0ced0; }
+.flashcard-ai-task-notification { position: relative; display: grid; width: 100%; grid-template-columns: minmax(0, 1fr) auto; align-items: center; gap: 10px; padding: 10px 11px 10px 14px; border: 1px solid #e8eaf0; border-radius: 13px; background: #fff; box-shadow: 0 8px 24px #17213c1a, 0 1px 3px #17213c0a; }
+.flashcard-ai-task-notification::before { position: absolute; top: 11px; bottom: 11px; left: 0; width: 3px; border-radius: 0 3px 3px 0; background: #8a98e8; content: ''; }
+.flashcard-ai-task-notification.is-done::before { background: #69a984; }
+.flashcard-ai-task-notification.is-error::before { background: #d77f84; }
 .flashcard-ai-task-notification-status { display: flex; min-width: 0; align-items: center; gap: 9px; }
 .flashcard-ai-task-notification-mark { display: grid; width: 31px; height: 31px; flex: 0 0 31px; place-items: center; border-radius: 9px; color: #6275d5; background: #f0f2ff; }
 .flashcard-ai-task-notification.is-done .flashcard-ai-task-notification-mark { color: #438967; background: #eaf6ef; }

@@ -43,6 +43,47 @@ function normalizeQuestion(value: string) {
   return value.normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLocaleLowerCase('pl').replace(/[^\p{L}\p{N}]+/gu, ' ').trim()
 }
 
+const flashcardVariantAliases: Record<FlashcardStudyMode, readonly string[]> = {
+  flip: ['flip', 'basic', 'standard', 'show answer', 'front back', 'direct recall', 'pokaż odpowiedź', 'pokaz odpowiedz', 'pytanie odpowiedź', 'pytanie odpowiedz'],
+  'multiple-choice': ['multiple choice', 'multipleChoice', 'mcq', 'answer choices', 'warianty odpowiedzi', 'wielokrotnego wyboru'],
+  'true-false': ['true false', 'trueFalse', 'boolean', 'tf', 'prawda fałsz'],
+  explain: ['explain', 'descriptive', 'descriptive answer', 'open answer', 'open ended', 'free response', 'long answer', 'odpowiedź opisowa', 'odpowiedz opisowa', 'opisowa'],
+  'timed-exam': ['timed exam', 'timedExam', 'exam', 'speed answer', 'odpowiedź na czas', 'odpowiedz na czas'],
+}
+
+function normalizeFlashcardVariantKey(value: string): FlashcardStudyMode | undefined {
+  const normalized = normalizeQuestion(value).replace(/\s/g, '')
+  return FLASHCARD_STUDY_MODES.find(mode => flashcardVariantAliases[mode.value].some(alias => normalizeQuestion(alias).replace(/\s/g, '') === normalized))?.value
+}
+
+function normalizeFlashcardVariants(value: unknown): Record<string, unknown> {
+  const normalized: Record<string, unknown> = {}
+  if (Array.isArray(value)) {
+    for (const item of value) {
+      if (!item || typeof item !== 'object') continue
+      const variant = item as Record<string, unknown>
+      const label = [variant.mode, variant.type, variant.key, variant.name, variant.label, variant.format].find((candidate): candidate is string => typeof candidate === 'string')
+      const mode = label ? normalizeFlashcardVariantKey(label) : undefined
+      if (mode && normalized[mode] === undefined) normalized[mode] = variant
+    }
+    return normalized
+  }
+  if (!value || typeof value !== 'object') return normalized
+  for (const [key, variant] of Object.entries(value as Record<string, unknown>)) {
+    const mode = normalizeFlashcardVariantKey(key)
+    if (mode && normalized[mode] === undefined) normalized[mode] = variant
+  }
+  return normalized
+}
+
+function readVariantText(source: Record<string, unknown>, keys: readonly string[]) {
+  for (const key of keys) {
+    const value = source[key]
+    if (typeof value === 'string' && value.trim()) return value.trim()
+  }
+  return ''
+}
+
 function readCompleteJsonObjectBlocks(value: string, state: JsonObjectScanState): string[] {
   const blocks: string[] = []
   while (state.cursor < value.length) {
@@ -100,19 +141,18 @@ function parseFlashcards(value: string, existingQuestions: readonly string[] = [
     if (!item || typeof item !== 'object') { incompleteRows += 1; continue }
     const row = item as Record<string, unknown>
     const hasStructuredVariants = Boolean(row.variants && typeof row.variants === 'object')
-    const variants = hasStructuredVariants ? row.variants as Record<string, unknown> : row
-    const legacyQuestion = typeof row.question === 'string' ? row.question.trim() : typeof row.pytanie === 'string' ? row.pytanie.trim() : ''
-    const legacyAnswer = typeof row.answer === 'string' ? row.answer.trim() : typeof row.odpowiedz === 'string' ? row.odpowiedz.trim() : ''
+    const variants = normalizeFlashcardVariants(hasStructuredVariants ? row.variants : row)
+    const legacyQuestion = readVariantText(row, ['question', 'pytanie', 'front', 'prompt'])
+    const legacyAnswer = readVariantText(row, ['answer', 'odpowiedz', 'odpowiedź', 'back', 'response', 'modelAnswer', 'expectedAnswer'])
     const readVariant = (mode: FlashcardStudyMode, key: string): { draft: FlashcardVariantDraft; complete: boolean } => {
-      const alias = mode === 'multiple-choice' ? 'multiple-choice' : mode === 'true-false' ? 'true-false' : mode === 'timed-exam' ? 'timed-exam' : ''
-      const raw = variants[key] ?? (alias ? variants[alias] : undefined)
+      const raw = variants[mode] ?? variants[key]
       const variant = raw && typeof raw === 'object' ? raw as Record<string, unknown> : {}
-      const question = typeof variant.question === 'string' ? variant.question.trim() : legacyQuestion
-      const answer = typeof variant.answer === 'string' ? variant.answer.trim() : legacyAnswer
+      const question = readVariantText(variant, ['question', 'pytanie', 'front', 'prompt']) || (!hasStructuredVariants && mode === 'flip' ? legacyQuestion : '')
+      const answer = readVariantText(variant, ['answer', 'odpowiedz', 'odpowiedź', 'back', 'response', 'modelAnswer', 'expectedAnswer']) || (!hasStructuredVariants && mode === 'flip' ? legacyAnswer : '')
       const distractors = Array.isArray(variant.distractors) ? variant.distractors.filter((item): item is string => typeof item === 'string' && item.trim().length > 0).map(item => item.trim()).slice(0, 8) : []
       const truthValue = variant.correct ?? variant.isTrue
       const trueFalseAnswer = truthValue === false || truthValue === 'false' ? false : true
-      const complete = Boolean(question) && (mode === 'true-false' ? !hasStructuredVariants || typeof truthValue === 'boolean' : Boolean(answer) && (mode !== 'multiple-choice' || distractors.length >= 2))
+      const complete = Boolean(question) && (mode === 'true-false' ? typeof truthValue === 'boolean' : Boolean(answer) && (mode !== 'multiple-choice' || distractors.length >= 2))
       return { draft: { question, answer, distractors, trueFalseAnswer }, complete }
     }
     const parsedVariants = {
@@ -143,6 +183,8 @@ Wymagania:
 - Docelowo zachowaj do ${requestedCount} pozycji, nie dodawaj nowych zagadnień ani nie usuwaj pozycji, które da się odzyskać.
 - Każda pozycja ma mieć obiekt variants z kluczami flip, multipleChoice, trueFalse, explain i timedExam.
 - Każdy wariant poza trueFalse ma stringi question oraz answer.
+- flip (Pokaż odpowiedź) i explain (Odpowiedź opisowa) są wymagane w każdej pozycji. Jeśli brakuje klucza albo ma puste pola, utwórz jego treść na podstawie tego samego zagadnienia i pozostałych wariantów; nie zostawiaj go pustego.
+- flip ma być krótkim pytaniem do samodzielnego przypomnienia i zwięzłą odpowiedzią. explain ma być odrębnym pytaniem otwartym, proszącym o wyjaśnienie własnymi słowami, z pełniejszą odpowiedzią wzorcową.
 - multipleChoice ma dodatkowo distractors: tablicę trzech błędnych odpowiedzi. Zachowaj istniejące odpowiedzi; brakujące warianty odpowiedzi uzupełniaj tylko na podstawie treści tej samej fiszki.
 - trueFalse ma string question jako samodzielne stwierdzenie i boolean correct; nie dodawaj pola answer.
 - Gdy wariant jest niekompletny, uzupełnij go na podstawie pozostałych wariantów tej samej fiszki. Nie dopowiadaj faktów spoza danych.
@@ -235,10 +277,10 @@ export function AiNoteToolsDialog({ kind, note, attachments, existingQuestions =
     let result = ''
     const flashcardInstructions = [
       `Utwórz ${flashcardCount} wysokiej jakości zagadnień do nauki na podstawie wyłącznie materiału źródłowego. Dla każdego zagadnienia przygotuj dokładnie pięć wariantów tej samej wiedzy: standardowy, wielokrotnego wyboru, prawda/fałsz, opisowy i egzaminacyjny na czas. Przygotuj wskazaną liczbę zagadnień, jeśli materiał zawiera wystarczająco dużo informacji; w przeciwnym razie utwórz mniej.`,
-      'Każdy wariant ma sprawdzać tę samą konkretną, istotną rzecz, ale w formie odpowiedniej dla danego trybu. Pytania muszą być jasne bez zgadywania kontekstu, a odpowiedzi wzorcowe krótkie, precyzyjne i zgodne wyłącznie ze źródłem. Wariant prawda/fałsz nie ma pola z odpowiedzią.',
+      'Każdy wariant ma sprawdzać tę samą konkretną, istotną rzecz, ale w formie odpowiedniej dla danego trybu. Pytania muszą być jasne bez zgadywania kontekstu, a odpowiedzi wzorcowe zgodne wyłącznie ze źródłem. Wariant `flip` (Pokaż odpowiedź) jest standardową kartą do samodzielnego przypominania: krótkie, konkretne pytanie na przodzie i zwięzła odpowiedź na odwrocie. Wariant `explain` (Odpowiedź opisowa) ma zawierać otwarte polecenie wymagające wyjaśnienia pojęcia lub zależności własnymi słowami oraz pełniejszą odpowiedź wzorcową z kluczowymi elementami. `flip` i `explain` są obowiązkowe dla każdej fiszki; nigdy ich nie pomijaj ani nie zostawiaj pustych. Wariant prawda/fałsz nie ma pola z odpowiedzią.',
       'Wybieraj ważne pojęcia, zależności, przyczyny i skutki, warunki, różnice, etapy procesów oraz informacje, które łatwo pomylić. Unikaj pytań ogólnikowych, banalnych, wieloczęściowych i powtarzających tę samą wiedzę.',
       'Nie dopowiadaj faktów spoza materiału. Jeśli źródło nie zawiera dość treści na wiele dobrych fiszek, utwórz mniej zamiast wypełniać listę słabymi kartami.',
-      'Zwróć wyłącznie JSON Lines (NDJSON): każdą fiszkę jako jeden kompletny obiekt JSON w osobnej linii, bez otaczającej tablicy. Każdy obiekt ma mieć `variants` z dokładnie pięcioma kluczami: `flip`, `multipleChoice`, `trueFalse`, `explain`, `timedExam`. Każdy wariant poza `trueFalse` ma pola string `question` i `answer`. `multipleChoice` ma dodatkowo tablicę trzech stringów `distractors` zawierającą wiarygodne błędne odpowiedzi; poprawna odpowiedź to pole `answer`. `trueFalse` ma mieć `question` jako samodzielne stwierdzenie oraz `correct` jako wartość boolean określającą jego prawdziwość. Nie dodawaj pola odpowiedzi do `trueFalse`. `explain` ma wymagać samodzielnego opisania odpowiedzi. `timedExam` ma być krótkim pytaniem egzaminacyjnym z konkretną odpowiedzią wzorcową. Nie dodawaj Markdown ani tekstu poza obiektami JSON.',
+      'Zwróć wyłącznie JSON Lines (NDJSON): każdą fiszkę jako jeden kompletny obiekt JSON w osobnej linii, bez otaczającej tablicy. Każdy obiekt ma mieć `variants` z dokładnie pięcioma kluczami: `flip`, `multipleChoice`, `trueFalse`, `explain`, `timedExam`. Każdy wariant poza `trueFalse` ma niepuste pola string `question` i `answer`. `flip` ma bezpośrednio sprawdzać przypomnienie faktu lub definicji: pytanie na przodzie, krótka odpowiedź na odwrocie. `explain` musi być odrębnym wariantem otwartym: pytanie ma prosić o wyjaśnienie własnymi słowami, a odpowiedź ma zawierać pełną odpowiedź wzorcową. Nie kopiuj pustych wartości ani nie pomijaj tych dwóch wariantów. `multipleChoice` ma dodatkowo tablicę trzech stringów `distractors` zawierającą wiarygodne błędne odpowiedzi; poprawna odpowiedź to pole `answer`. `trueFalse` ma mieć `question` jako samodzielne stwierdzenie oraz `correct` jako wartość boolean określającą jego prawdziwość. Nie dodawaj pola odpowiedzi do `trueFalse`. `timedExam` ma być krótkim pytaniem egzaminacyjnym z konkretną odpowiedzią wzorcową. Nie dodawaj Markdown ani tekstu poza obiektami JSON.',
       extraGuidance.trim() ? `DODATKOWE WSKAZÓWKI UŻYTKOWNIKA:\n${extraGuidance.trim()}` : '',
     ].filter(Boolean).join('\n\n')
     const instructions: Record<AiNoteTool, string> = {
