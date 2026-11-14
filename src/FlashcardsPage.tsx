@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState, type FormEvent, type PointerEvent as ReactPointerEvent, type SyntheticEvent } from 'react'
-import { Bell, Bold, Brain, CalendarDays, Check, ChevronDown, ChevronRight, Clock3, Code2, Flame, ImagePlus, Italic, Layers, Maximize2, Minimize2, Pause, Pencil, Play, Plus, Search, Shuffle, Sparkles, Trash2, X } from 'lucide-react'
+import { Bell, Bold, Brain, CalendarDays, Check, ChevronDown, ChevronRight, Clock3, Code2, Flame, ImagePlus, Italic, Layers, Pause, Pencil, Play, Plus, Search, Shuffle, Sparkles, Trash2, X } from 'lucide-react'
 import katex from 'katex'
 import 'katex/dist/katex.min.css'
 import { FLASHCARD_STUDY_MODES, type Flashcard, type FlashcardImageOcclusion, type FlashcardKind, type FlashcardStudyMode, type FlashcardTemplate, type FlashcardTrashEntry, type Note, type NoteAttachment } from './types'
@@ -51,7 +51,7 @@ const FLASHCARD_DIFFICULTY_LABELS: Record<NonNullable<Flashcard['difficulty']>, 
   advanced: 'Zaawansowany',
 }
 
-export type FlashcardAiTaskNotice = { id: number; label: string; startedAt: number; finishedAt?: number; state: 'running' | 'done' | 'error' }
+export type FlashcardAiTaskNotice = { id: number; label: string; startedAt: number; finishedAt?: number; state: 'running' | 'done' | 'error'; result?: string; resultExpanded?: boolean }
 
 function readDecks(): FlashcardDeck[] {
   try {
@@ -237,6 +237,10 @@ function RichCardContent({ value, className = '' }: { value: string; className?:
   return <div className={`flashcard-rich-content ${className}`} dangerouslySetInnerHTML={{ __html: markdownToSafeHtml(value) }} />
 }
 
+export function FlashcardAiTaskResultContent({ value }: { value: string }) {
+  return <RichCardContent value={value} className="flashcard-ai-task-result-rich" />
+}
+
 function FlashcardCardAiResultView({ result, onDismiss }: { result: FlashcardCardAiResult; onDismiss: () => void }) {
   return <aside className={`flashcard-card-ai-result is-${result.state}`} role={result.state === 'error' ? 'alert' : 'status'} aria-live="polite">
     <header>{result.state === 'running' ? <Sparkles className="spin" size={14} /> : result.state === 'done' ? <Check size={14} /> : <X size={14} />}<strong>{FLASHCARD_AI_TASK_LABELS[result.action]}</strong><button type="button" className="icon-button" aria-label="Ukryj wynik AI" title="Ukryj wynik" onClick={onDismiss}><X size={14} /></button></header>
@@ -413,7 +417,7 @@ export function FlashcardsPage({ cards, notes, attachments = [], trash = [], aiT
   trash?: FlashcardTrashEntry[]
   aiTaskNotices: FlashcardAiTaskNotice[]
   onBeginAiTask: (label: string) => number
-  onFinishAiTask: (id: number, failed?: boolean) => void
+  onFinishAiTask: (id: number, failed?: boolean, result?: string) => void
   onCreate: (noteId: string, question: string, answer: string, kind: FlashcardKind, tags: string[], imageOcclusion?: FlashcardImageOcclusion, metadata?: Partial<Flashcard>) => void
   onUpdate: (id: string, edit: FlashcardEdit) => void
   onReview: (id: string, grade: FlashcardGrade, metadata?: FlashcardReviewMeta) => void
@@ -492,8 +496,6 @@ export function FlashcardsPage({ cards, notes, attachments = [], trash = [], aiT
   const [aiEvaluation, setAiEvaluation] = useState('')
   const [aiBusy, setAiBusy] = useState('')
   const [cardAiResults, setCardAiResults] = useState<Record<string, FlashcardCardAiResult>>({})
-  const [aiReport, setAiReport] = useState('')
-  const [aiReportExpanded, setAiReportExpanded] = useState(false)
   const [aiError, setAiError] = useState('')
   const answerStartedAt = useRef(Date.now())
   const [editingCardId, setEditingCardId] = useState('')
@@ -892,30 +894,36 @@ export function FlashcardsPage({ cards, notes, attachments = [], trash = [], aiT
     const cardAction: FlashcardCardAiAction | undefined = card && (action === 'distractors' || action === 'example' || action === 'mnemonic' || action === 'difficulty') ? action : undefined
     const taskId = onBeginAiTask(FLASHCARD_AI_TASK_LABELS[action])
     let failed = false
+    let notificationResult = ''
     setAiError(''); setAiBusy(action)
     if (card && cardAction) setCardAiResults(current => ({ ...current, [card.id]: { action: cardAction, state: 'running', message: 'AI pracuje nad tą fiszką…' } }))
     try {
       const result = await onAiAssist(action, card, input)
       const parsed = safeJsonValue(result)
-      if (action === 'evaluate') setAiEvaluation(result.trim())
-      else if (action === 'quality' || action === 'coverage') { setAiReport(result.trim()); setAiReportExpanded(false) }
+      if (action === 'evaluate') { setAiEvaluation(result.trim()); notificationResult = result.trim() }
+      else if (action === 'quality' || action === 'coverage') notificationResult = result.trim()
       else if (action === 'distractors' && card) {
         const values = Array.isArray(parsed) ? parsed : parsed && typeof parsed === 'object' && Array.isArray((parsed as { distractors?: unknown }).distractors) ? (parsed as { distractors: unknown[] }).distractors : []
         const distractors = [...new Set(values.filter((value): value is string => typeof value === 'string').map(value => value.trim()).filter(Boolean))].slice(0, 8)
         if (!distractors.length) throw new Error('AI nie zwróciło żadnych propozycji. Spróbuj ponownie.')
         onUpdate(card.id, { aiDistractors: distractors })
+        notificationResult = `Wygenerowane dystraktory:\n${distractors.map(value => `- ${value}`).join('\n')}`
         setCardAiResults(current => ({ ...current, [card.id]: { action: 'distractors', state: 'done', message: `Zapisano ${distractors.length} błędnych wariantów odpowiedzi. Możesz z nich korzystać w sesji w trybie „Warianty odpowiedzi”.`, items: distractors } }))
       } else if (action === 'tags') {
         const entries = Array.isArray(parsed) ? parsed : parsed && typeof parsed === 'object' ? Object.entries(parsed as Record<string, unknown>).map(([id, tags]) => ({ id, tags })) : []
+        let updatedCount = 0
         for (const entry of entries) {
           if (!entry || typeof entry !== 'object') continue
           const item = entry as { id?: unknown; tags?: unknown }
-          if (typeof item.id === 'string' && Array.isArray(item.tags)) onUpdate(item.id, { tags: [...new Set(item.tags.filter((tag): tag is string => typeof tag === 'string'))] })
+          if (typeof item.id === 'string' && Array.isArray(item.tags)) { onUpdate(item.id, { tags: [...new Set(item.tags.filter((tag): tag is string => typeof tag === 'string'))] }); updatedCount += 1 }
         }
+        if (!updatedCount) throw new Error('AI nie zwróciło tagów, które można przypisać do fiszek.')
+        notificationResult = `Zaktualizowano tagi w ${updatedCount} fiszkach.`
       } else if (card && (action === 'example' || action === 'mnemonic')) {
         const content = (typeof parsed === 'string' ? parsed : parsed && typeof parsed === 'object' ? String((parsed as Record<string, unknown>).text ?? (parsed as Record<string, unknown>)[action] ?? result) : result).trim()
         if (!content) throw new Error('AI nie zwróciło treści. Spróbuj ponownie.')
         onUpdate(card.id, action === 'example' ? { example: content } : { mnemonic: content })
+        notificationResult = content
         setCardAiResults(current => ({ ...current, [card.id]: { action, state: 'done', message: action === 'example' ? 'Dodano przykład i kontrprzykład do wyjaśnienia fiszki.' : 'Dodano skojarzenie pomagające zapamiętać odpowiedź.', content } }))
       } else if (action === 'difficulty' && card) {
         const value = parsed && typeof parsed === 'object' ? parsed as Record<string, unknown> : {}
@@ -924,16 +932,18 @@ export function FlashcardsPage({ cards, notes, attachments = [], trash = [], aiT
         const question = value.question.trim()
         const answer = value.answer.trim()
         onUpdate(card.id, { question, answer, difficulty })
+        notificationResult = `Pytanie: ${question}\n\nOdpowiedź: ${answer}`
         setCardAiResults(current => ({ ...current, [card.id]: { action: 'difficulty', state: 'done', message: `Przeredagowano pytanie i odpowiedź na poziom: ${FLASHCARD_DIFFICULTY_LABELS[difficulty!]}.`, question, answer } }))
       }
       return result
     } catch (error) {
       failed = true
       const message = error instanceof Error ? error.message : 'Nie udało się wykonać akcji AI.'
+      notificationResult = message
       if (card && cardAction) setCardAiResults(current => ({ ...current, [card.id]: { action: cardAction, state: 'error', message } }))
       else setAiError(message)
       return ''
-    } finally { setAiBusy(''); onFinishAiTask(taskId, failed) }
+    } finally { setAiBusy(''); onFinishAiTask(taskId, failed, notificationResult) }
   }
   function mergeCards(first: Flashcard, second: Flashcard) {
     onUpdate(first.id, {
@@ -967,11 +977,22 @@ export function FlashcardsPage({ cards, notes, attachments = [], trash = [], aiT
     if (!onFindSimilar || similarBusy) return
     const taskId = onBeginAiTask('Wykrywanie podobnych fiszek')
     let failed = false
+    let notificationResult = ''
     setSimilarError('')
     setSimilarBusy(true)
-    try { setSimilarMatches(await onFindSimilar(visibleCards)) }
-    catch (error) { failed = true; setSimilarError(error instanceof Error ? error.message : typeof error === 'string' && error.trim() ? error : 'Nie udało się porównać pytań.') }
-    finally { setSimilarBusy(false); onFinishAiTask(taskId, failed) }
+    try {
+      const matches = await onFindSimilar(visibleCards)
+      setSimilarMatches(matches)
+      notificationResult = matches.length ? matches.map(match => {
+        const first = visibleCards.find(card => card.id === match.firstId)
+        const second = visibleCards.find(card => card.id === match.secondId)
+        return first && second ? `${Math.round(match.score * 100)}% podobieństwa\n${first.question}\n↔ ${second.question}` : ''
+      }).filter(Boolean).join('\n\n') : 'Nie znaleziono podobnych pytań w wybranym zestawie.'
+    } catch (error) {
+      failed = true
+      notificationResult = error instanceof Error ? error.message : typeof error === 'string' && error.trim() ? error : 'Nie udało się porównać pytań.'
+      setSimilarError(notificationResult)
+    } finally { setSimilarBusy(false); onFinishAiTask(taskId, failed, notificationResult) }
   }
   async function setReminder(value: boolean) {
     if (!progressDeck) return
@@ -984,6 +1005,7 @@ export function FlashcardsPage({ cards, notes, attachments = [], trash = [], aiT
     if (!onRegenerate || regeneratingId) return
     const taskId = onBeginAiTask('Poprawa fiszki przy pomocy AI')
     let failed = false
+    let notificationResult = ''
     setRegenerateError('')
     setRegeneratingId(card.id)
     try {
@@ -992,18 +1014,13 @@ export function FlashcardsPage({ cards, notes, attachments = [], trash = [], aiT
       const duplicate = cards.some(item => item.id !== card.id && item.noteId === card.noteId && normalizeQuestion(item.question) === normalized)
       if (duplicate) throw new Error('AI wygenerowało pytanie, które już istnieje dla tej notatki.')
       onUpdate(card.id, { question: regenerated.question, answer: regenerated.answer, kind: 'basic', tags: card.tags ?? [] })
-    } catch (error) { failed = true; setRegenerateError(error instanceof Error ? error.message : 'Nie udało się poprawić fiszki.') }
-    finally { setRegeneratingId(''); onFinishAiTask(taskId, failed) }
+      notificationResult = `Pytanie: ${regenerated.question}\n\nOdpowiedź: ${regenerated.answer}`
+    } catch (error) { failed = true; notificationResult = error instanceof Error ? error.message : 'Nie udało się poprawić fiszki.'; setRegenerateError(notificationResult) }
+    finally { setRegeneratingId(''); onFinishAiTask(taskId, failed, notificationResult) }
   }
 
   return (<section className="flashcards-page" aria-labelledby="flashcards-title">
     <header className="flashcards-page-heading"><span className="folder-dialog-mark"><Brain size={19} /></span><div><h1 id="flashcards-title">Fiszki</h1><p>{due.length} do powtórki · {sourceFilteredCards.length} w wybranych źródłach · {selectedCount} notatek</p></div><button type="button" className={`flashcard-trash-shortcut${tab === 'trash' ? ' active' : ''}`} aria-label={`Otwórz kosz fiszek, ${trash.length} elementów`} aria-pressed={tab === 'trash'} title={`Kosz fiszek (${trash.length})`} onClick={() => setTab('trash')}><Trash2 size={17} />{trash.length > 0 && <span>{trash.length}</span>}</button></header>
-
-    {aiReport && <aside className={`flashcard-ai-report-notification${aiReportExpanded ? ' is-expanded' : ''}`} style={aiTaskNotices.length ? { top: `calc(env(safe-area-inset-top, 0px) + ${122 + aiTaskNotices.length * 64}px)` } : undefined} aria-label="Powiadomienie o raporcie AI">
-      <div className="flashcard-ai-report-notification-status" role="status" aria-live="polite"><span className="flashcard-ai-report-notification-mark"><Sparkles size={16} /></span><span><strong>Raport AI gotowy</strong><small>{aiReportExpanded ? 'Pełna analiza' : 'Rozwiń, aby przeczytać całość'}</small></span></div>
-      <div className="flashcard-ai-report-notification-actions"><button type="button" className="button secondary" aria-expanded={aiReportExpanded} aria-controls="flashcard-ai-report-content" onClick={() => setAiReportExpanded(value => !value)}>{aiReportExpanded ? <><Minimize2 size={14} />Zwiń</> : <><Maximize2 size={14} />Rozwiń</>}</button><button type="button" className="icon-button" aria-label="Usuń powiadomienie o raporcie AI" title="Usuń powiadomienie" onClick={() => { setAiReport(''); setAiReportExpanded(false) }}><X size={16} /></button></div>
-      <div id="flashcard-ai-report-content" className="flashcard-ai-report-notification-content" hidden={!aiReportExpanded}><RichCardContent value={aiReport} /></div>
-    </aside>}
 
     <nav className="flashcard-view-tabs" aria-label="Widoki fiszek">
       <button type="button" className={tab === 'review' ? 'active' : ''} aria-pressed={tab === 'review'} onClick={() => setTab('review')}>Nauka <span>{due.length}</span></button>

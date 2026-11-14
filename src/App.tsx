@@ -100,6 +100,7 @@ function copyNote(note: Note): Note {
 const MarkdownEditor = lazy(() => import('./MarkdownEditor').then(module => ({ default: module.MarkdownEditor })))
 const VectorEditor = lazy(() => import('./VectorEditor').then(module => ({ default: module.VectorEditor })))
 const FlashcardsPage = lazy(() => import('./FlashcardsPage').then(module => ({ default: module.FlashcardsPage })))
+const FlashcardAiTaskResultContent = lazy(() => import('./FlashcardsPage').then(module => ({ default: module.FlashcardAiTaskResultContent })))
 
 const defaultTemplates: NoteTemplate[] = [
   { id: 'meeting', title: 'Nowe spotkanie', tags: ['spotkanie'], content: '# Cel spotkania\n\n## Agenda\n\n- \n\n## Notatki\n\n\n## Ustalenia i zadania\n\n- [ ] ' },
@@ -317,6 +318,7 @@ function App() {
   const [showTaskManager, setShowTaskManager] = useState(false)
   const [showAiEdit, setShowAiEdit] = useState(false)
   const [aiNoteTool, setAiNoteTool] = useState<AiNoteTool | null>(null)
+  const [aiNoteGeneratorMinimized, setAiNoteGeneratorMinimized] = useState(false)
   const [flashcardGenerationScope, setFlashcardGenerationScope] = useState<FlashcardGenerationScope | null>(null)
   const [selectedTextFlashcard, setSelectedTextFlashcard] = useState<{ noteId: string; text: string } | null>(null)
   const [showKnowledgeGraph, setShowKnowledgeGraph] = useState(false)
@@ -373,6 +375,7 @@ function App() {
   const [flashcards, setFlashcards] = useState<Flashcard[]>([])
   const [flashcardTrash, setFlashcardTrash] = useState<FlashcardTrashEntry[]>([])
   const [flashcardAiTasks, setFlashcardAiTasks] = useState<FlashcardAiTaskNotice[]>([])
+  const showingFlashcardsPageRef = useRef(false)
   const nextFlashcardAiTaskId = useRef(0)
   const [autoBackups, setAutoBackups] = useState<AutoBackupInfo[]>([])
   const [showBackupTrash, setShowBackupTrash] = useState(false)
@@ -431,6 +434,7 @@ function App() {
   }
 
   useEffect(() => { localStorage.setItem('no-tie-feature-modules', JSON.stringify(featureFlags)) }, [featureFlags])
+  useEffect(() => { if (aiNoteTool !== 'flashcards') setAiNoteGeneratorMinimized(false) }, [aiNoteTool])
 
   function toggleFeature(id: FeatureId, enabled: boolean) {
     setFeatureFlags(current => ({ ...current, [id]: enabled }))
@@ -678,6 +682,7 @@ function App() {
   const showingFavoriteNotesPage = activeReviewSessionId === FAVORITE_NOTES_PAGE_ID
   const showingFlashcardsPage = activeReviewSessionId === FLASHCARDS_PAGE_ID
   const showingWorkspacePage = showingReviewSessionsOverview || showingSavedSearchesPage || showingNoteTemplatesPage || showingRecentNotesPage || showingFavoriteNotesPage || showingFlashcardsPage || Boolean(activeReviewSession)
+  useLayoutEffect(() => { showingFlashcardsPageRef.current = showingFlashcardsPage }, [showingFlashcardsPage])
   const activeSmartFolder = featureFlags.smartFolders && activeFilter.startsWith('smart:') ? savedSearches.find(search => search.id === activeFilter.slice('smart:'.length)) : undefined
   useEffect(() => {
     if (!selectedId || !notes.some(note => note.id === selectedId)) return
@@ -2098,10 +2103,14 @@ function App() {
     setFlashcardAiTasks(current => [...current, { id, label, startedAt: Date.now(), state: 'running' }])
     return id
   }
-  function finishFlashcardAiTask(id: number, failed = false) {
+  function finishFlashcardAiTask(id: number, failed = false, result = '') {
     const finishedAt = Date.now()
-    setFlashcardAiTasks(current => current.map(task => task.id === id ? { ...task, finishedAt, state: failed ? 'error' : 'done' } : task))
-    window.setTimeout(() => setFlashcardAiTasks(current => current.filter(task => task.id !== id)), 3500)
+    const savedResult = result.trim()
+    setFlashcardAiTasks(current => current.map(task => task.id === id ? { ...task, finishedAt, state: failed ? 'error' : 'done', result: savedResult || undefined, resultExpanded: Boolean(savedResult) && (!showingFlashcardsPageRef.current || task.label === 'Kontrola jakości fiszek' || task.label === 'Analiza pokrycia tematów') } : task))
+    if (!savedResult) window.setTimeout(() => setFlashcardAiTasks(current => current.filter(task => task.id !== id)), 3500)
+  }
+  function toggleFlashcardAiTaskResult(id: number) {
+    setFlashcardAiTasks(current => current.map(task => task.id === id ? { ...task, resultExpanded: !task.resultExpanded } : task))
   }
   function dismissFlashcardAiTask(id: number) {
     setFlashcardAiTasks(current => current.filter(task => task.id !== id))
@@ -2709,7 +2718,7 @@ function App() {
       />}
       {showNoteEmbedDialog && selectedNote && <NoteLinkDialog notes={notes} currentNoteId={selectedNote.id} purpose="embed" onSelect={note => { dispatchWikiEmbedInsert({ noteId: selectedNote.id, target: note.title || note.id }); setShowNoteEmbedDialog(false) }} onClose={() => setShowNoteEmbedDialog(false)} />}
       {showAiEdit && selectedNote && <AiSelectionEditDialog selectedText={selectionText} model={ollamaModel} baseUrl={ollamaBaseUrl} onApply={replacement => dispatchAiReplaceSelection({ noteId: selectedNote.id, replacement })} onClose={() => setShowAiEdit(false)} />}
-      {aiNoteTool && aiDialogNote && <AiNoteToolsDialog kind={aiNoteTool} note={aiDialogNote} attachments={attachments.filter(attachment => featureFlags.audioNotes || !attachment.mimeType.startsWith('audio/'))} existingQuestions={flashcards.filter(card => card.noteId === aiDialogNote.id).map(card => card.question)} sourceText={flashcardGenerationScope?.kind === 'selection' ? flashcardGenerationScope.text : undefined} sourcePage={flashcardGenerationScope?.kind === 'pdf-page' ? { attachmentId: flashcardGenerationScope.attachmentId, page: flashcardGenerationScope.page } : undefined} sourceLabel={flashcardGenerationScope?.label} baseUrl={ollamaBaseUrl} model={ollamaModel} onApply={value => appendAiTextToNote(value, aiNoteTool)} onCreateFlashcard={(noteId, question, answer, metadata) => createFlashcard(noteId, question, answer, 'basic', [], undefined, metadata)} onTranscribeAudio={featureFlags.audioNotes ? transcribeAudioAttachment : undefined} onClose={() => { setAiNoteTool(null); setFlashcardGenerationScope(null) }} />}
+      {aiNoteTool && aiDialogNote && <AiNoteToolsDialog kind={aiNoteTool} note={aiDialogNote} attachments={attachments.filter(attachment => featureFlags.audioNotes || !attachment.mimeType.startsWith('audio/'))} existingQuestions={flashcards.filter(card => card.noteId === aiDialogNote.id).map(card => card.question)} sourceText={flashcardGenerationScope?.kind === 'selection' ? flashcardGenerationScope.text : undefined} sourcePage={flashcardGenerationScope?.kind === 'pdf-page' ? { attachmentId: flashcardGenerationScope.attachmentId, page: flashcardGenerationScope.page } : undefined} sourceLabel={flashcardGenerationScope?.label} baseUrl={ollamaBaseUrl} model={ollamaModel} onApply={value => appendAiTextToNote(value, aiNoteTool)} onCreateFlashcard={(noteId, question, answer, metadata) => createFlashcard(noteId, question, answer, 'basic', [], undefined, metadata)} onTranscribeAudio={featureFlags.audioNotes ? transcribeAudioAttachment : undefined} onMinimizedChange={setAiNoteGeneratorMinimized} onClose={() => { setAiNoteTool(null); setAiNoteGeneratorMinimized(false); setFlashcardGenerationScope(null) }} />}
       {selectedTextFlashcard && notes.find(note => note.id === selectedTextFlashcard.noteId) && <SelectedTextFlashcardDialog noteTitle={notes.find(note => note.id === selectedTextFlashcard.noteId)?.title ?? ''} selectedText={selectedTextFlashcard.text} onSave={(question, answer) => { createFlashcard(selectedTextFlashcard.noteId, question, answer); setSelectedTextFlashcard(null) }} onClose={() => setSelectedTextFlashcard(null)} />}
       {showNoteHistory && selectedNote && historyDialogNoteId === selectedNote.id && <NoteHistoryDialog note={selectedNote} attachments={currentAttachments} versions={noteVersions} loading={noteVersionsLoading} onRestore={restoreNoteVersion} onClose={closeNoteHistory} />}
       {showFeatureManager && <FeatureManagerDialog features={featureFlags} onToggle={toggleFeature} onConfigureLock={() => setShowLockSetup(true)} onClose={() => setShowFeatureManager(false)} />}
@@ -2720,15 +2729,18 @@ function App() {
       {showProjectDashboard && featureFlags.projectDashboard && <ProjectDashboardDialog notes={notes} tasks={parsedTasks} onOpenNote={id => { setShowProjectDashboard(false); openLinkedNote(id) }} onClose={() => setShowProjectDashboard(false)} />}
       {showDuplicateManager && featureFlags.duplicateManager && <DuplicateManagerDialog notes={notes} onOpen={id => { setShowDuplicateManager(false); openLinkedNote(id) }} onMerge={(targetId, sourceId) => void mergeDuplicateNotes(targetId, sourceId)} onClose={() => setShowDuplicateManager(false)} />}
       {showAttachmentManager && featureFlags.attachmentManager && <AttachmentManagerDialog notes={notes} attachments={attachments.filter(attachment => featureFlags.audioNotes || !attachment.mimeType.startsWith('audio/')).map(attachment => featureFlags.attachmentIndex ? attachment : { ...attachment, extractedText: undefined })} indexing={attachmentIndexing} onOpenNote={id => { setShowAttachmentManager(false); openLinkedNote(id) }} onPreview={attachment => setPreviewAttachmentId(attachment.id)} onDelete={attachment => void deleteAttachment(attachment)} onIndex={featureFlags.attachmentIndex ? attachment => void indexAttachment(attachment) : undefined} onClose={() => setShowAttachmentManager(false)} />}
-      {flashcardAiTasks.map((task, index) => {
-        const duration = formatFlashcardAiDuration((task.finishedAt ?? reviewClockNow) - task.startedAt)
-        const stateLabel = task.state === 'running' ? 'AI pracuje' : task.state === 'error' ? 'AI zakończyło się błędem' : 'AI zakończyło zadanie'
-        const durationLabel = task.state === 'running' ? `Trwa: ${duration}` : `Czas zadania: ${duration}`
-        return <aside key={task.id} className={`flashcard-ai-task-notification is-${task.state}`} style={{ top: `calc(env(safe-area-inset-top, 0px) + ${122 + index * 64}px)` }} aria-label={`Zadanie AI: ${task.label}`}>
-          <div className="flashcard-ai-task-notification-status"><span className="flashcard-ai-task-notification-mark">{task.state === 'running' ? <Sparkles className="spin" size={16} /> : task.state === 'done' ? <Check size={16} /> : <X size={16} />}</span><span><strong role="status" aria-live="polite">{stateLabel}</strong><small aria-live="off">{task.label} · {durationLabel}</small></span></div>
-          <button type="button" className="icon-button" aria-label={`Usuń powiadomienie: ${task.label}`} title="Usuń powiadomienie" onClick={() => dismissFlashcardAiTask(task.id)}><X size={16} /></button>
-        </aside>
-      })}
+      {!!flashcardAiTasks.length && <div className="flashcard-ai-task-notification-stack" style={{ top: `calc(env(safe-area-inset-top, 0px) + ${aiNoteGeneratorMinimized ? 154 : 122}px)`, maxHeight: `calc(100dvh - env(safe-area-inset-top, 0px) - ${aiNoteGeneratorMinimized ? 170 : 138}px)` }}>
+        {flashcardAiTasks.map(task => {
+          const duration = formatFlashcardAiDuration((task.finishedAt ?? reviewClockNow) - task.startedAt)
+          const stateLabel = task.state === 'running' ? 'AI pracuje' : task.state === 'error' ? 'AI zakończyło się błędem' : 'AI zakończyło zadanie'
+          const durationLabel = task.state === 'running' ? `Trwa: ${duration}` : `Czas zadania: ${duration}`
+          return <aside key={task.id} className={`flashcard-ai-task-notification is-${task.state}`} aria-label={`Zadanie AI: ${task.label}`}>
+            <div className="flashcard-ai-task-notification-status"><span className="flashcard-ai-task-notification-mark">{task.state === 'running' ? <Sparkles className="spin" size={16} /> : task.state === 'done' ? <Check size={16} /> : <X size={16} />}</span><span><strong role="status" aria-live="polite">{stateLabel}</strong><small aria-live="off">{task.label} · {durationLabel}</small>{task.result && <small>Wynik gotowy · możesz go rozwinąć</small>}</span></div>
+            <div className="flashcard-ai-task-notification-actions">{task.result && <button type="button" className="button secondary" aria-expanded={Boolean(task.resultExpanded)} aria-controls={`flashcard-ai-task-result-${task.id}`} onClick={() => toggleFlashcardAiTaskResult(task.id)}>{task.resultExpanded ? 'Zwiń' : 'Rozwiń'}</button>}<button type="button" className="icon-button" aria-label={`Usuń powiadomienie: ${task.label}`} title="Usuń powiadomienie" onClick={() => dismissFlashcardAiTask(task.id)}><X size={16} /></button></div>
+            {task.result && <div id={`flashcard-ai-task-result-${task.id}`} className="flashcard-ai-task-notification-result" hidden={!task.resultExpanded}><Suspense fallback={<p>Wczytuję wynik AI…</p>}><FlashcardAiTaskResultContent value={task.result} /></Suspense></div>}
+          </aside>
+        })}
+      </div>}
       {toast && <div className="app-toast" role="status"><Check size={16} />{toast}</div>}
       {mobileDrawer !== 'none' && <button className="drawer-scrim" aria-label="Zamknij menu" onClick={() => setMobileDrawer('none')} />}
     </main>

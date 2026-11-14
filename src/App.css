@@ -1812,7 +1812,8 @@
 .flashcard-session-option-controls > label:not(.flashcard-shuffle-toggle) { display: grid; min-width: 145px; flex: 1; gap: 5px; color: #798398; font-size: 10px; }
 .flashcard-session-option-controls select { height: 32px; border: 1px solid #e2e6ef; border-radius: 8px; padding: 0 9px; color: #46516a; background: #fff; font: inherit; font-size: 10px; }
 .flashcard-session-option-controls .flashcard-shuffle-toggle { display: flex; min-height: 32px; align-items: center; gap: 7px; color: #667187; font-size: 10px; }
-.flashcard-ai-task-notification { position: fixed; z-index: 127; right: 18px; display: grid; width: min(430px, calc(100vw - 24px)); grid-template-columns: minmax(0, 1fr) auto; align-items: center; gap: 10px; padding: 10px 11px; border: 1px solid #dfe4f2; border-radius: 12px; background: #fff; box-shadow: 0 12px 36px #17213c2e; }
+.flashcard-ai-task-notification-stack { position: fixed; z-index: 127; right: 18px; display: grid; width: min(430px, calc(100vw - 24px)); align-content: start; gap: 8px; overflow: auto; padding: 0 2px 4px 0; }
+.flashcard-ai-task-notification { position: relative; display: grid; width: 100%; grid-template-columns: minmax(0, 1fr) auto; align-items: center; gap: 10px; padding: 10px 11px; border: 1px solid #dfe4f2; border-radius: 12px; background: #fff; box-shadow: 0 12px 36px #17213c2e; }
 .flashcard-ai-task-notification.is-error { border-color: #f0ced0; }
 .flashcard-ai-task-notification-status { display: flex; min-width: 0; align-items: center; gap: 9px; }
 .flashcard-ai-task-notification-mark { display: grid; width: 31px; height: 31px; flex: 0 0 31px; place-items: center; border-radius: 9px; color: #6275d5; background: #f0f2ff; }
@@ -1823,20 +1824,10 @@
 .flashcard-ai-task-notification-status strong { color: #39445c; font-size: 10px; }
 .flashcard-ai-task-notification-status small { color: #8992a3; font-size: 9px; }
 .flashcard-ai-task-notification .icon-button { width: 28px; height: 28px; }
-.flashcard-ai-report-notification { position: fixed; z-index: 126; top: calc(env(safe-area-inset-top, 0px) + 122px); right: 18px; display: grid; width: min(520px, calc(100vw - 24px)); grid-template-columns: minmax(0, 1fr) auto; align-items: center; gap: 10px; padding: 10px 11px; border: 1px solid #dfe4f2; border-radius: 12px; background: #fff; box-shadow: 0 12px 36px #17213c2e; }
-.flashcard-ai-report-notification.is-expanded { width: min(640px, calc(100vw - 24px)); }
-.flashcard-ai-report-notification-status { display: flex; min-width: 0; align-items: center; gap: 9px; }
-.flashcard-ai-report-notification-mark { display: grid; width: 31px; height: 31px; flex: 0 0 31px; place-items: center; border-radius: 9px; color: #6275d5; background: #f0f2ff; }
-.flashcard-ai-report-notification-status > span:last-child { display: grid; min-width: 0; gap: 3px; }
-.flashcard-ai-report-notification-status strong,
-.flashcard-ai-report-notification-status small { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.flashcard-ai-report-notification-status strong { color: #39445c; font-size: 10px; }
-.flashcard-ai-report-notification-status small { color: #8992a3; font-size: 9px; }
-.flashcard-ai-report-notification-actions { display: flex; align-items: center; gap: 4px; }
-.flashcard-ai-report-notification-actions .button { min-height: 30px; padding: 0 9px; font-size: 9px; white-space: nowrap; }
-.flashcard-ai-report-notification-actions .icon-button { width: 28px; height: 28px; }
-.flashcard-ai-report-notification-content { max-height: min(55vh, 620px); grid-column: 1 / -1; overflow: auto; border-top: 1px solid #edf0f5; padding: 10px 3px 3px; color: #59657d; font-size: 11px; line-height: 1.55; }
-.flashcard-ai-report-notification-content .flashcard-rich-content { color: inherit; overflow-wrap: anywhere; }
+.flashcard-ai-task-notification-actions { display: flex; align-items: center; gap: 4px; }
+.flashcard-ai-task-notification-actions .button { min-height: 30px; padding: 0 9px; font-size: 9px; white-space: nowrap; }
+.flashcard-ai-task-notification-result { max-height: min(40vh, 300px); grid-column: 1 / -1; overflow: auto; border-top: 1px solid #edf0f5; padding: 10px 3px 3px; color: #59657d; font-size: 11px; line-height: 1.55; }
+.flashcard-ai-task-notification-result .flashcard-ai-task-result-rich { color: inherit; overflow-wrap: anywhere; }
 .flashcard-card-search-toolbar { padding: 7px 0; }
 .flashcard-card-search-toolbar .flashcard-search { flex: 1; }
 .flashcard-card-toolbar-tools { display: flex; flex-wrap: wrap; gap: 8px; border-top: 1px solid #edf0f5; padding: 10px 12px; }
@@ -1871,18 +1862,12 @@
 .flashcard-pagination-controls > .button { min-height: 30px; padding: 0 9px; font-size: 9px; }
 
 @media (max-width: 700px) {
-  .flashcard-ai-task-notification { right: 8px; width: calc(100vw - 16px); }
-  .flashcard-ai-report-notification { top: calc(env(safe-area-inset-top, 0px) + 112px); right: 8px; width: calc(100vw - 16px); }
-  .flashcard-ai-report-notification.is-expanded { width: calc(100vw - 16px); }
+  .flashcard-ai-task-notification-stack { right: 8px; width: calc(100vw - 16px); }
   .flashcard-card-search-toolbar { align-items: center; flex-wrap: wrap; }
   .flashcard-card-search-toolbar .flashcard-search { flex: 1 1 100%; }
   .flashcard-page-size { margin-left: auto; }
   .flashcard-pagination { display: grid; grid-template-columns: 1fr auto; }
   .flashcard-pagination-controls { grid-column: 1 / -1; justify-content: space-between; }
-}
-
-@media (min-width: 701px) {
-  html.tauri-android .flashcard-ai-report-notification { top: max(146px, calc(env(safe-area-inset-top, 0px) + 122px)); }
 }
 
 .flashcard-view-tabs { display: grid; width: min(900px, 100%); grid-template-columns: repeat(4, minmax(0, 1fr)); align-self: center; gap: 6px; margin: 14px 0 10px; border: 1px solid #e7eaf1; border-radius: 12px; padding: 5px; background: #f7f8fb; }
