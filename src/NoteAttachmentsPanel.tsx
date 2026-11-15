@@ -1,12 +1,14 @@
 import { useRef, useState } from 'react'
-import { AudioLines, FileText, ImagePlus, Link2, Mic, MicOff, ScanText, Trash2 } from 'lucide-react'
-import type { NoteAttachment } from './types'
+import { AudioLines, FileText, ImagePlus, Link2, Mic, MicOff, Pencil, ScanText, Sparkles, Trash2 } from 'lucide-react'
+import { svgDataUrl } from './content'
+import type { NoteAsset, NoteAttachment } from './types'
 
 const sizeLabel = (bytes: number) => bytes < 1024 * 1024 ? `${Math.max(1, Math.round(bytes / 1024))} KB` : `${(bytes / (1024 * 1024)).toFixed(1)} MB`
+const itemCountLabel = (count: number) => `${count} ${count === 1 ? 'element' : count % 10 >= 2 && count % 10 <= 4 && (count % 100 < 12 || count % 100 > 14) ? 'elementy' : 'elementów'}`
 type SpeechRecognitionLike = { continuous: boolean; interimResults: boolean; lang: string; start: () => void; stop: () => void; onresult: ((event: { results: ArrayLike<{ isFinal: boolean; 0: { transcript: string } }> }) => void) | null; onerror: ((event: { error: string }) => void) | null; onend: (() => void) | null }
 type SpeechRecognitionConstructor = new () => SpeechRecognitionLike
 
-export function NoteAttachmentsPanel({ attachments, onAdd, onRemove, onOcr, onTranscribe, onInsertText, onSaveTranscript, onInsertAttachmentLink, onPreview, audioEnabled = true }: { attachments: NoteAttachment[]; onAdd: (files: File[]) => Promise<NoteAttachment[]>; onRemove: (attachment: NoteAttachment) => void; onOcr?: (attachment: NoteAttachment) => Promise<string>; onTranscribe?: (attachment: NoteAttachment) => Promise<string>; onInsertText: (text: string) => void; onSaveTranscript: (attachment: NoteAttachment, transcript: string) => void; onInsertAttachmentLink: (attachment: NoteAttachment) => void; onPreview: (attachment: NoteAttachment) => void; audioEnabled?: boolean }) {
+export function NoteAttachmentsPanel({ attachments, assets = [], onAdd, onAddAsset, onEditAsset, onRemove, onOcr, onTranscribe, onInsertText, onSaveTranscript, onInsertAttachmentLink, onPreview, audioEnabled = true }: { attachments: NoteAttachment[]; assets?: NoteAsset[]; onAdd: (files: File[]) => Promise<NoteAttachment[]>; onAddAsset: () => void; onEditAsset: (asset: NoteAsset) => void; onRemove: (attachment: NoteAttachment) => void; onOcr?: (attachment: NoteAttachment) => Promise<string>; onTranscribe?: (attachment: NoteAttachment) => Promise<string>; onInsertText: (text: string) => void; onSaveTranscript: (attachment: NoteAttachment, transcript: string) => void; onInsertAttachmentLink: (attachment: NoteAttachment) => void; onPreview: (attachment: NoteAttachment) => void; audioEnabled?: boolean }) {
   const input = useRef<HTMLInputElement>(null)
   const recorder = useRef<MediaRecorder | null>(null)
   const speech = useRef<SpeechRecognitionLike | null>(null)
@@ -230,11 +232,20 @@ export function NoteAttachmentsPanel({ attachments, onAdd, onRemove, onOcr, onTr
   }
 
   return <section className="note-attachments-panel" aria-label="Załączniki notatki">
-    <div className="note-attachments-heading"><div><strong>Załączniki</strong><span>{attachments.length} plików</span></div><button type="button" className="button secondary" onClick={() => input.current?.click()}><ImagePlus size={14} />Dodaj plik</button><input ref={input} type="file" accept={`image/*,application/pdf,.pdf,video/*,.mp4,.m4v,.mov,.webm${audioEnabled ? ',audio/*,.mp3,.m4a,.wav,.ogg' : ''}`} multiple hidden onChange={event => { if (event.currentTarget.files?.length) onAdd(Array.from(event.currentTarget.files)); event.currentTarget.value = '' }} /></div>
+    <div className="note-attachments-heading"><div><strong>Załączniki</strong><span>{itemCountLabel(assets.length + attachments.length)}</span></div><div className="note-attachments-heading-actions"><button type="button" className="button secondary" onClick={onAddAsset}><Sparkles size={14} />Dodaj schemat</button><button type="button" className="button secondary" onClick={() => input.current?.click()}><ImagePlus size={14} />Dodaj plik</button></div><input ref={input} type="file" accept={`image/*,application/pdf,.pdf,video/*,.mp4,.m4v,.mov,.webm${audioEnabled ? ',audio/*,.mp3,.m4a,.wav,.ogg' : ''}`} multiple hidden onChange={event => { if (event.currentTarget.files?.length) onAdd(Array.from(event.currentTarget.files)); event.currentTarget.value = '' }} /></div>
     {audioEnabled && <div className="audio-note-tools"><button type="button" className={`button ${recording ? 'danger' : 'secondary'}`} onClick={() => recording ? stopRecording() : startRecording()}>{recording ? <MicOff size={14} /> : <Mic size={14} />}{recording ? 'Zakończ nagranie' : 'Nagraj notatkę audio'}</button><span>{recording ? 'Nagrywanie…' : 'Audio zostanie zapisane jako załącznik.'}</span></div>}
     {audioEnabled && recording && transcript && <div className="audio-transcript"><strong>Transkrypcja na żywo</strong><p>{transcript}</p></div>}
     {audioError && !showMicrophonePrompt && <p className="audio-note-error" role="status">{audioError}</p>}
-    {attachments.length ? <div className="note-attachments-grid">{attachments.map(attachment => {
+    {assets.length || attachments.length ? <div className="note-attachments-grid">
+      {assets.map(asset => <article className="attachment-card scheme-attachment-card" key={asset.id}>
+        <button className="attachment-preview-button" type="button" onClick={() => onEditAsset(asset)} aria-label={`Edytuj schemat ${asset.fileName}`}>
+          <img src={svgDataUrl(asset.svg)} alt={`Podgląd schematu ${asset.fileName}`} />
+          <span className="attachment-file-name">{asset.fileName}</span>
+          <small>Schemat SVG · kliknij, aby edytować</small>
+        </button>
+        <button type="button" className="attachment-edit" aria-label={`Edytuj schemat ${asset.fileName}`} title="Edytuj schemat" onClick={() => onEditAsset(asset)}><Pencil size={14} /></button>
+      </article>)}
+      {attachments.map(attachment => {
       const isAudio = attachment.mimeType.startsWith('audio/')
       const isVideo = attachment.mimeType.startsWith('video/')
       const transcriptValue = transcriptDrafts[attachment.id] ?? attachment.transcript ?? ''
@@ -243,7 +254,7 @@ export function NoteAttachmentsPanel({ attachments, onAdd, onRemove, onOcr, onTr
       {attachment.mimeType.startsWith('image/') && onOcr && <button type="button" className="attachment-ocr" disabled={ocrBusy === attachment.id} onClick={() => void runOcr(attachment)}><ScanText size={13} />{ocrBusy === attachment.id ? 'Odczytuję…' : 'Odczytaj tekst'}</button>}
       <button type="button" className="attachment-insert-link" aria-label={`Wstaw link do notatki: ${attachment.fileName}`} title="Wstaw link do notatki" onClick={() => onInsertAttachmentLink(attachment)}><Link2 size={13} /><span>Wstaw link</span></button>
       <button className="attachment-delete" type="button" aria-label={`Usuń załącznik ${attachment.fileName}`} onClick={() => onRemove(attachment)}><Trash2 size={14} /></button>
-    </article>})}</div> : <p className="attachment-empty">Dodaj obraz, PDF, nagranie audio lub wideo do tej notatki.</p>}
+    </article>})}</div> : <p className="attachment-empty">Dodaj plik lub utwórz schemat SVG dla tej notatki.</p>}
     {ocrResult && <div className="ocr-result"><strong>Rozpoznany tekst</strong><textarea value={ocrResult} onChange={event => setOcrResult(event.target.value)} rows={5} /><div><button type="button" className="button secondary" onClick={() => setOcrResult('')}>Odrzuć</button><button type="button" className="button primary" onClick={() => { onInsertText(ocrResult); setOcrResult('') }}>Wstaw do notatki</button></div></div>}
     {showMicrophonePrompt && <div className="modal-backdrop microphone-permission-backdrop" role="presentation" onMouseDown={event => { if (event.target === event.currentTarget && !microphoneRequesting) setShowMicrophonePrompt(false) }}><section className="folder-dialog microphone-permission-dialog" role="dialog" aria-modal="true" aria-labelledby="microphone-permission-title"><div className="folder-dialog-mark microphone-permission-mark"><Mic size={19} /></div><p className="eyebrow">NOTATKA GŁOSOWA</p><h2 id="microphone-permission-title">Dostęp do mikrofonu</h2><p>No-Tie nagra audio jako załącznik. Jeśli przeglądarka obsługuje rozpoznawanie mowy, pokaże też transkrypcję na żywo.</p><div className="microphone-permission-info"><AudioLines size={17} /><span>Po kontynuowaniu system lub przeglądarka pokaże własne pytanie o zgodę.</span></div>{audioError && <p className="microphone-permission-error" role="alert">{audioError}</p>}<div className="folder-dialog-actions"><button type="button" className="button secondary" disabled={microphoneRequesting} onClick={() => { setShowMicrophonePrompt(false); setAudioError('') }}>Anuluj</button><button type="button" className="button primary" disabled={microphoneRequesting} onClick={() => void requestMicrophone()}>{microphoneRequesting ? 'Proszę czekać…' : <><Mic size={14} />Zezwól i nagraj</>}</button></div></section></div>}
   </section>

@@ -124,15 +124,18 @@ export function sanitizeSvg(source: string): string {
     throw new Error('Nie udało się odczytać grafiki SVG.')
   }
 
-  const allowedTags = new Set(['svg', 'g', 'rect', 'circle', 'ellipse', 'line', 'path', 'polyline', 'polygon', 'text', 'tspan', 'defs', 'marker'])
-  const allowedAttributes = new Set(['xmlns', 'width', 'height', 'viewBox', 'x', 'y', 'x1', 'x2', 'y1', 'y2', 'cx', 'cy', 'r', 'rx', 'ry', 'd', 'points', 'fill', 'stroke', 'stroke-width', 'stroke-linecap', 'stroke-linejoin', 'text-anchor', 'font-family', 'font-size', 'marker-end', 'marker-start', 'refX', 'refY', 'markerWidth', 'markerHeight', 'markerUnits', 'orient', 'id', 'transform', 'data-object-id', 'data-group-id', 'data-shape-key', 'data-start-target', 'data-start-anchor', 'data-end-target', 'data-end-anchor'])
+  const allowedTags = new Set(['svg', 'g', 'rect', 'circle', 'ellipse', 'line', 'path', 'polyline', 'polygon', 'text', 'tspan', 'image', 'use', 'symbol', 'defs', 'marker', 'clippath', 'mask', 'lineargradient', 'radialgradient', 'stop'])
+  const allowedAttributes = new Set(['xmlns', 'width', 'height', 'viewBox', 'x', 'y', 'x1', 'x2', 'y1', 'y2', 'cx', 'cy', 'r', 'rx', 'ry', 'd', 'points', 'fill', 'stroke', 'stroke-width', 'stroke-linecap', 'stroke-linejoin', 'stroke-dasharray', 'stroke-dashoffset', 'fill-opacity', 'stroke-opacity', 'opacity', 'visibility', 'text-anchor', 'font-family', 'font-size', 'font-weight', 'font-style', 'marker-end', 'marker-start', 'refX', 'refY', 'markerWidth', 'markerHeight', 'markerUnits', 'orient', 'id', 'transform', 'href', 'preserveAspectRatio', 'clip-path', 'mask', 'clipPathUnits', 'maskUnits', 'gradientUnits', 'gradientTransform', 'fx', 'fy', 'offset', 'stop-color', 'stop-opacity', 'data-object-id', 'data-group-id', 'data-shape-key', 'data-start-target', 'data-start-anchor', 'data-end-target', 'data-end-anchor', 'data-layer-name', 'data-layer-locked', 'data-editor-rotation', 'data-editor-base-transform', 'data-editor-pen', 'data-pen-points', 'data-auto-route', 'data-connector-visual-for', 'data-artboard'])
   document.querySelectorAll('*').forEach(element => {
     if (!allowedTags.has(element.tagName.toLowerCase())) {
       element.remove()
       return
     }
     Array.from(element.attributes).forEach(attribute => {
-      if (!allowedAttributes.has(attribute.name) || /^on/i.test(attribute.name) || /javascript:/i.test(attribute.value) || /url\s*\(\s*(['"]?)(?:https?:|data:|javascript:|\/\/)/i.test(attribute.value)) {
+      const unsafeReference = ['href', 'xlink:href'].includes(attribute.name.toLowerCase())
+        && !attribute.value.startsWith('#')
+        && !/^data:image\/(?:png|jpeg|gif|webp);base64,/i.test(attribute.value)
+      if (!allowedAttributes.has(attribute.name) || unsafeReference || /^on/i.test(attribute.name) || /javascript:/i.test(attribute.value) || /url\s*\(\s*(['"]?)(?:https?:|data:|javascript:|\/\/)/i.test(attribute.value)) {
         element.removeAttribute(attribute.name)
       }
     })

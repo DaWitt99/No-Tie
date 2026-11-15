@@ -1,14 +1,16 @@
 import { useEffect, useRef, useState } from 'react'
 import {
-  ArrowRight, Check, Circle, ClipboardCopy, ClipboardPaste, Copy, Group, Minus, MousePointer2,
-  Pencil, RectangleHorizontal, RectangleVertical, Redo2, Shapes, Trash2, Triangle, Type, Undo2, Ungroup, X,
+  AlignCenterHorizontal, AlignEndHorizontal, AlignStartHorizontal, ArrowDownWideNarrow, ArrowRight, Check, Circle,
+  ClipboardCopy, ClipboardPaste, Copy, Download, Eye, EyeOff, Grid3X3, Group, History, ImagePlus, Layers,
+  Lock, MessageSquare, Minus, MousePointer2, Palette, Pencil, Pipette, Plus, RectangleHorizontal,
+  RectangleVertical, Redo2, RotateCw, Ruler, Shapes, Trash2, Triangle, Type, Undo2, Ungroup, Unlock, Waypoints, X,
 } from 'lucide-react'
 import { SVG, type Svg } from '@svgdotjs/svg.js'
 import type { NoteAsset } from './types'
 import { sanitizeSvg } from './content'
 import { shapeById, shapeCategories, shapeLibrary } from './shapeLibrary'
 
-type Tool = 'select' | 'rect' | 'roundRect' | 'ellipse' | 'line' | 'arrow' | 'polygon' | 'shape' | 'freehand' | 'text'
+type Tool = 'select' | 'rect' | 'roundRect' | 'ellipse' | 'line' | 'arrow' | 'polygon' | 'shape' | 'freehand' | 'text' | 'pen'
 type ArrowMode = 'end' | 'start' | 'both' | 'none'
 type Box = { x: number; y: number; width: number; height: number }
 type Point = { x: number; y: number }
@@ -21,6 +23,7 @@ type Interaction =
   | { type: 'connect'; line: SVGLineElement; id: string; side: 'start' | 'end'; x: number; y: number; moved: boolean }
   | { type: 'move'; ids: string[]; elements: SVGElement[]; others: Box[]; startX: number; startY: number; lastX: number; lastY: number; bounds: Box; moved: boolean }
   | { type: 'resize'; ids: string[]; targets: { element: SVGElement; source: SVGElement; box: Box }[]; startBounds: Box; handle: ResizeHandle; moved: boolean }
+  | { type: 'pen-node'; element: SVGPathElement; index: number; handle: 'anchor' | 'incoming' | 'outgoing'; points: PenNode[]; moved: boolean }
   | { type: 'marquee'; x: number; y: number; additive: boolean; initialIds: string[]; moved: boolean }
 
 type OverlayOptions = {
@@ -32,8 +35,17 @@ type OverlayOptions = {
   otherBounds?: Box[]
 }
 
+type EditorComment = { id: string; x: number; y: number; text: string }
+type Checkpoint = { id: string; label: string; createdAt: number; content: string }
+type MiniObject = { id: string; box: Box; color: string }
+type EditorPanel = 'canvas' | 'style' | 'layers' | 'workflow'
+type EditorGuide = { axis: 'x' | 'y'; value: number }
+type EditorViewOptions = { grid: boolean; gridSize: number; snap: boolean; rulers: boolean; guides: EditorGuide[] }
+
 type TextEdit = { input: HTMLInputElement; x: number; y: number; element?: SVGElement; fontSize: number; keepTool: boolean }
 type Drawing = Svg
+type PenNode = Point & { incoming?: Point; outgoing?: Point }
+type ActivePen = { id: string; element: SVGPathElement; points: PenNode[] }
 
 const WIDTH = 800
 const HEIGHT = 500
@@ -49,6 +61,29 @@ function pointsBounds(points: Point[]): Box {
   const x = Math.min(...points.map(point => point.x))
   const y = Math.min(...points.map(point => point.y))
   return { x, y, width: Math.max(0.1, Math.max(...points.map(point => point.x)) - x), height: Math.max(0.1, Math.max(...points.map(point => point.y)) - y) }
+}
+
+function readPenPoints(element: SVGElement): PenNode[] {
+  try {
+    const points = JSON.parse(element.getAttribute('data-pen-points') ?? '[]') as PenNode[]
+    return points.filter(point => Number.isFinite(point.x) && Number.isFinite(point.y))
+  } catch { return [] }
+}
+
+function penPath(points: PenNode[]): string {
+  if (!points.length) return ''
+  if (points.length === 1) return `M ${rounded(points[0].x)} ${rounded(points[0].y)} l 0.1 0`
+  let path = `M ${rounded(points[0].x)} ${rounded(points[0].y)}`
+  for (let index = 0; index < points.length - 1; index++) {
+    const previous = points[Math.max(0, index - 1)]
+    const start = points[index]
+    const end = points[index + 1]
+    const next = points[Math.min(points.length - 1, index + 2)]
+    const control1 = start.outgoing ?? { x: start.x + (end.x - previous.x) / 6, y: start.y + (end.y - previous.y) / 6 }
+    const control2 = end.incoming ?? { x: end.x - (next.x - start.x) / 6, y: end.y - (next.y - start.y) / 6 }
+    path += ` C ${rounded(control1.x)} ${rounded(control1.y)} ${rounded(control2.x)} ${rounded(control2.y)} ${rounded(end.x)} ${rounded(end.y)}`
+  }
+  return path
 }
 
 function smoothStroke(points: Point[]): string {
@@ -377,6 +412,14 @@ function rounded(value: number): string {
   return `${Number(value.toFixed(2))}`
 }
 
+function toHexColor(value: string): string | undefined {
+  if (/^#[\da-f]{6}$/i.test(value)) return value
+  if (/^#[\da-f]{3}$/i.test(value)) return `#${value[1]}${value[1]}${value[2]}${value[2]}${value[3]}${value[3]}`
+  const rgb = value.match(/rgba?\(\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)/i)
+  if (!rgb) return undefined
+  return `#${rgb.slice(1, 4).map(channel => Math.max(0, Math.min(255, Number(channel))).toString(16).padStart(2, '0')).join('')}`
+}
+
 function moveElementBy(element: SVGElement, deltaX: number, deltaY: number) {
   ;(SVG(element) as any).dmove(deltaX, deltaY)
   for (const name of ['x', 'y', 'x1', 'x2', 'y1', 'y2', 'cx', 'cy']) {
@@ -441,7 +484,7 @@ function directObjects(stage: SVGSVGElement): SVGElement[] {
     return Boolean(box && box.x <= 1 && box.y <= 1 && box.width >= WIDTH - 1 && box.height >= HEIGHT - 1)
   })
   background?.setAttribute('data-background', 'true')
-  return children.filter(child => OBJECT_TAGS.has(child.tagName.toLowerCase()) && !child.hasAttribute('data-background') && !child.hasAttribute('data-editor-ui'))
+  return children.filter(child => OBJECT_TAGS.has(child.tagName.toLowerCase()) && !child.hasAttribute('data-background') && !child.hasAttribute('data-editor-ui') && !child.hasAttribute('data-connector-visual-for'))
 }
 
 function ensureObjectIds(stage: SVGSVGElement) {
@@ -525,7 +568,7 @@ function setLineEndpoint(line: SVGLineElement, side: 'start' | 'end', point: { x
 }
 
 function updateConnectors(stage: SVGSVGElement) {
-  stage.querySelectorAll<SVGLineElement>('line[data-start-target], line[data-end-target]').forEach(line => {
+  stage.querySelectorAll<SVGLineElement>('line[data-start-target], line[data-end-target], line[data-auto-route="true"]').forEach(line => {
     const startTarget = line.getAttribute('data-start-target')
     const startAnchor = line.getAttribute('data-start-anchor')
     const endTarget = line.getAttribute('data-end-target')
@@ -544,6 +587,49 @@ function updateConnectors(stage: SVGSVGElement) {
     }
     if (start) setLineEndpoint(line, 'start', start)
     if (end) setLineEndpoint(line, 'end', end)
+    const lineId = line.getAttribute('data-object-id')
+    const routeEnabled = line.getAttribute('data-auto-route') === 'true'
+    const existingRoute = lineId ? stage.querySelector<SVGPathElement>(`[data-connector-visual-for="${CSS.escape(lineId)}"]`) : null
+    if (!routeEnabled || !lineId) {
+      existingRoute?.remove()
+      line.removeAttribute('stroke-opacity')
+      return
+    }
+    const x1 = Number(line.getAttribute('x1')); const y1 = Number(line.getAttribute('y1'))
+    const x2 = Number(line.getAttribute('x2')); const y2 = Number(line.getAttribute('y2'))
+    const startPoint = { x: x1, y: y1 }; const endPoint = { x: x2, y: y2 }
+    const connected = new Set([line.getAttribute('data-start-target'), line.getAttribute('data-end-target')])
+    const bounds = directObjects(stage).filter(item => item !== line && !connected.has(item.getAttribute('data-object-id'))).map(getBox).filter((box): box is Box => Boolean(box))
+    const midX = (x1 + x2) / 2; const midY = (y1 + y2) / 2
+    const routes = [
+      [startPoint, { x: midX, y: y1 }, { x: midX, y: y2 }, endPoint],
+      [startPoint, { x: x1, y: midY }, { x: x2, y: midY }, endPoint],
+      [startPoint, { x: midX, y: y1 }, { x: midX, y: (y1 < y2 ? -18 : HEIGHT + 18) }, { x: x2, y: (y1 < y2 ? -18 : HEIGHT + 18) }, endPoint],
+      [startPoint, { x: (x1 < x2 ? -18 : WIDTH + 18), y: y1 }, { x: (x1 < x2 ? -18 : WIDTH + 18), y: y2 }, endPoint],
+    ]
+    const blocked = (a: Point, b: Point) => bounds.some(box => {
+      if (Math.abs(a.y - b.y) < .1) return a.y > box.y + 2 && a.y < box.y + box.height - 2 && Math.max(Math.min(a.x, b.x), box.x) < Math.min(Math.max(a.x, b.x), box.x + box.width)
+      if (Math.abs(a.x - b.x) < .1) return a.x > box.x + 2 && a.x < box.x + box.width - 2 && Math.max(Math.min(a.y, b.y), box.y) < Math.min(Math.max(a.y, b.y), box.y + box.height)
+      return false
+    })
+    const score = (route: Point[]) => route.slice(1).reduce((value, point, index) => value + (blocked(route[index], point) ? 1000 : 0) + Math.hypot(point.x - route[index].x, point.y - route[index].y), 0)
+    const route = routes.sort((a, b) => score(a) - score(b))[0]
+    const pathData = route.map((point, index) => `${index ? 'L' : 'M'} ${rounded(point.x)} ${rounded(point.y)}`).join(' ')
+    const visual = existingRoute ?? document.createElementNS(SVG_NS, 'path')
+    visual.setAttribute('data-connector-visual-for', lineId)
+    visual.setAttribute('d', pathData)
+    visual.setAttribute('fill', 'none')
+    visual.setAttribute('stroke', line.getAttribute('stroke') ?? '#596fd8')
+    visual.setAttribute('stroke-width', line.getAttribute('stroke-width') ?? '3')
+    visual.setAttribute('stroke-linecap', 'round')
+    visual.setAttribute('stroke-linejoin', 'round')
+    for (const side of ['start', 'end'] as const) {
+      const marker = line.getAttribute(`marker-${side}`)
+      if (marker) visual.setAttribute(`marker-${side}`, marker)
+      else visual.removeAttribute(`marker-${side}`)
+    }
+    if (!existingRoute) stage.append(visual)
+    line.setAttribute('stroke-opacity', '0')
   })
 }
 
@@ -643,6 +729,42 @@ function nearestGap(moving: Box, others: Box[], axis: 'x' | 'y') {
 function renderOverlay(stage: Drawing, ids: string[], options: OverlayOptions = {}) {
   stage.node.querySelectorAll('[data-editor-ui]').forEach(element => element.remove())
   const layer = stage.group().attr({ 'data-editor-ui': 'true', 'pointer-events': 'none' })
+  const grid = stage.node.getAttribute('data-editor-grid') === 'true'
+  const gridSize = Math.max(4, Number(stage.node.getAttribute('data-editor-grid-size')) || 20)
+  if (grid) {
+    const patternId = `editor-grid-${crypto.randomUUID()}`
+    const defs = document.createElementNS(SVG_NS, 'defs')
+    const pattern = document.createElementNS(SVG_NS, 'pattern')
+    pattern.setAttribute('id', patternId)
+    pattern.setAttribute('width', `${gridSize}`)
+    pattern.setAttribute('height', `${gridSize}`)
+    pattern.setAttribute('patternUnits', 'userSpaceOnUse')
+    const line = document.createElementNS(SVG_NS, 'path')
+    line.setAttribute('d', `M ${gridSize} 0 L 0 0 0 ${gridSize}`)
+    line.setAttribute('fill', 'none')
+    line.setAttribute('stroke', '#66708a')
+    line.setAttribute('stroke-width', '.6')
+    line.setAttribute('stroke-opacity', '.15')
+    pattern.append(line)
+    defs.append(pattern)
+    layer.node.prepend(defs)
+    layer.rect(WIDTH, HEIGHT).fill(`url(#${patternId})`)
+  }
+  const guides = (() => { try { return JSON.parse(stage.node.getAttribute('data-editor-guides') ?? '[]') as EditorGuide[] } catch { return [] } })()
+  guides.forEach(guide => {
+    if (guide.axis === 'x') layer.line(guide.value, 0, guide.value, HEIGHT).stroke({ color: '#e3518b', width: 1, dasharray: '5 4' })
+    else layer.line(0, guide.value, WIDTH, guide.value).stroke({ color: '#e3518b', width: 1, dasharray: '5 4' })
+  })
+  if (stage.node.getAttribute('data-editor-rulers') === 'true') {
+    for (let x = 0; x <= WIDTH; x += 100) {
+      layer.line(x, 0, x, 9).stroke({ color: '#8992a6', width: 1 })
+      layer.text(`${x}`).font({ family: 'sans-serif', size: 8 }).fill('#737d93').move(x + 2, 2)
+    }
+    for (let y = 0; y <= HEIGHT; y += 100) {
+      layer.line(0, y, 9, y).stroke({ color: '#8992a6', width: 1 })
+      layer.text(`${y}`).font({ family: 'sans-serif', size: 8 }).fill('#737d93').move(2, y + 2)
+    }
+  }
   for (const element of directObjects(stage.node).filter(item => item.tagName.toLowerCase() === 'line')) {
     const id = element.getAttribute('data-object-id')
     if (!id) continue
@@ -661,6 +783,31 @@ function renderOverlay(stage: Drawing, ids: string[], options: OverlayOptions = 
       .move(box.x - 4, box.y - 4)
       .fill('none')
       .stroke({ color: '#5d73d8', width: 2, dasharray: '7 4' })
+    if (element.hasAttribute('data-editor-pen')) {
+      const points = readPenPoints(element)
+      points.forEach((point, index) => {
+        const previous = points[index - 1]
+        const next = points[index + 1]
+        const tangent = previous && next
+          ? { x: (next.x - previous.x) / 6, y: (next.y - previous.y) / 6 }
+          : next ? { x: (next.x - point.x) / 6, y: (next.y - point.y) / 6 }
+            : previous ? { x: (point.x - previous.x) / 6, y: (point.y - previous.y) / 6 }
+              : { x: 0, y: 0 }
+        const tangentX = tangent.x
+        const tangentY = tangent.y
+        const incoming = point.incoming ?? { x: point.x - tangentX, y: point.y - tangentY }
+        const outgoing = point.outgoing ?? { x: point.x + tangentX, y: point.y + tangentY }
+        for (const [handle, location] of [['incoming', incoming], ['outgoing', outgoing]] as const) {
+          if (!previous && handle === 'incoming' && !point.incoming) continue
+          if (!next && handle === 'outgoing' && !point.outgoing) continue
+          layer.line(point.x, point.y, location.x, location.y).stroke({ color: '#28a58b', width: 1, dasharray: '3 2' })
+          layer.circle(7).center(location.x, location.y).fill('#fff').stroke({ color: '#28a58b', width: 1.3 })
+            .attr({ 'data-pen-handle': handle, 'data-pen-node-index': `${index}`, 'data-pen-object': element.getAttribute('data-object-id') ?? '', 'pointer-events': 'all', cursor: 'move' })
+        }
+        layer.circle(10).center(point.x, point.y).fill('#fff').stroke({ color: '#5066d2', width: 1.7 })
+          .attr({ 'data-pen-node': `${index}`, 'data-pen-object': element.getAttribute('data-object-id') ?? '', 'pointer-events': 'all', cursor: 'move' })
+      })
+    }
   }
   const selectionBounds = unionBoxes(elementsForIds(stage.node, ids).map(getBox))
   if (selectionBounds && ids.length) {
@@ -856,6 +1003,8 @@ export function VectorEditor({
   const redoHistory = useRef<string[]>([])
   const interaction = useRef<Interaction | null>(null)
   const textEdit = useRef<TextEdit | null>(null)
+  const activePen = useRef<ActivePen | null>(null)
+  const finishPenAction = useRef<() => void>(() => {})
   const selectedIdsRef = useRef<string[]>([])
   const undoAction = useRef<() => void>(() => {})
   const redoAction = useRef<() => void>(() => {})
@@ -877,6 +1026,14 @@ export function VectorEditor({
   const fontSizeRef = useRef(24)
   const polygonSidesRef = useRef(6)
   const arrowModeRef = useRef<ArrowMode>('end')
+  const viewOptionsRef = useRef<EditorViewOptions>({ grid: false, gridSize: 20, snap: false, rulers: false, guides: [] })
+  const autoRouteRef = useRef(false)
+  const eyedropperRef = useRef(false)
+  const fontFamilyRef = useRef('Inter, sans-serif')
+  const fontWeightRef = useRef('600')
+  const textAlignRef = useRef('start')
+  const fontItalicRef = useRef(false)
+  const [activePanel, setActivePanel] = useState<EditorPanel>('canvas')
   const [tool, setTool] = useState<Tool>('select')
   const [shapeId, setShapeId] = useState('flow-process')
   const [smartShapeId, setSmartShapeId] = useState('auto')
@@ -896,6 +1053,34 @@ export function VectorEditor({
   const [canUndo, setCanUndo] = useState(false)
   const [canRedo, setCanRedo] = useState(false)
   const [hasClipboard, setHasClipboard] = useState(false)
+  const [viewOptions, setViewOptions] = useState<EditorViewOptions>(viewOptionsRef.current)
+  const [autoRoute, setAutoRoute] = useState(false)
+  const [eyedropper, setEyedropper] = useState(false)
+  const [layerRevision, setLayerRevision] = useState(0)
+  const [rotationDraft, setRotationDraft] = useState('0')
+  const [opacity, setOpacity] = useState(100)
+  const [fontFamily, setFontFamily] = useState('Inter, sans-serif')
+  const [fontWeight, setFontWeight] = useState('600')
+  const [textAlign, setTextAlign] = useState('start')
+  const [fontItalic, setFontItalic] = useState(false)
+  const [comments, setComments] = useState<EditorComment[]>([])
+  const [commentDraft, setCommentDraft] = useState<{ x: number; y: number } | null>(null)
+  const [activeCommentId, setActiveCommentId] = useState<string | null>(null)
+  const [checkpoints, setCheckpoints] = useState<Checkpoint[]>([])
+  const [miniObjects, setMiniObjects] = useState<MiniObject[]>([])
+  const [exportSize, setExportSize] = useState({ width: 800, height: 500 })
+  const [exportFormat, setExportFormat] = useState<'svg' | 'png'>('svg')
+  const [exportTransparent, setExportTransparent] = useState(true)
+  const [vectorizeDetail, setVectorizeDetail] = useState(32)
+  const [artboardPreset, setArtboardPreset] = useState('360x220')
+  const [workflowMessage, setWorkflowMessage] = useState('')
+  const [showMinimap, setShowMinimap] = useState(true)
+  const imageInput = useRef<HTMLInputElement>(null)
+  const editorSessionId = useRef('')
+  if (!editorSessionId.current) editorSessionId.current = crypto.randomUUID()
+  const storageId = asset?.id ?? editorSessionId.current
+  const [loadedCommentsKey, setLoadedCommentsKey] = useState('')
+  const [loadedCheckpointsKey, setLoadedCheckpointsKey] = useState('')
 
   useEffect(() => { toolRef.current = tool }, [tool])
   useEffect(() => { shapeIdRef.current = shapeId }, [shapeId])
@@ -908,8 +1093,47 @@ export function VectorEditor({
   useEffect(() => { fontSizeRef.current = fontSize }, [fontSize])
   useEffect(() => { polygonSidesRef.current = polygonSides }, [polygonSides])
   useEffect(() => { arrowModeRef.current = arrowMode }, [arrowMode])
+  useEffect(() => { viewOptionsRef.current = viewOptions }, [viewOptions])
+  useEffect(() => { autoRouteRef.current = autoRoute }, [autoRoute])
+  useEffect(() => { fontFamilyRef.current = fontFamily }, [fontFamily])
+  useEffect(() => { fontWeightRef.current = fontWeight }, [fontWeight])
+  useEffect(() => { textAlignRef.current = textAlign }, [textAlign])
+  useEffect(() => { fontItalicRef.current = fontItalic }, [fontItalic])
+  useEffect(() => { eyedropperRef.current = eyedropper; if (drawing.current) renderOverlay(drawing.current, selectedIdsRef.current) }, [eyedropper])
+
+  useEffect(() => {
+    const stage = drawing.current?.node
+    if (!stage) return
+    stage.setAttribute('data-editor-grid', `${viewOptions.grid}`)
+    stage.setAttribute('data-editor-grid-size', `${viewOptions.gridSize}`)
+    stage.setAttribute('data-editor-rulers', `${viewOptions.rulers}`)
+    stage.setAttribute('data-editor-guides', JSON.stringify(viewOptions.guides))
+    renderOverlay(drawing.current!, selectedIdsRef.current)
+  }, [viewOptions])
+
+  useEffect(() => {
+    const key = `no-tie-svg-comments:${storageId}`
+    try { setComments(JSON.parse(localStorage.getItem(key) ?? '[]') as EditorComment[]) } catch { setComments([]) }
+    setLoadedCommentsKey(key)
+  }, [storageId])
+  useEffect(() => {
+    const key = `no-tie-svg-comments:${storageId}`
+    if (loadedCommentsKey !== key) return
+    try { localStorage.setItem(key, JSON.stringify(comments)) } catch { /* storage may be unavailable in private windows */ }
+  }, [storageId, comments, loadedCommentsKey])
+  useEffect(() => {
+    const key = `no-tie-svg-history:${storageId}`
+    try { setCheckpoints(JSON.parse(localStorage.getItem(key) ?? '[]') as Checkpoint[]) } catch { setCheckpoints([]) }
+    setLoadedCheckpointsKey(key)
+  }, [storageId])
+  useEffect(() => {
+    const key = `no-tie-svg-history:${storageId}`
+    if (loadedCheckpointsKey !== key) return
+    try { localStorage.setItem(key, JSON.stringify(checkpoints.slice(-20))) } catch { /* storage may be unavailable in private windows */ }
+  }, [storageId, checkpoints, loadedCheckpointsKey])
 
   const chooseTool = (nextTool: Tool) => {
+    if (activePen.current && nextTool !== 'pen') finishPenAction.current()
     toolRef.current = nextTool
     setTool(nextTool)
     if (drawing.current) {
@@ -925,9 +1149,26 @@ export function VectorEditor({
     setSelectedIds(unique)
     if (stage) {
       setHasSelectedGroup(elementsForIds(stage.node, unique).some(element => element.hasAttribute('data-group-id')))
-      const bounds = unionBoxes(elementsForIds(stage.node, unique).map(getBox))
+      const selectedElements = elementsForIds(stage.node, unique)
+      const bounds = unionBoxes(selectedElements.map(getBox))
       setSelectionBounds(bounds ?? null)
       setGeometryDraft(bounds ? boxDraft(bounds) : null)
+      setRotationDraft(selectedElements[0]?.getAttribute('data-editor-rotation') ?? '0')
+      const first = selectedElements[0]
+      setOpacity(Math.round(Number(first?.getAttribute('opacity') ?? 1) * 100))
+      const selectedText = selectedElements.find(element => element.tagName.toLowerCase() === 'text')
+      if (selectedText) {
+        const family = selectedText.getAttribute('font-family') ?? 'Inter, sans-serif'
+        const weight = selectedText.getAttribute('font-weight') ?? '600'
+        const align = selectedText.getAttribute('text-anchor') ?? 'start'
+        setFontFamily(family); fontFamilyRef.current = family
+        setFontWeight(weight); fontWeightRef.current = weight
+        setTextAlign(align); textAlignRef.current = align
+        const italic = selectedText.getAttribute('font-style') === 'italic'
+        setFontItalic(italic); fontItalicRef.current = italic
+        const size = Number(selectedText.getAttribute('font-size')) || 24
+        setFontSize(size); fontSizeRef.current = size
+      }
       renderOverlay(stage, unique)
     } else {
       setHasSelectedGroup(false)
@@ -944,7 +1185,29 @@ export function VectorEditor({
     redoHistory.current = []
     setCanUndo(history.current.length > 1)
     setCanRedo(false)
+    setLayerRevision(value => value + 1)
+    setMiniObjects(directObjects(stage.node).map((element, index) => ({
+      id: element.getAttribute('data-object-id') ?? `${index}`,
+      box: getBox(element),
+      color: element.getAttribute('fill') ?? element.getAttribute('stroke') ?? '#7180bd',
+    })).filter((item): item is MiniObject => Boolean(item.box)))
   }
+
+  function finishPen() {
+    const stage = drawing.current
+    const pen = activePen.current
+    if (!stage || !pen) return
+    activePen.current = null
+    if (pen.points.length < 2) pen.element.remove()
+    else {
+      pen.element.setAttribute('d', penPath(pen.points))
+      pen.element.setAttribute('data-pen-points', JSON.stringify(pen.points))
+      recordHistory(stage)
+      select([pen.id])
+    }
+    chooseTool('select')
+  }
+  finishPenAction.current = finishPen
 
   useEffect(() => {
     if (!mount.current) return
@@ -960,18 +1223,31 @@ export function VectorEditor({
       stage.rect(WIDTH, HEIGHT).fill('#fffdf9').attr({ 'data-background': 'true' })
     }
     ensureObjectIds(stage.node)
+    updateConnectors(stage.node)
+    stage.node.setAttribute('data-editor-grid', `${viewOptionsRef.current.grid}`)
+    stage.node.setAttribute('data-editor-grid-size', `${viewOptionsRef.current.gridSize}`)
+    stage.node.setAttribute('data-editor-rulers', `${viewOptionsRef.current.rulers}`)
+    stage.node.setAttribute('data-editor-guides', JSON.stringify(viewOptionsRef.current.guides))
     drawing.current = stage
     history.current = [snapshotContent(stage)]
     redoHistory.current = []
+    setLayerRevision(value => value + 1)
+    setMiniObjects(directObjects(stage.node).map((element, index) => ({ id: element.getAttribute('data-object-id') ?? `${index}`, box: getBox(element), color: element.getAttribute('fill') ?? element.getAttribute('stroke') ?? '#7180bd' })).filter((item): item is MiniObject => Boolean(item.box)))
+    renderOverlay(stage, [])
     setCanUndo(false)
     setCanRedo(false)
 
     const point = (event: PointerEvent) => {
       const bounds = stage.node.getBoundingClientRect()
-      return {
+      const location = {
         x: Number(Math.max(0, Math.min(WIDTH, (event.clientX - bounds.left) * WIDTH / bounds.width)).toFixed(1)),
         y: Number(Math.max(0, Math.min(HEIGHT, (event.clientY - bounds.top) * HEIGHT / bounds.height)).toFixed(1)),
       }
+      if (viewOptionsRef.current.snap) {
+        const size = Math.max(2, viewOptionsRef.current.gridSize)
+        return { x: Math.round(location.x / size) * size, y: Math.round(location.y / size) * size }
+      }
+      return location
     }
 
     const beginTextEdit = (location: { x: number; y: number }, existing?: SVGElement, keepTool = false) => {
@@ -1009,7 +1285,9 @@ export function VectorEditor({
           if (value) editing.element.textContent = value
           else editing.element.remove()
         } else if (value) {
-          const created = stage.text(value).move(editing.x, editing.y).font({ family: 'Inter, sans-serif', size: editing.fontSize, weight: 600 }).fill(strokeColorRef.current)
+          const created = stage.text(value).move(editing.x, editing.y).font({ family: fontFamilyRef.current, size: editing.fontSize, weight: fontWeightRef.current }).fill(strokeColorRef.current)
+          created.attr({ 'text-anchor': textAlignRef.current })
+          if (fontItalicRef.current) created.attr({ 'font-style': 'italic' })
           const id = crypto.randomUUID()
           created.attr({ 'data-object-id': id, 'pointer-events': 'all' })
           select([id])
@@ -1068,6 +1346,7 @@ export function VectorEditor({
       if (!element) return
       element.stroke({ color, width: size, linecap: 'round', linejoin: 'round' })
       element.fill(fillEnabledRef.current && !['line', 'arrow', 'freehand'].includes(currentTool) ? fillColorRef.current : 'none')
+      if (currentTool === 'arrow' && autoRouteRef.current) element.attr('data-auto-route', 'true')
       const id = crypto.randomUUID()
       element.attr({ 'data-object-id': id, 'pointer-events': 'all' })
       select([id])
@@ -1083,13 +1362,60 @@ export function VectorEditor({
       if (!allowTextDoubleClick) event.preventDefault()
       stage.node.focus({ preventScroll: true })
       const location = point(event)
+      if (eyedropperRef.current) {
+        const target = findObjectTarget(stage.node, event.target)
+        if (target) {
+          const imageSource = target.tagName.toLowerCase() === 'image' ? target.getAttribute('href') : null
+          const box = imageSource ? getBox(target) : undefined
+          if (imageSource && box) {
+            void (async () => {
+              try {
+                const image = new Image(); image.src = imageSource; await image.decode()
+                const canvas = document.createElement('canvas'); canvas.width = 1; canvas.height = 1
+                const context = canvas.getContext('2d', { willReadFrequently: true })
+                if (!context) return
+                const px = Math.max(0, Math.min(image.naturalWidth - 1, Math.floor((location.x - box.x) / Math.max(box.width, .1) * image.naturalWidth)))
+                const py = Math.max(0, Math.min(image.naturalHeight - 1, Math.floor((location.y - box.y) / Math.max(box.height, .1) * image.naturalHeight)))
+                context.drawImage(image, px, py, 1, 1, 0, 0, 1, 1)
+                const data = context.getImageData(0, 0, 1, 1).data
+                applySampledColor(`#${[data[0], data[1], data[2]].map(channel => channel.toString(16).padStart(2, '0')).join('')}`)
+              } catch { /* the source image may no longer be readable */ }
+            })()
+          } else {
+            const color = toHexColor(target.getAttribute('fill') ?? target.getAttribute('stroke') ?? '')
+            if (color) applySampledColor(color)
+          }
+          setEyedropper(false)
+        }
+        return
+      }
+      if (currentTool === 'pen') {
+        let pen = activePen.current
+        if (!pen) {
+          const id = crypto.randomUUID()
+          const element = stage.path(`M ${rounded(location.x)} ${rounded(location.y)} l 0.1 0`).fill('none')
+          element.stroke({ color: strokeColorRef.current, width: strokeWidthRef.current, linecap: 'round', linejoin: 'round' })
+          element.attr({ 'data-object-id': id, 'data-editor-pen': 'true', 'data-pen-points': '[]', 'pointer-events': 'all' })
+          pen = { id, element: element.node, points: [] }
+          activePen.current = pen
+        }
+        const last = pen.points.at(-1)
+        if (!last || Math.hypot(last.x - location.x, last.y - location.y) > 1) pen.points.push(location)
+        pen.element.setAttribute('data-pen-points', JSON.stringify(pen.points))
+        pen.element.setAttribute('d', penPath(pen.points))
+        select([pen.id])
+        renderOverlay(stage, [pen.id])
+        return
+      }
       if (currentTool === 'text') {
         if (event.detail <= 1) beginTextEdit(location, undefined, event.ctrlKey)
         return
       }
       stage.node.setPointerCapture(event.pointerId)
       if (currentTool !== 'select') {
-        const anchor = (currentTool === 'line' || currentTool === 'arrow') ? findAnchorHit(event.target) : undefined
+        const anchorCandidate = (currentTool === 'line' || currentTool === 'arrow') ? findAnchorHit(event.target) : undefined
+        const anchorElement = anchorCandidate ? elementsForIds(stage.node, [anchorCandidate.id])[0] : undefined
+        const anchor = anchorElement?.getAttribute('data-layer-locked') === 'true' ? undefined : anchorCandidate
         const target = anchor ? elementsForIds(stage.node, [anchor.id])[0] : undefined
         const anchorPoint = target && anchor ? anchorPosition(target, anchor.anchor) : undefined
         const startPoint = anchorPoint ?? location
@@ -1103,6 +1429,21 @@ export function VectorEditor({
           }
         }
         return
+      }
+
+      const penHandle = event.target instanceof Element ? event.target.closest('[data-pen-handle][data-pen-node-index][data-pen-object]') : null
+      const penNode = penHandle ?? (event.target instanceof Element ? event.target.closest('[data-pen-node][data-pen-object]') : null)
+      if (penNode) {
+        const id = penNode.getAttribute('data-pen-object')
+        const index = Number(penHandle?.getAttribute('data-pen-node-index') ?? penNode.getAttribute('data-pen-node'))
+        const handle = (penHandle?.getAttribute('data-pen-handle') ?? 'anchor') as 'anchor' | 'incoming' | 'outgoing'
+        const element = id ? elementsForIds(stage.node, [id])[0] as SVGPathElement | undefined : undefined
+        const points = element ? readPenPoints(element) : []
+        if (element && element.getAttribute('data-layer-locked') !== 'true' && points[index]) {
+          select([id!])
+          interaction.current = { type: 'pen-node', element, index, handle, points, moved: false }
+          return
+        }
       }
 
       const connectorHandle = findConnectorHandle(event.target)
@@ -1151,6 +1492,7 @@ export function VectorEditor({
         interaction.current = { type: 'marquee', x: location.x, y: location.y, additive: event.shiftKey, initialIds, moved: false }
         return
       }
+      if (target.getAttribute('data-layer-locked') === 'true') return
       const id = target.getAttribute('data-object-id')
       if (!id) return
       let ids = selectedIdsRef.current
@@ -1186,6 +1528,18 @@ export function VectorEditor({
         current.element.attr('d', smoothStroke(current.points))
         const bounds = pointsBounds(current.points)
         renderOverlay(stage, [current.id], { dimensions: bounds })
+      } else if (current.type === 'pen-node') {
+        current.moved = true
+        const node = current.points[current.index]
+        if (current.handle === 'anchor') {
+          const dx = location.x - node.x; const dy = location.y - node.y
+          node.x = location.x; node.y = location.y
+          if (node.incoming) node.incoming = { x: node.incoming.x + dx, y: node.incoming.y + dy }
+          if (node.outgoing) node.outgoing = { x: node.outgoing.x + dx, y: node.outgoing.y + dy }
+        } else node[current.handle] = location
+        current.element.setAttribute('data-pen-points', JSON.stringify(current.points))
+        current.element.setAttribute('d', penPath(current.points))
+        renderOverlay(stage, [current.element.getAttribute('data-object-id') ?? ''])
       } else if (current.type === 'draw') {
         current.keepTool = current.keepTool || event.ctrlKey
         const x = Math.min(current.x, location.x)
@@ -1329,6 +1683,9 @@ export function VectorEditor({
         recordHistory(stage)
         select([current.id])
         if (!current.keepTool) chooseTool('select')
+      } else if (current.type === 'pen-node') {
+        if (current.moved) recordHistory(stage)
+        select([current.element.getAttribute('data-object-id') ?? ''])
       } else if (current.type === 'draw') {
         current.keepTool = current.keepTool || event.ctrlKey
         if (current.tool === 'line' || current.tool === 'arrow') {
@@ -1369,7 +1726,10 @@ export function VectorEditor({
 
     const keydown = (event: KeyboardEvent) => {
       if (event.target !== stage.node) return
-      if (['ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight'].includes(event.key) && selectedIdsRef.current.length) {
+      if (event.key === 'Enter' && activePen.current) {
+        event.preventDefault()
+        finishPenAction.current()
+      } else if (['ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight'].includes(event.key) && selectedIdsRef.current.length) {
         event.preventDefault()
         const step = event.altKey ? .1 : event.shiftKey ? 10 : 1
         moveSelectionAction.current(event.key === 'ArrowLeft' ? -step : event.key === 'ArrowRight' ? step : 0, event.key === 'ArrowUp' ? -step : event.key === 'ArrowDown' ? step : 0)
@@ -1423,6 +1783,11 @@ export function VectorEditor({
     }
 
     const doubleClick = (event: MouseEvent) => {
+      if (activePen.current) {
+        event.preventDefault()
+        finishPenAction.current()
+        return
+      }
       const target = findObjectTarget(stage.node, event.target)
         ?? findObjectTarget(stage.node, document.elementFromPoint(event.clientX, event.clientY))
       if (target?.tagName.toLowerCase() === 'text') {
@@ -1468,6 +1833,8 @@ export function VectorEditor({
     ensureObjectIds(stage.node)
     updateConnectors(stage.node)
     select([])
+    setLayerRevision(value => value + 1)
+    setMiniObjects(directObjects(stage.node).map((element, index) => ({ id: element.getAttribute('data-object-id') ?? `${index}`, box: getBox(element), color: element.getAttribute('fill') ?? element.getAttribute('stroke') ?? '#7180bd' })).filter((item): item is MiniObject => Boolean(item.box)))
     setCanUndo(history.current.length > 1)
     setCanRedo(redoHistory.current.length > 0)
     renderOverlay(stage, [])
@@ -1483,6 +1850,8 @@ export function VectorEditor({
     ensureObjectIds(stage.node)
     updateConnectors(stage.node)
     select([])
+    setLayerRevision(value => value + 1)
+    setMiniObjects(directObjects(stage.node).map((element, index) => ({ id: element.getAttribute('data-object-id') ?? `${index}`, box: getBox(element), color: element.getAttribute('fill') ?? element.getAttribute('stroke') ?? '#7180bd' })).filter((item): item is MiniObject => Boolean(item.box)))
     setCanUndo(history.current.length > 1)
     setCanRedo(redoHistory.current.length > 0)
     renderOverlay(stage, [])
@@ -1651,6 +2020,7 @@ export function VectorEditor({
         updateMarkerColor(stage.node, element, value)
       }
     })
+    updateConnectors(stage.node)
     recordHistory(stage)
   }
 
@@ -1660,8 +2030,10 @@ export function VectorEditor({
     const stage = drawing.current
     if (!stage) return
     if (fillEnabledRef.current) {
-      elementsForIds(stage.node, selectedIdsRef.current).filter(element => !['text', 'line'].includes(element.tagName.toLowerCase()))
-        .forEach(element => element.setAttribute('fill', value))
+      elementsForIds(stage.node, selectedIdsRef.current).filter(element => !['text', 'line'].includes(element.tagName.toLowerCase())).forEach(element => {
+        element.setAttribute('fill', value)
+        element.querySelectorAll('[fill]').forEach(child => child.setAttribute('fill', value))
+      })
       recordHistory(stage)
     }
   }
@@ -1671,8 +2043,10 @@ export function VectorEditor({
     setFillEnabled(value)
     const stage = drawing.current
     if (!stage) return
-    elementsForIds(stage.node, selectedIdsRef.current).filter(element => !['text', 'line'].includes(element.tagName.toLowerCase()))
-      .forEach(element => element.setAttribute('fill', value ? fillColorRef.current : 'none'))
+    elementsForIds(stage.node, selectedIdsRef.current).filter(element => !['text', 'line'].includes(element.tagName.toLowerCase())).forEach(element => {
+      element.setAttribute('fill', value ? fillColorRef.current : 'none')
+      element.querySelectorAll('[fill]').forEach(child => child.setAttribute('fill', value ? fillColorRef.current : 'none'))
+    })
     recordHistory(stage)
   }
 
@@ -1686,7 +2060,7 @@ export function VectorEditor({
   }
 
   function applyFontSize(value: number) {
-    const next = Math.max(8, Math.min(96, value || 24))
+    const next = Math.max(8, Math.min(160, value || 24))
     fontSizeRef.current = next
     setFontSize(next)
     const stage = drawing.current
@@ -1696,7 +2070,420 @@ export function VectorEditor({
     recordHistory(stage)
   }
 
+  function applyRotation() {
+    const stage = drawing.current
+    const angle = Number(rotationDraft)
+    if (!stage || !Number.isFinite(angle)) return
+    elementsForIds(stage.node, selectedIdsRef.current).forEach(element => {
+      const box = getBox(element)
+      if (!box) return
+      const base = element.getAttribute('data-editor-base-transform') ?? element.getAttribute('transform') ?? ''
+      element.setAttribute('data-editor-base-transform', base)
+      element.setAttribute('data-editor-rotation', `${angle}`)
+      element.setAttribute('transform', `${base ? `${base} ` : ''}rotate(${rounded(angle)} ${rounded(box.x + box.width / 2)} ${rounded(box.y + box.height / 2)})`)
+    })
+    recordHistory(stage)
+    select(selectedIdsRef.current)
+  }
+
+  function alignSelection(axis: 'x' | 'y', alignment: 'start' | 'center' | 'end') {
+    const stage = drawing.current
+    if (!stage || selectedIdsRef.current.length < 2) return
+    const elements = elementsForIds(stage.node, selectedIdsRef.current)
+    const boxes = elements.map(getBox)
+    const bounds = unionBoxes(boxes)
+    if (!bounds) return
+    elements.forEach((element, index) => {
+      const box = boxes[index]
+      if (!box) return
+      const currentStart = axis === 'x' ? box.x : box.y
+      const currentSize = axis === 'x' ? box.width : box.height
+      const target = axis === 'x'
+        ? alignment === 'start' ? bounds.x : alignment === 'center' ? bounds.x + bounds.width / 2 - currentSize / 2 : bounds.x + bounds.width - currentSize
+        : alignment === 'start' ? bounds.y : alignment === 'center' ? bounds.y + bounds.height / 2 - currentSize / 2 : bounds.y + bounds.height - currentSize
+      moveElementBy(element, axis === 'x' ? target - currentStart : 0, axis === 'y' ? target - currentStart : 0)
+    })
+    updateConnectors(stage.node)
+    recordHistory(stage)
+    select(selectedIdsRef.current)
+  }
+
+  function distributeSelection(axis: 'x' | 'y') {
+    const stage = drawing.current
+    if (!stage || selectedIdsRef.current.length < 3) return
+    const items = elementsForIds(stage.node, selectedIdsRef.current).map(element => ({ element, box: getBox(element) })).filter((item): item is { element: SVGElement; box: Box } => Boolean(item.box))
+      .sort((a, b) => axis === 'x' ? a.box.x - b.box.x : a.box.y - b.box.y)
+    if (items.length < 3) return
+    const start = axis === 'x' ? items[0].box.x : items[0].box.y
+    const finalBox = items.at(-1)!.box
+    const end = axis === 'x' ? finalBox.x + finalBox.width : finalBox.y + finalBox.height
+    const occupied = items.reduce((total, item) => total + (axis === 'x' ? item.box.width : item.box.height), 0)
+    const gap = (end - start - occupied) / (items.length - 1)
+    let cursor = start
+    items.forEach(item => {
+      const position = axis === 'x' ? item.box.x : item.box.y
+      moveElementBy(item.element, axis === 'x' ? cursor - position : 0, axis === 'y' ? cursor - position : 0)
+      cursor += (axis === 'x' ? item.box.width : item.box.height) + gap
+    })
+    updateConnectors(stage.node)
+    recordHistory(stage)
+    select(selectedIdsRef.current)
+  }
+
+  function applyBoolean(operation: 'union' | 'subtract' | 'intersect') {
+    const stage = drawing.current
+    const originals = stage ? elementsForIds(stage.node, selectedIdsRef.current) : []
+    if (!stage || originals.length < 2) return
+    const bounds = unionBoxes(originals.map(getBox))
+    if (!bounds) return
+    const cloneClean = (source: SVGElement) => {
+      const clone = source.cloneNode(true) as SVGElement
+      const nodes = [clone, ...Array.from(clone.querySelectorAll('*'))]
+      nodes.forEach(node => {
+        node.removeAttribute('data-object-id')
+        node.removeAttribute('data-group-id')
+        node.removeAttribute('data-start-target')
+        node.removeAttribute('data-end-target')
+        node.removeAttribute('data-start-anchor')
+        node.removeAttribute('data-end-anchor')
+      })
+      return clone
+    }
+    const combined = document.createElementNS(SVG_NS, 'g')
+    const id = crypto.randomUUID()
+    combined.setAttribute('data-object-id', id)
+    combined.setAttribute('data-layer-name', operation === 'union' ? 'Suma kształtów' : operation === 'subtract' ? 'Różnica kształtów' : 'Część wspólna')
+    const defs = stage.node.querySelector('defs') ?? document.createElementNS(SVG_NS, 'defs')
+    if (!defs.parentNode) stage.node.prepend(defs)
+    if (operation === 'union') {
+      originals.forEach(element => combined.append(cloneClean(element)))
+    } else {
+      const cutter = originals.at(-1)!
+      const effectId = `editor-${operation}-${crypto.randomUUID()}`
+      const effect = document.createElementNS(SVG_NS, operation === 'intersect' ? 'clipPath' : 'mask')
+      effect.setAttribute('id', effectId)
+      if (operation === 'intersect') {
+        effect.setAttribute('clipPathUnits', 'userSpaceOnUse')
+        effect.append(cloneClean(cutter))
+        originals.slice(0, -1).forEach(element => combined.append(cloneClean(element)))
+        combined.setAttribute('clip-path', `url(#${effectId})`)
+      } else {
+        effect.setAttribute('maskUnits', 'userSpaceOnUse')
+        effect.setAttribute('x', '0'); effect.setAttribute('y', '0'); effect.setAttribute('width', `${WIDTH}`); effect.setAttribute('height', `${HEIGHT}`)
+        const white = document.createElementNS(SVG_NS, 'rect')
+        white.setAttribute('x', '0'); white.setAttribute('y', '0'); white.setAttribute('width', `${WIDTH}`); white.setAttribute('height', `${HEIGHT}`); white.setAttribute('fill', 'white')
+        const black = cloneClean(cutter)
+        ;[black, ...Array.from(black.querySelectorAll('*'))].forEach(node => { node.setAttribute('fill', 'black'); node.setAttribute('stroke', 'black') })
+        effect.append(white, black)
+        combined.append(cloneClean(originals[0]))
+        combined.setAttribute('mask', `url(#${effectId})`)
+      }
+      defs.append(effect)
+    }
+    originals.forEach(element => element.remove())
+    stage.node.append(combined)
+    updateConnectors(stage.node)
+    select([id])
+    recordHistory(stage)
+  }
+
+  function addArtboard() {
+    const stage = drawing.current
+    if (!stage) return
+    const [width, height] = artboardPreset.split('x').map(Number)
+    const count = directObjects(stage.node).filter(element => element.hasAttribute('data-artboard')).length
+    const columns = Math.max(1, Math.floor((WIDTH - 20) / (width + 20)))
+    const rows = Math.max(1, Math.floor((HEIGHT - 20) / (height + 20)))
+    if (count >= columns * rows) return
+    const x = 20 + (count % columns) * (width + 20)
+    const y = 20 + Math.floor(count / columns) * (height + 20)
+    const board = stage.rect(width, height).move(x, y).fill('#ffffff').stroke({ color: '#aeb7cb', width: 1, dasharray: '7 5' })
+    const id = crypto.randomUUID()
+    board.attr({ 'data-object-id': id, 'data-artboard': 'true', 'data-layer-name': `Plansza ${count + 1}`, 'data-layer-locked': 'true', 'pointer-events': 'all' })
+    const firstOther = directObjects(stage.node).find(element => element !== board.node)
+    if (firstOther) stage.node.insertBefore(board.node, firstOther)
+    recordHistory(stage)
+    select([id])
+  }
+
+  function addGuide(axis: 'x' | 'y') {
+    const value = axis === 'x' ? WIDTH / 2 : HEIGHT / 2
+    setViewOptions(current => ({ ...current, guides: [...current.guides, { axis, value }] }))
+  }
+
+  function createSymbolFromSelection() {
+    const stage = drawing.current
+    const originals = stage ? elementsForIds(stage.node, selectedIdsRef.current) : []
+    const bounds = unionBoxes(originals.map(getBox))
+    if (!stage || !bounds || !originals.length) return
+    const defs = stage.node.querySelector('defs') ?? document.createElementNS(SVG_NS, 'defs')
+    if (!defs.parentNode) stage.node.prepend(defs)
+    const symbol = document.createElementNS(SVG_NS, 'symbol')
+    const id = `symbol-${crypto.randomUUID()}`
+    symbol.setAttribute('id', id)
+    symbol.setAttribute('viewBox', `${bounds.x} ${bounds.y} ${Math.max(bounds.width, 1)} ${Math.max(bounds.height, 1)}`)
+    originals.forEach(element => {
+      const clone = element.cloneNode(true) as SVGElement
+      ;[clone, ...Array.from(clone.querySelectorAll('*'))].forEach(node => { node.removeAttribute('data-object-id'); node.removeAttribute('data-group-id') })
+      symbol.append(clone)
+    })
+    defs.append(symbol)
+    const use = document.createElementNS(SVG_NS, 'use')
+    const objectId = crypto.randomUUID()
+    use.setAttribute('href', `#${id}`)
+    use.setAttribute('x', `${bounds.x}`); use.setAttribute('y', `${bounds.y}`); use.setAttribute('width', `${bounds.width}`); use.setAttribute('height', `${bounds.height}`)
+    use.setAttribute('data-object-id', objectId); use.setAttribute('data-layer-name', 'Wystąpienie symbolu'); use.setAttribute('pointer-events', 'all')
+    const selected = new Set(originals.map(element => element.getAttribute('data-object-id')).filter((value): value is string => Boolean(value)))
+    stage.node.querySelectorAll<SVGLineElement>('line[data-start-target], line[data-end-target]').forEach(line => {
+      for (const side of ['start', 'end'] as const) if (selected.has(line.getAttribute(`data-${side}-target`) ?? '')) line.setAttribute(`data-${side}-target`, objectId)
+    })
+    originals.forEach(element => element.remove())
+    stage.node.append(use)
+    updateConnectors(stage.node)
+    recordHistory(stage)
+    select([objectId])
+  }
+
+  function insertSymbol(symbolId: string) {
+    const stage = drawing.current
+    const symbol = stage?.node.querySelector<SVGSymbolElement>(`symbol#${CSS.escape(symbolId)}`)
+    if (!stage || !symbol) return
+    const use = document.createElementNS(SVG_NS, 'use')
+    const id = crypto.randomUUID()
+    use.setAttribute('href', `#${symbolId}`)
+    use.setAttribute('x', '100'); use.setAttribute('y', '100'); use.setAttribute('width', '180'); use.setAttribute('height', '120')
+    use.setAttribute('data-object-id', id); use.setAttribute('data-layer-name', 'Wystąpienie symbolu'); use.setAttribute('pointer-events', 'all')
+    stage.node.append(use)
+    recordHistory(stage)
+    select([id])
+  }
+
+  function setGradientFill() {
+    const stage = drawing.current
+    const elements = stage ? elementsForIds(stage.node, selectedIdsRef.current) : []
+    if (!stage || !elements.length) return
+    const defs = stage.node.querySelector('defs') ?? document.createElementNS(SVG_NS, 'defs')
+    if (!defs.parentNode) stage.node.prepend(defs)
+    const gradient = document.createElementNS(SVG_NS, 'linearGradient')
+    const id = `gradient-${crypto.randomUUID()}`
+    gradient.setAttribute('id', id); gradient.setAttribute('x1', '0%'); gradient.setAttribute('y1', '0%'); gradient.setAttribute('x2', '100%'); gradient.setAttribute('y2', '100%')
+    for (const [offset, color] of [['0%', fillColor], ['100%', strokeColor]] as const) {
+      const stop = document.createElementNS(SVG_NS, 'stop')
+      stop.setAttribute('offset', offset); stop.setAttribute('stop-color', color); stop.setAttribute('stop-opacity', '1'); gradient.append(stop)
+    }
+    defs.append(gradient)
+    elements.forEach(element => {
+      element.setAttribute('fill', `url(#${id})`)
+      element.querySelectorAll('[fill]').forEach(child => child.setAttribute('fill', `url(#${id})`))
+    })
+    recordHistory(stage)
+  }
+
+  function createCheckpoint() {
+    const stage = drawing.current
+    if (!stage) return
+    const createdAt = Date.now()
+    const checkpoint = { id: crypto.randomUUID(), label: `Punkt kontrolny · ${new Date(createdAt).toLocaleString('pl-PL')}`, createdAt, content: snapshotContent(stage) }
+    setCheckpoints(current => [...current, checkpoint].slice(-20))
+  }
+
+  function restoreCheckpoint(checkpoint: Checkpoint) {
+    const stage = drawing.current
+    if (!stage) return
+    stage.clear(); stage.svg(checkpoint.content); ensureObjectIds(stage.node); updateConnectors(stage.node)
+    select([]); recordHistory(stage); renderOverlay(stage, [])
+  }
+
+  function addComment() {
+    const box = selectionBounds
+    setCommentDraft({ x: box ? box.x + box.width / 2 : WIDTH / 2, y: box ? box.y + box.height / 2 : HEIGHT / 2 })
+  }
+
+  function saveComment(text: string) {
+    if (!commentDraft || !text.trim()) return
+    setComments(current => [...current, { id: crypto.randomUUID(), x: commentDraft.x, y: commentDraft.y, text: text.trim() }])
+    setCommentDraft(null)
+  }
+
+  function exportSvgSource(): string | undefined {
+    const stage = drawing.current
+    if (!stage) return undefined
+    const copy = stage.node.cloneNode(true) as SVGSVGElement
+    copy.querySelectorAll('[data-editor-ui]').forEach(element => element.remove())
+    const removeBackground = fitToContent || (exportFormat === 'png' && exportTransparent)
+    if (removeBackground) copy.querySelectorAll('[data-background]').forEach(element => element.remove())
+    else copy.querySelectorAll('[data-background]').forEach(element => element.removeAttribute('data-background'))
+    copy.setAttribute('width', `${exportSize.width}`); copy.setAttribute('height', `${exportSize.height}`)
+    if (fitToContent) {
+      const bounds = unionBoxes(directObjects(stage.node).map(getBox))
+      if (bounds) {
+        const margin = 20
+        const x = Math.floor(bounds.x - margin); const y = Math.floor(bounds.y - margin)
+        const width = Math.max(1, Math.ceil(bounds.width + margin * 2)); const height = Math.max(1, Math.ceil(bounds.height + margin * 2))
+        copy.setAttribute('viewBox', `${x} ${y} ${width} ${height}`)
+      }
+    }
+    return sanitizeSvg(new XMLSerializer().serializeToString(copy))
+  }
+
+  async function downloadExport() {
+    try {
+      const source = exportSvgSource()
+      if (!source) return
+      const filename = `${asset?.fileName?.replace(/\.svg$/i, '') || 'schemat'}.${exportFormat}`
+      if (exportFormat === 'svg') {
+        const url = URL.createObjectURL(new Blob([source], { type: 'image/svg+xml;charset=utf-8' }))
+        const link = document.createElement('a'); link.href = url; link.download = filename; link.click(); window.setTimeout(() => URL.revokeObjectURL(url), 1000)
+        setWorkflowMessage('Pobrano plik SVG.')
+        return
+      }
+      const url = URL.createObjectURL(new Blob([source], { type: 'image/svg+xml;charset=utf-8' }))
+      try {
+      const image = new Image()
+      image.src = url
+      await image.decode()
+      const canvas = document.createElement('canvas')
+      canvas.width = exportSize.width; canvas.height = exportSize.height
+      const context = canvas.getContext('2d')
+      if (!context) return
+      if (!exportTransparent) { context.fillStyle = '#fff'; context.fillRect(0, 0, canvas.width, canvas.height) }
+      context.drawImage(image, 0, 0, canvas.width, canvas.height)
+      const png = await new Promise<Blob | null>(resolve => canvas.toBlob(resolve, 'image/png'))
+      if (!png) return
+        const pngUrl = URL.createObjectURL(png); const link = document.createElement('a'); link.href = pngUrl; link.download = filename; link.click(); window.setTimeout(() => URL.revokeObjectURL(pngUrl), 1000)
+        setWorkflowMessage('Pobrano plik PNG.')
+      } finally { window.setTimeout(() => URL.revokeObjectURL(url), 1000) }
+    } catch {
+      setWorkflowMessage('Nie udało się przygotować eksportu. Sprawdź rozmiar i zawartość SVG.')
+    }
+  }
+
+  async function importRaster(file?: File) {
+    const stage = drawing.current
+    if (!stage || !file) return
+    if (!/^image\/(png|jpeg|gif|webp)$/i.test(file.type)) { setWorkflowMessage('Obsługiwane są pliki PNG, JPEG, GIF i WebP.'); return }
+    try {
+      const data = await new Promise<string>((resolve, reject) => {
+        const reader = new FileReader(); reader.onload = () => typeof reader.result === 'string' ? resolve(reader.result) : reject(new Error('Nie udało się odczytać obrazu.')); reader.onerror = () => reject(reader.error); reader.readAsDataURL(file)
+      })
+      const image = new Image(); image.src = data; await image.decode()
+      const width = Math.min(360, image.naturalWidth); const height = width * image.naturalHeight / Math.max(image.naturalWidth, 1)
+      const element = document.createElementNS(SVG_NS, 'image')
+      element.setAttribute('href', data)
+      element.setAttribute('x', '40'); element.setAttribute('y', '40'); element.setAttribute('width', `${width}`); element.setAttribute('height', `${height}`)
+      const id = crypto.randomUUID()
+      element.setAttribute('data-object-id', id); element.setAttribute('data-layer-name', file.name); element.setAttribute('pointer-events', 'all')
+      stage.node.append(element)
+      select([id]); recordHistory(stage); setWorkflowMessage(`Zaimportowano ${file.name}.`)
+    } catch { setWorkflowMessage('Nie udało się odczytać wybranego obrazu.') }
+  }
+
+  async function vectorizeSelection() {
+    const stage = drawing.current
+    const imageElement = stage ? elementsForIds(stage.node, selectedIdsRef.current).find(element => element.tagName.toLowerCase() === 'image') as SVGImageElement | undefined : undefined
+    if (!stage || !imageElement) return
+    const source = imageElement.getAttribute('href') ?? imageElement.getAttribute('xlink:href')
+    if (!source) return
+    try {
+    const image = new Image(); image.src = source; await image.decode()
+    const size = Math.max(8, Math.min(80, vectorizeDetail))
+    const ratio = image.naturalWidth / Math.max(image.naturalHeight, 1)
+    const columns = ratio >= 1 ? size : Math.max(4, Math.round(size * ratio))
+    const rows = ratio >= 1 ? Math.max(4, Math.round(size / ratio)) : size
+    const canvas = document.createElement('canvas'); canvas.width = columns; canvas.height = rows
+    const context = canvas.getContext('2d', { willReadFrequently: true })
+    if (!context) return
+    context.drawImage(image, 0, 0, columns, rows)
+    const pixels = context.getImageData(0, 0, columns, rows).data
+    const box = getBox(imageElement)
+    if (!box) return
+    const group = document.createElementNS(SVG_NS, 'g')
+    const id = crypto.randomUUID()
+    group.setAttribute('data-object-id', id); group.setAttribute('data-layer-name', 'Wektoryzacja obrazu')
+    for (let y = 0; y < rows; y++) {
+      for (let x = 0; x < columns; x++) {
+        const offset = (y * columns + x) * 4
+        if (pixels[offset + 3] < 36) continue
+        const rect = document.createElementNS(SVG_NS, 'rect')
+        rect.setAttribute('x', `${box.x + x * box.width / columns}`); rect.setAttribute('y', `${box.y + y * box.height / rows}`)
+        rect.setAttribute('width', `${box.width / columns + .1}`); rect.setAttribute('height', `${box.height / rows + .1}`)
+        rect.setAttribute('fill', `rgb(${pixels[offset]},${pixels[offset + 1]},${pixels[offset + 2]})`)
+        rect.setAttribute('fill-opacity', `${rounded(pixels[offset + 3] / 255)}`); group.append(rect)
+      }
+    }
+    imageElement.replaceWith(group); select([id]); recordHistory(stage); setWorkflowMessage(`Utworzono wektory z obrazu (${columns} × ${rows} próbek).`)
+    } catch { setWorkflowMessage('Nie udało się zwektoryzować tego obrazu.') }
+  }
+
+  function applyRouteSetting(enabled: boolean) {
+    autoRouteRef.current = enabled
+    setAutoRoute(enabled)
+    const stage = drawing.current
+    if (!stage) return
+    elementsForIds(stage.node, selectedIdsRef.current).filter(element => element.tagName.toLowerCase() === 'line').forEach(element => {
+      if (enabled) element.setAttribute('data-auto-route', 'true')
+      else {
+        element.removeAttribute('data-auto-route')
+        const id = element.getAttribute('data-object-id')
+        if (id) stage.node.querySelector(`[data-connector-visual-for="${CSS.escape(id)}"]`)?.remove()
+        element.removeAttribute('stroke-opacity')
+      }
+    })
+    updateConnectors(stage.node); recordHistory(stage)
+  }
+
+  function applySampledColor(color: string) {
+    setStrokeColor(color); strokeColorRef.current = color
+    setFillColor(color); fillColorRef.current = color
+  }
+
+  function applyObjectOpacity(value: number) {
+    const next = Math.max(0, Math.min(100, value))
+    setOpacity(next)
+    const stage = drawing.current
+    if (!stage) return
+    elementsForIds(stage.node, selectedIdsRef.current).forEach(element => element.setAttribute('opacity', `${next / 100}`))
+    recordHistory(stage)
+  }
+
+  function applyTypography(change: { family?: string; weight?: string; align?: string; italic?: boolean }) {
+    const stage = drawing.current
+    if (!stage) return
+    const texts = elementsForIds(stage.node, selectedIdsRef.current).filter(element => element.tagName.toLowerCase() === 'text')
+    texts.forEach(element => {
+      if (change.family) element.setAttribute('font-family', change.family)
+      if (change.weight) element.setAttribute('font-weight', change.weight)
+      if (change.align) element.setAttribute('text-anchor', change.align)
+      if (change.italic !== undefined) element.setAttribute('font-style', change.italic ? 'italic' : 'normal')
+    })
+    if (change.italic !== undefined) { setFontItalic(change.italic); fontItalicRef.current = change.italic }
+    recordHistory(stage)
+  }
+
+  function changeLayer(id: string, action: (element: SVGElement) => void) {
+    const stage = drawing.current
+    const element = stage ? elementsForIds(stage.node, [id])[0] : undefined
+    if (!stage || !element) return
+    action(element); setLayerRevision(value => value + 1); recordHistory(stage); renderOverlay(stage, selectedIdsRef.current)
+  }
+
+  function reorderLayer(id: string, direction: 'front' | 'back') {
+    const stage = drawing.current
+    if (!stage) return
+    const objects = directObjects(stage.node)
+    const index = objects.findIndex(element => element.getAttribute('data-object-id') === id)
+    if (index < 0) return
+    const element = objects[index]
+    if (direction === 'front') stage.node.append(element)
+    else {
+      const previous = objects[index - 1]
+      if (previous) stage.node.insertBefore(element, previous)
+    }
+    setLayerRevision(value => value + 1); recordHistory(stage); renderOverlay(stage, selectedIdsRef.current)
+  }
+
   const save = () => {
+    if (activePen.current) finishPenAction.current()
     const stage = drawing.current
     if (!stage) return
     const copy = stage.node.cloneNode(true) as SVGSVGElement
@@ -1729,8 +2516,13 @@ export function VectorEditor({
     { id: 'polygon', label: 'Wielokąt', icon: Triangle },
     { id: 'shape', label: 'Kształty biblioteczne', icon: Shapes },
     { id: 'freehand', label: 'Pędzel odręczny', icon: Pencil },
+    { id: 'pen', label: 'Pióro Béziera, kliknij punkty i Enter, aby zakończyć', icon: Pencil },
     { id: 'text', label: 'Tekst na planszy', icon: Type },
   ]
+  const layerItems = drawing.current ? [...directObjects(drawing.current.node)].reverse() : []
+  const reusableSymbols = drawing.current ? Array.from(drawing.current.node.querySelectorAll<SVGSymbolElement>('defs symbol')) : []
+  const selectedImage = drawing.current ? elementsForIds(drawing.current.node, selectedIds).find(element => element.tagName.toLowerCase() === 'image') : undefined
+  const palette = ['#596fd8', '#e76c75', '#2b9a83', '#f0a84b', '#222c42', '#8a5bc2', '#3e8cc9', '#ffffff', '#111827']
 
   return (
     <div className="modal-backdrop" role="presentation" onMouseDown={event => { if (event.target === event.currentTarget) onClose() }}>
@@ -1786,9 +2578,127 @@ export function VectorEditor({
             <label className="fill-toggle fit-content-toggle" title="Dopasuj rozmiar SVG do rysunku"><input type="checkbox" checked={fitToContent} onChange={event => setFitToContent(event.target.checked)} aria-label="Dopasuj obszar SVG do treści" />Przytnij SVG</label>
           </div>
         </div>
-        <div className="drawing-stage-wrap"><div ref={mount} className="drawing-stage" /></div>
-        <footer className="modal-footer advanced-modal-footer"><p>Biblioteka zawiera 40 symboli. Pędzel tworzy edytowalne ścieżki; inteligentna korekta prostuje szkice lub dopasowuje je do dowolnego symbolu z biblioteki. Przeciągnij pusty obszar, aby zaznaczać · Ctrl+G grupuje · Ctrl+Shift+G rozgrupowuje</p><div><button className="button secondary" onClick={onClose}>Anuluj</button><button className="button primary" onClick={save}>Zapisz grafikę</button></div></footer>
+        <nav className="drawing-feature-tabs" aria-label="Panele edytora SVG">
+          {([
+            ['canvas', 'Płótno', Grid3X3], ['style', 'Styl', Palette], ['layers', 'Warstwy i układ', Layers], ['workflow', 'Import, historia i eksport', History],
+          ] as const).map(([id, label, Icon]) => <button key={id} className={activePanel === id ? 'selected' : ''} onClick={() => setActivePanel(id)} aria-pressed={activePanel === id}><Icon size={15} />{label}</button>)}
+        </nav>
+        <div className="drawing-feature-panel" role="tabpanel" data-revision={layerRevision}>
+          {activePanel === 'canvas' && <div className="drawing-feature-row">
+            <label className="fill-toggle"><input type="checkbox" checked={viewOptions.grid} onChange={event => setViewOptions(current => ({ ...current, grid: event.target.checked }))} />Siatka</label>
+            <label className="drawing-select-control"><span>Odstęp</span><select value={viewOptions.gridSize} onChange={event => setViewOptions(current => ({ ...current, gridSize: Number(event.target.value) }))}>{[8, 10, 16, 20, 25, 32, 40, 50].map(size => <option key={size} value={size}>{size} px</option>)}</select></label>
+            <label className="fill-toggle"><input type="checkbox" checked={viewOptions.snap} onChange={event => setViewOptions(current => ({ ...current, snap: event.target.checked }))} />Przyciągaj</label>
+            <label className="fill-toggle"><input type="checkbox" checked={viewOptions.rulers} onChange={event => setViewOptions(current => ({ ...current, rulers: event.target.checked }))} /><Ruler size={14} />Linijki</label>
+            <label className="fill-toggle"><input type="checkbox" checked={showMinimap} onChange={event => setShowMinimap(event.target.checked)} />Mini mapa</label>
+            <button className="button secondary compact-feature-button" onClick={() => addGuide('x')}><Plus size={13} />Pionowa prowadnica</button>
+            <button className="button secondary compact-feature-button" onClick={() => addGuide('y')}><Plus size={13} />Pozioma prowadnica</button>
+            <button className="button secondary compact-feature-button" onClick={() => setViewOptions(current => ({ ...current, guides: [] }))} disabled={!viewOptions.guides.length}>Usuń prowadnice ({viewOptions.guides.length})</button>
+            {viewOptions.guides.map((guide, index) => <div className="geometry-control guide-position-control" key={`${guide.axis}-${index}`}><span>{guide.axis === 'x' ? 'Pionowa X' : 'Pozioma Y'}</span><input type="number" min="0" max={guide.axis === 'x' ? WIDTH : HEIGHT} value={guide.value} onChange={event => setViewOptions(current => ({ ...current, guides: current.guides.map((item, currentIndex) => currentIndex === index ? { ...item, value: Number(event.target.value) } : item) }))} /><button className="tool-button" onClick={() => setViewOptions(current => ({ ...current, guides: current.guides.filter((_item, currentIndex) => currentIndex !== index) }))} aria-label="Usuń prowadnicę"><X size={12} /></button></div>)}
+            <label className="drawing-select-control"><span>Plansza</span><select value={artboardPreset} onChange={event => setArtboardPreset(event.target.value)}><option value="360x220">Pozioma 360 × 220</option><option value="220x360">Pionowa 220 × 360</option><option value="220x220">Kwadrat 220 × 220</option></select></label>
+            <button className="button secondary compact-feature-button" onClick={addArtboard}><Plus size={13} />Dodaj planszę</button>
+            <span className="feature-help">Siatka i prowadnice są pomocnicze; nie trafiają do zapisanego SVG.</span>
+          </div>}
+
+          {activePanel === 'style' && <div className="drawing-feature-row drawing-style-feature-row">
+            <div className="drawing-palette" aria-label="Paleta kolorów">{palette.map(color => <button key={color} className="palette-swatch" style={{ backgroundColor: color }} onClick={() => { applyStrokeColor(color); applyFillColor(color) }} title={`Ustaw kolor ${color}`} aria-label={`Ustaw kolor ${color}`} />)}</div>
+            <button className={`button secondary compact-feature-button ${eyedropper ? 'feature-active' : ''}`} onClick={() => setEyedropper(value => !value)} title="Kliknij figurę, aby pobrać jej kolor"><Pipette size={14} />Pipeta</button>
+            <button className="button secondary compact-feature-button" onClick={setGradientFill} disabled={!selectedIds.length} title="Utwórz gradient z kolorów wypełnienia i konturu">Gradient</button>
+            <label className="line-width-control"><span>Przezroczystość</span><input type="range" min="0" max="100" step="1" value={opacity} onChange={event => applyObjectOpacity(Number(event.target.value))} /><output>{opacity}%</output></label>
+            <label className="geometry-control"><span>Obrót °</span><input type="number" min="-360" max="360" step="1" value={rotationDraft} disabled={!selectedIds.length} onChange={event => setRotationDraft(event.target.value)} onKeyDown={event => { if (event.key === 'Enter') applyRotation() }} /></label>
+            <button className="button secondary compact-feature-button" onClick={applyRotation} disabled={!selectedIds.length}><RotateCw size={13} />Obróć</button>
+            <label className="drawing-select-control"><span>Krój pisma</span><select value={fontFamily} onChange={event => { setFontFamily(event.target.value); applyTypography({ family: event.target.value }) }}><option value="Inter, sans-serif">Inter</option><option value="Arial, sans-serif">Arial</option><option value="Georgia, serif">Georgia</option><option value="monospace">Monospace</option><option value="serif">Szeryfowy</option></select></label>
+            <label className="drawing-select-control"><span>Grubość</span><select value={fontWeight} onChange={event => { setFontWeight(event.target.value); applyTypography({ weight: event.target.value }) }}><option value="400">Zwykła</option><option value="600">Półgruba</option><option value="700">Pogrubiona</option></select></label>
+            <label className="drawing-select-control"><span>Wyrównanie</span><select value={textAlign} onChange={event => { setTextAlign(event.target.value); applyTypography({ align: event.target.value }) }}><option value="start">Do lewej</option><option value="middle">Do środka</option><option value="end">Do prawej</option></select></label>
+            <label className="fill-toggle"><input type="checkbox" checked={fontItalic} onChange={event => applyTypography({ italic: event.target.checked })} disabled={!selectedIds.length} />Kursywa</label>
+            <span className="feature-help">Typografia działa na zaznaczonych elementach tekstowych. Przezroczystość stosuje się do całej figury.</span>
+          </div>}
+
+          {activePanel === 'layers' && <div className="drawing-layer-workspace">
+            <div className="drawing-feature-row">
+              <button className="button secondary compact-feature-button" onClick={() => alignSelection('x', 'start')} disabled={selectedIds.length < 2}><AlignStartHorizontal size={14} />Wyrównaj do lewej</button>
+              <button className="button secondary compact-feature-button" onClick={() => alignSelection('x', 'center')} disabled={selectedIds.length < 2}><AlignCenterHorizontal size={14} />Wyśrodkuj w poziomie</button>
+              <button className="button secondary compact-feature-button" onClick={() => alignSelection('x', 'end')} disabled={selectedIds.length < 2}><AlignEndHorizontal size={14} />Wyrównaj do prawej</button>
+              <button className="button secondary compact-feature-button" onClick={() => distributeSelection('x')} disabled={selectedIds.length < 3}><ArrowDownWideNarrow size={14} />Rozłóż poziomo</button>
+              <button className="button secondary compact-feature-button" onClick={() => alignSelection('y', 'start')} disabled={selectedIds.length < 2}>Wyrównaj do góry</button>
+              <button className="button secondary compact-feature-button" onClick={() => alignSelection('y', 'center')} disabled={selectedIds.length < 2}>Wyśrodkuj w pionie</button>
+              <button className="button secondary compact-feature-button" onClick={() => alignSelection('y', 'end')} disabled={selectedIds.length < 2}>Wyrównaj do dołu</button>
+              <button className="button secondary compact-feature-button" onClick={() => distributeSelection('y')} disabled={selectedIds.length < 3}>Rozłóż pionowo</button>
+              <span className="toolbar-divider" />
+              <button className="button secondary compact-feature-button" onClick={() => applyBoolean('union')} disabled={selectedIds.length < 2} title="Łączy zaznaczenie w jedną warstwę grupową, zachowując edytowalne figury">Połącz w grupę</button>
+              <button className="button secondary compact-feature-button" onClick={() => applyBoolean('subtract')} disabled={selectedIds.length < 2}>Odejmij ostatnią</button>
+              <button className="button secondary compact-feature-button" onClick={() => applyBoolean('intersect')} disabled={selectedIds.length < 2}>Część wspólna</button>
+              <button className="button secondary compact-feature-button" onClick={createSymbolFromSelection} disabled={!selectedIds.length}>Zapisz zaznaczenie jako symbol</button>
+              {reusableSymbols.map((symbol, index) => <button key={symbol.id} className="button secondary compact-feature-button" onClick={() => insertSymbol(symbol.id ?? '')} title="Wstaw ponownie edytowalny symbol"><Plus size={12} />Symbol {index + 1}</button>)}
+            </div>
+            <div className="drawing-layer-list" aria-label="Warstwy SVG">
+              {!layerItems.length && <span className="feature-help">Dodane figury pojawią się tu jako warstwy.</span>}
+              {layerItems.map((element, index) => {
+                const id = element.getAttribute('data-object-id') ?? ''
+                const hidden = element.getAttribute('visibility') === 'hidden'
+                const locked = element.getAttribute('data-layer-locked') === 'true'
+                const label = element.getAttribute('data-layer-name') ?? `${element.tagName.toLowerCase()} ${layerItems.length - index}`
+                return <div key={id} className={`drawing-layer-row ${selectedIds.includes(id) ? 'selected' : ''}`}>
+                  <button className="tool-button" onClick={() => select([id])} title="Zaznacz warstwę"><span className="drawing-layer-color" style={{ background: element.getAttribute('fill') ?? element.getAttribute('stroke') ?? '#8490af' }} /></button>
+                  <input aria-label={`Nazwa warstwy ${label}`} defaultValue={label} onBlur={event => changeLayer(id, item => item.setAttribute('data-layer-name', event.target.value.trim() || label))} onKeyDown={event => { if (event.key === 'Enter') event.currentTarget.blur() }} />
+                  <button className="tool-button" onClick={() => changeLayer(id, item => item.setAttribute('visibility', hidden ? 'visible' : 'hidden'))} title={hidden ? 'Pokaż warstwę' : 'Ukryj warstwę'}>{hidden ? <EyeOff size={14} /> : <Eye size={14} />}</button>
+                  <button className="tool-button" onClick={() => changeLayer(id, item => item.setAttribute('data-layer-locked', locked ? 'false' : 'true'))} title={locked ? 'Odblokuj warstwę' : 'Zablokuj warstwę'}>{locked ? <Lock size={14} /> : <Unlock size={14} />}</button>
+                  <button className="tool-button" onClick={() => reorderLayer(id, 'front')} title="Przenieś na wierzch">↑</button>
+                  <button className="tool-button" onClick={() => reorderLayer(id, 'back')} title="Przenieś na spód">↓</button>
+                </div>
+              })}
+            </div>
+          </div>}
+
+          {activePanel === 'workflow' && <div className="drawing-workflow-grid">
+            <section className="drawing-workflow-card"><h3><Waypoints size={15} />Połączenia i komentarze</h3>
+              <label className="fill-toggle"><input type="checkbox" checked={autoRoute} onChange={event => applyRouteSetting(event.target.checked)} />Automatycznie omijaj figury dla strzałek</label>
+              <button className="button secondary compact-feature-button" onClick={addComment}><MessageSquare size={14} />Dodaj komentarz do planszy</button>
+              <p className="feature-help">Komentarze są zapisywane lokalnie na planszy i nie trafiają do wyeksportowanego SVG.</p>
+              <div className="drawing-comment-list">{comments.map(comment => <div key={comment.id}><span>{comment.text}</span><button onClick={() => setComments(current => current.filter(item => item.id !== comment.id))} aria-label="Usuń komentarz"><X size={12} /></button></div>)}</div>
+            </section>
+            <section className="drawing-workflow-card"><h3><ImagePlus size={15} />Import i wektoryzacja</h3>
+              <input ref={imageInput} hidden type="file" accept="image/png,image/jpeg,image/gif,image/webp" onChange={event => { void importRaster(event.target.files?.[0]); event.currentTarget.value = '' }} />
+              <button className="button secondary compact-feature-button" onClick={() => imageInput.current?.click()}><ImagePlus size={14} />Importuj obraz rastrowy</button>
+              <label className="drawing-select-control"><span>Dokładność wektoryzacji</span><input type="range" min="8" max="80" step="4" value={vectorizeDetail} onChange={event => setVectorizeDetail(Number(event.target.value))} /><output>{vectorizeDetail}</output></label>
+              <button className="button secondary compact-feature-button" onClick={() => { void vectorizeSelection() }} disabled={!selectedImage}>Zamień obraz na edytowalne kształty</button>
+            </section>
+            <section className="drawing-workflow-card"><h3><History size={15} />Historia i punkty kontrolne</h3>
+              <button className="button secondary compact-feature-button" onClick={createCheckpoint}><Plus size={14} />Zapisz punkt kontrolny</button>
+              <div className="drawing-checkpoint-list">{checkpoints.map(checkpoint => <div key={checkpoint.id}><button onClick={() => restoreCheckpoint(checkpoint)} title={checkpoint.label}>{checkpoint.label}</button><button onClick={() => setCheckpoints(current => current.filter(item => item.id !== checkpoint.id))} aria-label="Usuń punkt kontrolny"><X size={12} /></button></div>)}</div>
+            </section>
+            <section className="drawing-workflow-card"><h3><Download size={15} />Eksport</h3>
+              <div className="drawing-feature-row"><label className="drawing-select-control"><span>Format</span><select value={exportFormat} onChange={event => setExportFormat(event.target.value as 'svg' | 'png')}><option value="svg">SVG</option><option value="png">PNG</option></select></label>
+                <label className="geometry-control"><span>Szerokość</span><input type="number" min="1" max="4096" value={exportSize.width} onChange={event => setExportSize(current => ({ ...current, width: Math.max(1, Number(event.target.value) || 1) }))} /></label>
+                <label className="geometry-control"><span>Wysokość</span><input type="number" min="1" max="4096" value={exportSize.height} onChange={event => setExportSize(current => ({ ...current, height: Math.max(1, Number(event.target.value) || 1) }))} /></label>
+                {exportFormat === 'png' && <label className="fill-toggle"><input type="checkbox" checked={exportTransparent} onChange={event => setExportTransparent(event.target.checked)} />Przezroczyste tło</label>}
+                <button className="button secondary compact-feature-button" onClick={() => { void downloadExport() }}><Download size={14} />Pobierz {exportFormat.toUpperCase()}</button>
+              </div>
+              {workflowMessage && <p className="feature-help" role="status">{workflowMessage}</p>}
+            </section>
+          </div>}
+        </div>
+        <div className="drawing-stage-wrap">
+          <div className="drawing-canvas-area">
+            <div ref={mount} className="drawing-stage" />
+            {comments.map(comment => <div key={comment.id} className="drawing-comment-pin" style={{ left: `${comment.x / WIDTH * 100}%`, top: `${comment.y / HEIGHT * 100}%` }}>
+              <button onClick={() => setActiveCommentId(activeCommentId === comment.id ? null : comment.id)} title={comment.text} aria-label="Pokaż komentarz"><MessageSquare size={13} /></button>
+              {activeCommentId === comment.id && <div className="drawing-comment-popover">{comment.text}<button onClick={() => setComments(current => current.filter(item => item.id !== comment.id))}><X size={12} /></button></div>}
+            </div>)}
+            {commentDraft && <CommentComposer onSave={saveComment} onCancel={() => setCommentDraft(null)} />}
+            {showMinimap && <div className="drawing-minimap" aria-label="Mini mapa planszy"><svg viewBox={`0 0 ${WIDTH} ${HEIGHT}`} role="img" aria-label="Podgląd całej planszy"><rect width={WIDTH} height={HEIGHT} fill="#fff" stroke="#ccd2df" />{miniObjects.map(item => <rect key={item.id} x={item.box.x} y={item.box.y} width={Math.max(2, item.box.width)} height={Math.max(2, item.box.height)} fill={item.color} opacity=".8" />)}</svg><span>{miniObjects.length} elementów</span></div>}
+          </div>
+        </div>
+        <footer className="modal-footer advanced-modal-footer"><p>Pióro: klikaj węzły, przeciągaj uchwyty; Enter kończy ścieżkę. Pędzel wygładza szkice · Ctrl+G grupuje · Ctrl+Shift+G rozgrupowuje</p><div><button className="button secondary" onClick={onClose}>Anuluj</button><button className="button primary" onClick={save}>Zapisz grafikę</button></div></footer>
       </section>
     </div>
   )
+}
+
+function CommentComposer({ onSave, onCancel }: { onSave: (text: string) => void; onCancel: () => void }) {
+  const [value, setValue] = useState('')
+  return <form className="drawing-comment-composer" onSubmit={event => { event.preventDefault(); onSave(value) }}>
+    <label htmlFor="drawing-comment-text">Komentarz do planszy</label>
+    <textarea id="drawing-comment-text" autoFocus value={value} onChange={event => setValue(event.target.value)} placeholder="Dodaj uwagę…" maxLength={600} />
+    <div><button type="button" className="button secondary" onClick={onCancel}>Anuluj</button><button className="button primary" disabled={!value.trim()}>Dodaj</button></div>
+  </form>
 }
