@@ -22,8 +22,8 @@ import { HelpDialog } from './HelpDialog'
 import { BackupTrashDialog } from './BackupTrashDialog'
 import type { FlashcardAiAction, FlashcardAiTaskNotice } from './FlashcardsPage'
 import { SelectedTextFlashcardDialog } from './SelectedTextFlashcardDialog'
-import { CreateNoteDialog } from './CreateNoteDialog'
-import { NoteCollectionPage } from './NoteCollectionPage'
+import { CreateNotePage } from './CreateNotePage'
+import { AllNotesPage, type AllNotesPreset } from './AllNotesPage'
 import { AiSelectionEditDialog } from './AiSelectionEditDialog'
 import { FeatureManagerDialog } from './FeatureManagerDialog'
 import { AppLockDialog } from './AppLockDialog'
@@ -78,8 +78,7 @@ type FlashcardGenerationScope = { kind: 'selection'; noteId: string; text: strin
 const REVIEW_SESSIONS_OVERVIEW_ID = '__no_tie_review_sessions_overview__'
 const SAVED_SEARCHES_PAGE_ID = '__no_tie_saved_searches_page__'
 const NOTE_TEMPLATES_PAGE_ID = '__no_tie_note_templates_page__'
-const RECENT_NOTES_PAGE_ID = '__no_tie_recent_notes_page__'
-const FAVORITE_NOTES_PAGE_ID = '__no_tie_favorite_notes_page__'
+const ALL_NOTES_PAGE_ID = '__no_tie_all_notes_page__'
 const FLASHCARDS_PAGE_ID = '__no_tie_flashcards_page__'
 
 function folderParents(path: string): string[] {
@@ -336,9 +335,9 @@ function App() {
   const [appLocked, setAppLocked] = useState(() => Boolean(localStorage.getItem('no-tie-app-lock-hash') && localStorage.getItem('no-tie-app-locked') === 'true'))
   const [selectedId, setSelectedId] = useState('')
   const [activeFilter, setActiveFilter] = useState<Filter>('all')
-  const [recentNoteIds, setRecentNoteIds] = useState<string[]>(() => {
-    try { const value: unknown = JSON.parse(localStorage.getItem('no-tie-recent-note-ids') ?? '[]'); return Array.isArray(value) ? value.filter((id): id is string => typeof id === 'string').slice(0, 60) : [] } catch { return [] }
-  })
+  const [allNotesPreset, setAllNotesPreset] = useState<AllNotesPreset>('all')
+  const [allNotesPresetRevision, setAllNotesPresetRevision] = useState(0)
+  const [allNotesFolderPreset, setAllNotesFolderPreset] = useState('')
   const [query, setQuery] = useState('')
   const [searchTag, setSearchTag] = useState('')
   const [searchFolder, setSearchFolder] = useState('')
@@ -379,7 +378,8 @@ function App() {
   const nextFlashcardAiTaskId = useRef(0)
   const [autoBackups, setAutoBackups] = useState<AutoBackupInfo[]>([])
   const [showBackupTrash, setShowBackupTrash] = useState(false)
-  const [showCreateNoteDialog, setShowCreateNoteDialog] = useState(false)
+  const [showCreateNotePage, setShowCreateNotePage] = useState(false)
+  const [createNoteInitialFolder, setCreateNoteInitialFolder] = useState('')
   const [backupBusy, setBackupBusy] = useState(false)
   const automaticBackupRunning = useRef(false)
   const [activeReviewSessionId, setActiveReviewSessionId] = useState('')
@@ -678,21 +678,23 @@ function App() {
   const showingReviewSessionsOverview = activeReviewSessionId === REVIEW_SESSIONS_OVERVIEW_ID
   const showingSavedSearchesPage = activeReviewSessionId === SAVED_SEARCHES_PAGE_ID
   const showingNoteTemplatesPage = activeReviewSessionId === NOTE_TEMPLATES_PAGE_ID
-  const showingRecentNotesPage = activeReviewSessionId === RECENT_NOTES_PAGE_ID
-  const showingFavoriteNotesPage = activeReviewSessionId === FAVORITE_NOTES_PAGE_ID
+  const showingAllNotesPage = activeReviewSessionId === ALL_NOTES_PAGE_ID
   const showingFlashcardsPage = activeReviewSessionId === FLASHCARDS_PAGE_ID
-  const showingWorkspacePage = showingReviewSessionsOverview || showingSavedSearchesPage || showingNoteTemplatesPage || showingRecentNotesPage || showingFavoriteNotesPage || showingFlashcardsPage || Boolean(activeReviewSession)
+  const showingWorkspacePage = showingReviewSessionsOverview || showingSavedSearchesPage || showingNoteTemplatesPage || showingAllNotesPage || showingFlashcardsPage || showCreateNotePage || Boolean(activeReviewSession)
   useLayoutEffect(() => { showingFlashcardsPageRef.current = showingFlashcardsPage }, [showingFlashcardsPage])
   const activeSmartFolder = featureFlags.smartFolders && activeFilter.startsWith('smart:') ? savedSearches.find(search => search.id === activeFilter.slice('smart:'.length)) : undefined
-  useEffect(() => {
-    if (!selectedId || !notes.some(note => note.id === selectedId)) return
-    setRecentNoteIds(current => {
-      const next = [selectedId, ...current.filter(id => id !== selectedId)].slice(0, 60)
-      if (JSON.stringify(next) === JSON.stringify(current)) return current
-      localStorage.setItem('no-tie-recent-note-ids', JSON.stringify(next))
-      return next
-    })
-  }, [selectedId, notes])
+  const breadcrumbFolderPath = showingAllNotesPage
+    ? allNotesFolderPreset
+    : activeFilter === 'root'
+      ? '__root__'
+      : activeFilter !== 'all' && activeFilter !== 'favorites' && !activeFilter.startsWith('smart:')
+        ? activeFilter
+        : selectedNote?.folder || '__root__'
+  const breadcrumbFolders = breadcrumbFolderPath === '__root__'
+    ? [{ path: '__root__', label: 'Poziom główny' }]
+    : folderParents(breadcrumbFolderPath).map(path => ({ path, label: path.split('/').at(-1) ?? path }))
+  const showingToolsBreadcrumb = showingSavedSearchesPage || showingNoteTemplatesPage || showingReviewSessionsOverview || showingFlashcardsPage || Boolean(activeReviewSession)
+  const toolsBreadcrumbTitle = showingSavedSearchesPage ? 'Zapisane widoki' : showingNoteTemplatesPage ? 'Szablony' : showingReviewSessionsOverview ? 'Wszystkie powtórki' : showingFlashcardsPage ? 'Fiszki' : activeReviewSession?.title ?? ''
   const notesRef = useRef<Note[]>([])
   const backupSnapshotRef = useRef({ notes, assets, attachments, reviewSessions, savedSearches, templates, folderColors, flashcards, flashcardTrash, trashEntries })
   useLayoutEffect(() => {
@@ -973,6 +975,15 @@ function App() {
   function selectNote(id: string) {
     setEditorSelection({ noteId: id, mode: editorMode, text: '' })
     setSelectedId(id)
+  }
+
+  function openAllNotesFolder(folder: string) {
+    setActiveReviewSessionId(ALL_NOTES_PAGE_ID)
+    setAllNotesPreset('all')
+    setAllNotesFolderPreset(folder)
+    setAllNotesPresetRevision(value => value + 1)
+    setActiveFilter('all')
+    setMobileDrawer('none')
   }
 
   function setEditorMode(mode: 'rendered' | 'source') {
@@ -1506,7 +1517,7 @@ function App() {
     const folder = folderOverride ?? (activeFilter === 'root' ? '' : activeFilter !== 'all' && activeFilter !== 'favorites' ? activeFilter : 'Osobiste')
     const note = makeNote(folder, template)
     setActiveReviewSessionId('')
-    setShowCreateNoteDialog(false)
+    setShowCreateNotePage(false)
     setSaved(false)
     void saveNote(note).then(async () => {
       await saveNoteVersion(note)
@@ -1520,10 +1531,14 @@ function App() {
   }, [activeFilter, editorMode])
 
   const openCreateNote = useCallback(() => {
+    const initialFolder = activeReviewSessionId === ALL_NOTES_PAGE_ID
+      ? allNotesFolderPreset === '__root__' ? '' : allNotesFolderPreset || 'Osobiste'
+      : activeFilter === 'root' ? '' : activeFilter !== 'all' && activeFilter !== 'favorites' && !activeFilter.startsWith('smart:') ? activeFilter : 'Osobiste'
+    setCreateNoteInitialFolder(initialFolder)
     setActiveReviewSessionId('')
-    setShowCreateNoteDialog(true)
+    setShowCreateNotePage(true)
     setMobileDrawer('none')
-  }, [])
+  }, [activeFilter, activeReviewSessionId, allNotesFolderPreset])
 
   async function createFolder() {
     const name = folderDraft.trim().replace(/^\/+|\/+$/g, '')
@@ -2506,25 +2521,24 @@ function App() {
           <button className="new-note-button" onClick={openCreateNote}><Plus size={17} /><span>Nowa notatka</span><kbd>N</kbd></button>
           <div className="sidebar-section">
             <span className="section-label">BIBLIOTEKA</span>
-            <button className={`nav-item ${activeFilter === 'all' && !showingWorkspacePage ? 'active' : ''}`} onClick={() => { setActiveReviewSessionId(''); setActiveFilter('all'); setMobileDrawer('none') }}><BookOpen size={17} /><span>Wszystkie notatki</span><span className="nav-count">{notes.length}</span></button>
-            <button className={`nav-item ${showingFavoriteNotesPage ? 'active' : ''}`} onClick={() => { setActiveReviewSessionId(FAVORITE_NOTES_PAGE_ID); setActiveFilter('all'); setMobileDrawer('none') }}><Heart size={17} /><span>Ulubione</span><span className="nav-count">{notes.filter(note => note.favorite).length}</span></button>
-            <button className={`nav-item ${showingRecentNotesPage ? 'active' : ''}`} onClick={() => { setActiveReviewSessionId(RECENT_NOTES_PAGE_ID); setActiveFilter('all'); setMobileDrawer('none') }}><Clock3 size={17} /><span>Ostatnie</span></button>
+            <button className={`nav-item ${showingAllNotesPage && allNotesPreset === 'all' ? 'active' : ''}`} onClick={() => { setActiveReviewSessionId(ALL_NOTES_PAGE_ID); setAllNotesPreset('all'); setAllNotesFolderPreset(''); setAllNotesPresetRevision(value => value + 1); setActiveFilter('all'); setMobileDrawer('none') }}><BookOpen size={17} /><span>Wszystkie notatki</span><span className="nav-count">{notes.length}</span></button>
+            <button className={`nav-item ${showingAllNotesPage && allNotesPreset === 'favorites' ? 'active' : ''}`} onClick={() => { setActiveReviewSessionId(ALL_NOTES_PAGE_ID); setAllNotesPreset('favorites'); setAllNotesFolderPreset(''); setAllNotesPresetRevision(value => value + 1); setActiveFilter('all'); setMobileDrawer('none') }}><Heart size={17} /><span>Ulubione</span><span className="nav-count">{notes.filter(note => note.favorite).length}</span></button>
+            <button className={`nav-item ${showingAllNotesPage && allNotesPreset === 'recent' ? 'active' : ''}`} onClick={() => { setActiveReviewSessionId(ALL_NOTES_PAGE_ID); setAllNotesPreset('recent'); setAllNotesFolderPreset(''); setAllNotesPresetRevision(value => value + 1); setActiveFilter('all'); setMobileDrawer('none') }}><Clock3 size={17} /><span>Ostatnie</span></button>
           </div>
           <div className="sidebar-section workspace-tools">
             <div className="section-heading"><span className="section-label">NARZĘDZIA</span></div>
-            <button className="nav-item" onClick={() => setShowDailyNotes(true)}><CalendarDays size={16} /><span>Notatki dzienne</span></button>
-            <button className="nav-item" onClick={() => setShowTaskManager(true)}><CheckSquare2 size={16} /><span>Zadania</span><span className="nav-count">{parsedTasks.filter(task => !task.done).length}</span></button>
             <button className={`nav-item ${showingFlashcardsPage ? 'active' : ''}`} onClick={() => { setActiveReviewSessionId(FLASHCARDS_PAGE_ID); setActiveFilter('all'); setMobileDrawer('none') }}><Brain size={16} /><span>Fiszki</span><span className="nav-count">{flashcards.filter(card => !card.suspended && card.dueAt <= Date.now()).length}</span></button>
-            <button className="nav-item" onClick={() => setShowBackupTrash(true)}><Archive size={16} /><span>Kopie i kosz</span><span className="nav-count">{trashEntries.length}</span></button>
-            <button className="nav-item" onClick={() => setShowKnowledgeGraph(true)}><Network size={16} /><span>Mapa powiązań</span></button>
-            <button className="nav-item" onClick={() => setShowFeatureManager(true)}><Puzzle size={16} /><span>Moduły aplikacji</span></button>
-            {featureFlags.duplicateManager && <button className="nav-item" onClick={() => setShowDuplicateManager(true)}><Copy size={16} /><span>Duplikaty</span></button>}
+            <button className="nav-item" onClick={() => setShowTaskManager(true)}><CheckSquare2 size={16} /><span>Zadania</span><span className="nav-count">{parsedTasks.filter(task => !task.done).length}</span></button>
+            <button className="nav-item" onClick={() => setShowDailyNotes(true)}><CalendarDays size={16} /><span>Notatki dzienne</span></button>
+            <button className={`nav-item ${showingReviewSessionsOverview || activeReviewSession ? 'active' : ''}`} onClick={() => { setActiveReviewSessionId(REVIEW_SESSIONS_OVERVIEW_ID); setMobileDrawer('none') }}><Repeat2 size={16} /><span>Powtórki</span><span className="nav-count">{reviewSessions.length}</span></button>
+            <button className={`nav-item ${showingSavedSearchesPage ? 'active' : ''}`} onClick={() => { setActiveReviewSessionId(SAVED_SEARCHES_PAGE_ID); setMobileDrawer('none') }}><BookmarkPlus size={16} /><span>Zapisane widoki</span><span className="nav-count">{savedSearches.length}</span></button>
+            <button className={`nav-item ${showingNoteTemplatesPage ? 'active' : ''}`} onClick={() => { setActiveReviewSessionId(NOTE_TEMPLATES_PAGE_ID); setMobileDrawer('none') }}><FilePlus2 size={16} /><span>Szablony</span><span className="nav-count">{templates.length}</span></button>
             {featureFlags.attachmentManager && <button className="nav-item" onClick={() => setShowAttachmentManager(true)}><Paperclip size={16} /><span>Załączniki</span><span className="nav-count">{attachments.filter(attachment => featureFlags.audioNotes || !attachment.mimeType.startsWith('audio/')).length}</span></button>}
             {featureFlags.noteBoard && <button className="nav-item" onClick={() => setShowNoteBoard(true)}><Columns3 size={16} /><span>Statusy notatek</span></button>}
             {featureFlags.projectDashboard && <button className="nav-item" onClick={() => setShowProjectDashboard(true)}><BarChart3 size={16} /><span>Pulpit projektów</span></button>}
-            <button className={`nav-item ${showingSavedSearchesPage ? 'active' : ''}`} onClick={() => { setActiveReviewSessionId(SAVED_SEARCHES_PAGE_ID); setMobileDrawer('none') }}><BookmarkPlus size={16} /><span>Zapisane widoki</span><span className="nav-count">{savedSearches.length}</span></button>
-            <button className={`nav-item ${showingNoteTemplatesPage ? 'active' : ''}`} onClick={() => { setActiveReviewSessionId(NOTE_TEMPLATES_PAGE_ID); setMobileDrawer('none') }}><FilePlus2 size={16} /><span>Szablony</span><span className="nav-count">{templates.length}</span></button>
-            <button className={`nav-item ${showingReviewSessionsOverview || activeReviewSession ? 'active' : ''}`} onClick={() => { setActiveReviewSessionId(REVIEW_SESSIONS_OVERVIEW_ID); setMobileDrawer('none') }}><Repeat2 size={16} /><span>Powtórki</span><span className="nav-count">{reviewSessions.length}</span></button>
+            <button className="nav-item" onClick={() => setShowKnowledgeGraph(true)}><Network size={16} /><span>Mapa powiązań</span></button>
+            {featureFlags.duplicateManager && <button className="nav-item" onClick={() => setShowDuplicateManager(true)}><Copy size={16} /><span>Duplikaty</span></button>}
+            <button className="nav-item" onClick={() => setShowBackupTrash(true)}><Archive size={16} /><span>Kopie i kosz</span><span className="nav-count">{trashEntries.length}</span></button>
           </div>
           {featureFlags.smartFolders && savedSearches.length > 0 && <div className="sidebar-section smart-folders-section"><div className="section-heading"><span className="section-label">INTELIGENTNE FOLDERY</span></div>{savedSearches.map(search => { const visibleAttachments = attachments.filter(attachment => featureFlags.audioNotes || !attachment.mimeType.startsWith('audio/')).map(attachment => featureFlags.attachmentIndex ? attachment : { ...attachment, extractedText: undefined }); const count = searchNotes(notes, { query: search.query, tag: search.tag, folder: search.folder, attachments: visibleAttachments, advanced: featureFlags.advancedQuery }).length; return <button type="button" className={`nav-item ${activeFilter === `smart:${search.id}` ? 'active' : ''}`} key={search.id} onClick={() => { setActiveReviewSessionId(''); setActiveFilter(`smart:${search.id}`); setQuery(''); setSearchTag(''); setSearchFolder(''); setMobileDrawer('none') }}><Search size={15} /><span>{search.name}</span><span className="nav-count">{count}</span></button> })}</div>}
           <div className="sidebar-section folders-section">
@@ -2538,7 +2552,7 @@ function App() {
         </div>
         <div className="sidebar-bottom">
           <div className="offline-card"><span className="online-dot" /><div><strong>Dane lokalne</strong><span>{storageLocationLabel} · offline</span></div><Check size={15} /></div>
-          <div className="user-row"><div className="avatar">N</div><div><strong>Moje notatki</strong><span>Przestrzeń prywatna</span></div>{featureFlags.appLock && hasLockPin && <button type="button" className="sidebar-help-button" onClick={lockApp} title="Zablokuj aplikację" aria-label="Zablokuj aplikację"><LockKeyhole size={17} /></button>}<button type="button" className="sidebar-help-button" onClick={() => setShowHelp(true)} title="Instrukcja obsługi" aria-label="Otwórz instrukcję obsługi"><CircleHelp size={19} /></button></div>
+          <div className="user-row"><div className="avatar">N</div><div><strong>Moje notatki</strong><span>Przestrzeń prywatna</span></div><div className="user-row-actions">{featureFlags.appLock && hasLockPin && <button type="button" className="sidebar-help-button" onClick={lockApp} title="Zablokuj aplikację" aria-label="Zablokuj aplikację"><LockKeyhole size={17} /></button>}<button type="button" className="sidebar-help-button" onClick={() => setShowFeatureManager(true)} title="Moduły aplikacji" aria-label="Otwórz moduły aplikacji"><Puzzle size={17} /></button><button type="button" className="sidebar-help-button" onClick={() => setShowHelp(true)} title="Instrukcja obsługi" aria-label="Otwórz instrukcję obsługi"><CircleHelp size={19} /></button></div></div>
         </div>
       </aside>
 
@@ -2585,7 +2599,13 @@ function App() {
               </div>
             </details>
           </div>
-          <div className="breadcrumb"><span>{showingSavedSearchesPage || showingNoteTemplatesPage || showingReviewSessionsOverview || showingFlashcardsPage || activeReviewSession ? 'Narzędzia' : 'Notatki'}</span><span className="crumb-slash">/</span><span>{showingSavedSearchesPage ? 'Zapisane widoki' : showingNoteTemplatesPage ? 'Szablony' : showingReviewSessionsOverview ? 'Wszystkie powtórki' : showingFlashcardsPage ? 'Fiszki' : showingRecentNotesPage ? 'Ostatnie' : showingFavoriteNotesPage ? 'Ulubione' : activeReviewSession?.title ?? selectedNote?.folder ?? 'Osobiste'}</span></div>
+          <nav className="breadcrumb" aria-label="Ścieżka nawigacji">
+            {showCreateNotePage ? <><button type="button" className="breadcrumb-link" onClick={() => openAllNotesFolder('')}>Notatki</button><span className="crumb-slash">/</span><span className="breadcrumb-current">Nowa notatka</span></> : showingToolsBreadcrumb ? <><span className="breadcrumb-section">Narzędzia</span><span className="crumb-slash">/</span><span className="breadcrumb-current">{toolsBreadcrumbTitle}</span></> : activeSmartFolder ? <><button type="button" className="breadcrumb-link" onClick={() => openAllNotesFolder('')}>Notatki</button><span className="crumb-slash">/</span><span className="breadcrumb-current">{activeSmartFolder.name}</span></> : <>
+              <button type="button" className="breadcrumb-link" onClick={() => openAllNotesFolder('')}>Notatki</button>
+              {showingAllNotesPage && !allNotesFolderPreset && <span className="breadcrumb-pair"><span className="crumb-slash">/</span><button type="button" className="breadcrumb-link breadcrumb-current" aria-current="page" onClick={() => openAllNotesFolder('')}>Wszystkie notatki</button></span>}
+              {breadcrumbFolders.map(folder => <span className="breadcrumb-pair" key={folder.path}><span className="crumb-slash">/</span><button type="button" className={`breadcrumb-link ${folder.path === breadcrumbFolderPath ? 'breadcrumb-current' : ''}`} aria-current={folder.path === breadcrumbFolderPath ? 'page' : undefined} onClick={() => openAllNotesFolder(folder.path)}>{folder.label}</button></span>)}
+            </>}
+          </nav>
           <div className="topbar-actions">
             <span className={`save-indicator ${saved ? 'is-saved' : ''}`}><span className="save-dot" />{saved ? 'Zapisano' : 'Zapisywanie…'}</span>
             {selectedNote && featureFlags.noteReminders && <button type="button" className="icon-button note-history-button" onClick={() => setShowNoteReminder(true)} title="Ustaw przypomnienie o notatce" aria-label="Ustaw przypomnienie o notatce"><Bell size={16} /></button>}
@@ -2615,10 +2635,10 @@ function App() {
           />
         ) : showingNoteTemplatesPage ? (
           <TemplateManagerDialog templates={templates} onSave={setTemplates} onClose={() => setActiveReviewSessionId('')} />
-        ) : showingRecentNotesPage ? (
-          <NoteCollectionPage kind="recent" notes={notes} recentIds={recentNoteIds} onOpen={openLinkedNote} />
-        ) : showingFavoriteNotesPage ? (
-          <NoteCollectionPage kind="favorites" notes={notes} recentIds={recentNoteIds} onOpen={openLinkedNote} />
+        ) : showCreateNotePage ? (
+          <CreateNotePage templates={templates} folders={folders} initialFolder={createNoteInitialFolder} notes={notes} assets={assets} onCreate={(template, folder) => createNote(template, folder)} onClose={() => setShowCreateNotePage(false)} />
+        ) : showingAllNotesPage ? (
+          <AllNotesPage key={`${allNotesPreset}:${allNotesPresetRevision}`} preset={allNotesPreset} initialFolder={allNotesFolderPreset} onFolderChange={setAllNotesFolderPreset} notes={notes} attachments={attachments} searchAttachments={attachments.filter(attachment => featureFlags.audioNotes || !attachment.mimeType.startsWith('audio/')).map(attachment => featureFlags.attachmentIndex ? attachment : { ...attachment, extractedText: undefined })} advancedSearch={featureFlags.advancedQuery} onOpen={openLinkedNote} />
         ) : showingFlashcardsPage ? (
           <Suspense fallback={<div className="editor-loading">Otwieram fiszki…</div>}><FlashcardsPage cards={flashcards} notes={notes} attachments={attachments} trash={flashcardTrash} aiTaskNotices={flashcardAiTasks} onBeginAiTask={beginFlashcardAiTask} onFinishAiTask={finishFlashcardAiTask} onCreate={createFlashcard} onUpdate={updateFlashcard} onReview={rateFlashcard} onSetDueAt={setFlashcardDueAt} onToggleSuspend={toggleFlashcardSuspended} onDelete={trashFlashcard} onRestoreTrash={restoreFlashcardTrash} onPurgeTrash={id => setFlashcardTrash(current => current.filter(entry => entry.id !== id))} onRegenerate={regenerateFlashcard} onFindSimilar={findSimilarFlashcards} onAiAssist={assistFlashcards} onOpenNote={noteId => { setActiveReviewSessionId(''); openLinkedNote(noteId) }} /></Suspense>
         ) : showingReviewSessionsOverview ? (
@@ -2690,7 +2710,6 @@ function App() {
       {showDailyNotes && <DailyNotesDialog notes={notes} onSelect={openDailyNote} onClose={() => setShowDailyNotes(false)} />}
       {showTaskManager && <TaskManagerDialog notes={notes} tasks={parsedTasks} onUpdate={updateTask} onOpenNote={noteId => { setShowTaskManager(false); openLinkedNote(noteId) }} onCreate={createTask} onClose={() => setShowTaskManager(false)} />}
       {showBackupTrash && <BackupTrashDialog backups={autoBackups} trash={trashEntries} busy={backupBusy} onCreateBackup={() => void createAutomaticBackup(false)} onDownloadBackup={fileName => void downloadAutomaticBackup(fileName)} onRestoreBackup={fileName => void restoreAutomaticBackup(fileName)} onDeleteBackup={fileName => void removeAutomaticBackup(fileName)} onRestoreTrash={entryId => void restoreTrashEntry(entryId)} onDeleteTrash={entryId => void deleteTrashEntry(entryId)} onEmptyTrash={() => void emptyTrash()} onClose={() => setShowBackupTrash(false)} />}
-      {showCreateNoteDialog && <CreateNoteDialog templates={templates} folders={folders} initialFolder={activeFilter === 'root' ? '' : activeFilter !== 'all' && activeFilter !== 'favorites' && !activeFilter.startsWith('smart:') ? activeFilter : 'Osobiste'} onCreate={(template, folder) => createNote(template, folder)} onClose={() => setShowCreateNoteDialog(false)} />}
       {showKnowledgeGraph && <KnowledgeGraphDialog notes={notes} onOpen={note => { setShowKnowledgeGraph(false); openLinkedNote(note.id) }} onClose={() => setShowKnowledgeGraph(false)} />}
       {showQuickSearch && <NoteSearchDialog
         query={query}

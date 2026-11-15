@@ -110,6 +110,7 @@ export function MarkdownEditor({
   allAssets,
   noteActions,
   onNoteAction,
+  readOnly = false,
 }: {
   noteId: string
   markdown: string
@@ -124,6 +125,7 @@ export function MarkdownEditor({
   allAssets: NoteAsset[]
   noteActions: MarkdownNoteAction[]
   onNoteAction: (id: string) => void
+  readOnly?: boolean
 }) {
   const root = useRef<HTMLDivElement>(null)
   const tableFilterStyle = useRef<HTMLStyleElement>(null)
@@ -182,6 +184,7 @@ export function MarkdownEditor({
       .use([...commonmark, columnResizingPlugin, ...gfm, ...markdownMarkupPlugins, ...noteEmbedPlugins, listener])
     void editor.create().then(() => {
       editorRef.current = editor
+      editor.ctx.get(editorViewCtx).setProps({ editable: () => !readOnly })
       const widths = parseTableColumnWidths(initialDocument.markdown)
       if (widths.length) applyTableColumnWidths(editor.ctx.get(editorViewCtx), widths)
       applyTableRowHeights(editor.ctx.get(editorViewCtx), parseTableRowHeights(initialDocument.markdown))
@@ -191,7 +194,7 @@ export function MarkdownEditor({
       editorRef.current = null
       void editor.destroy()
     }
-  }, [noteId, revision, initialDocument])
+  }, [noteId, revision, initialDocument, readOnly])
 
   useEffect(() => {
     refreshNoteEmbeds(root.current, notes, allAssets, note => onOpenNoteRef.current(note.title || note.id))
@@ -835,12 +838,13 @@ export function MarkdownEditor({
     className="markdown-editor"
     ref={root}
     aria-label="Treść notatki"
-    onPointerDown={startRowResize}
-    onContextMenu={showContextMenu}
-    onMouseOver={updateTableHover}
-    onMouseMove={updateRowResizeCursor}
-    onMouseOut={dismissTableToolbar}
-    onClick={openWikiLink}
+    aria-readonly={readOnly}
+    onPointerDown={readOnly ? undefined : startRowResize}
+    onContextMenu={readOnly ? undefined : showContextMenu}
+    onMouseOver={readOnly ? undefined : updateTableHover}
+    onMouseMove={readOnly ? undefined : updateRowResizeCursor}
+    onMouseOut={readOnly ? undefined : dismissTableToolbar}
+    onClick={readOnly ? undefined : openWikiLink}
   >
     {contextMenu && <MarkdownContextMenu {...contextMenu} noteActions={noteActions} onNoteAction={action => { setContextMenu(null); onNoteAction(action) }} onAction={applyAction} onDismiss={() => setContextMenu(null)} />}
     {!tableContextMenu && hoverTable && <MarkdownTableMenu
