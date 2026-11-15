@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState, type FormEvent, type PointerEvent as ReactPointerEvent, type SyntheticEvent } from 'react'
-import { Bell, Bold, Brain, CalendarDays, Check, ChevronDown, ChevronRight, Clock3, Code2, Flame, ImagePlus, Italic, Layers, Pause, Pencil, Play, Plus, Search, Shuffle, Sparkles, Trash2, X } from 'lucide-react'
+import { Bell, Bold, Brain, CalendarDays, Check, ChevronDown, ChevronRight, Clock3, Code2, Flame, ImagePlus, Italic, Layers, Pause, Pencil, Play, Plus, RotateCcw, Search, Shuffle, Sparkles, Trash2, X } from 'lucide-react'
 import katex from 'katex'
 import 'katex/dist/katex.min.css'
 import { FLASHCARD_STUDY_MODES, type Flashcard, type FlashcardImageOcclusion, type FlashcardKind, type FlashcardStudyMode, type FlashcardTemplate, type FlashcardTrashEntry, type Note, type NoteAttachment } from './types'
@@ -1235,7 +1235,25 @@ export function FlashcardsPage({ cards, notes, attachments = [], trash = [], aiT
           <span className="flashcard-pagination-range">{visibleCards.length ? `${firstVisibleCard + 1}–${lastVisibleCard} z ${visibleCards.length} fiszek` : 'Brak fiszek'}</span>
           <div className="flashcard-pagination-controls"><button type="button" className="button secondary" disabled={currentCardsPage <= 1} onClick={() => setCardsPage(currentCardsPage - 1)}>Poprzednia</button><span>Strona {currentCardsPage} z {pageCount}</span><button type="button" className="button secondary" disabled={currentCardsPage >= pageCount} onClick={() => setCardsPage(currentCardsPage + 1)}>Następna</button></div>
         </nav>
-      </> : <section className="flashcard-trash-list" aria-label="Kosz fiszek">{trash.map(entry => <article key={entry.id}><div><strong>{entry.card.question}</strong><small>Usunięto {new Intl.DateTimeFormat('pl-PL', { dateStyle: 'medium' }).format(entry.deletedAt)}</small><RichCardContent value={entry.card.answer} /></div><button type="button" className="button secondary" onClick={() => onRestoreTrash?.(entry.id)}>Przywróć</button><button type="button" className="icon-button danger-icon" aria-label="Usuń trwale" onClick={() => onPurgeTrash?.(entry.id)}><Trash2 size={15} /></button></article>)}{!trash.length && <p>Kosz jest pusty.</p>}</section>}
+      </> : <section className="flashcard-page-panel flashcard-trash-panel" aria-label="Kosz fiszek">
+        <header className="flashcard-panel-heading flashcard-trash-heading">
+          <div><h2>Kosz fiszek</h2><p>Przywróć fiszkę albo usuń ją trwale. Elementy w koszu: {trash.length}.</p></div>
+          <span className="flashcard-trash-count"><Trash2 size={14} />{trash.length}</span>
+        </header>
+        {trash.length ? <div className="flashcard-trash-list">{trash.map(entry => {
+          const note = cardNote(entry.card)
+          const studyModeLabel = FLASHCARD_STUDY_MODES.find(mode => mode.value === (entry.card.studyMode ?? 'flip'))?.label ?? 'Pokaż odpowiedź'
+          return <article key={entry.id}>
+            <div className="flashcard-trash-main">
+              <div className="flashcard-trash-meta"><time dateTime={new Date(entry.deletedAt).toISOString()}>Usunięto {new Intl.DateTimeFormat('pl-PL', { dateStyle: 'medium', timeStyle: 'short' }).format(entry.deletedAt)}</time><span>{studyModeLabel}</span></div>
+              <strong>{entry.card.question}</strong>
+              {note ? <small className="flashcard-trash-note">{notePath(note)}</small> : <small className="flashcard-trash-note">Brak notatki źródłowej</small>}
+              {entry.card.answer && <RichCardContent className="flashcard-trash-answer" value={entry.card.answer} />}
+            </div>
+            <div className="flashcard-trash-actions"><button type="button" className="button secondary" onClick={() => onRestoreTrash?.(entry.id)}><RotateCcw size={14} />Przywróć</button><button type="button" className="button secondary flashcard-trash-delete" onClick={() => onPurgeTrash?.(entry.id)}><Trash2 size={14} />Usuń trwale</button></div>
+          </article>
+        })}</div> : <div className="flashcard-trash-empty"><span><Trash2 size={18} /></span><strong>Kosz jest pusty</strong><p>Usunięte fiszki pojawią się tutaj.</p></div>}
+      </section>}
     </section>
   )
 }

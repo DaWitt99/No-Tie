@@ -2186,3 +2186,41 @@
 @media (max-width: 700px) {
   .flashcard-create-deck-footer > .button { min-height: 44px; }
 }
+
+.flashcard-trash-panel {
+  width: min(900px, 100%);
+  min-height: 0;
+  flex: 1 1 auto;
+  align-self: center;
+  gap: 12px;
+  margin: 0;
+  padding: 15px;
+}
+.flashcard-trash-heading { flex: 0 0 auto; }
+.flashcard-trash-heading h2 { margin: 0; color: #344058; font-size: 14px; }
+.flashcard-trash-count { display: flex; min-height: 30px; flex: 0 0 auto; align-items: center; gap: 6px; border: 1px solid #e7eaf2; border-radius: 8px; padding: 0 9px; color: #758097; background: #f8f9fc; font-size: 10px; font-variant-numeric: tabular-nums; }
+.flashcard-trash-list { display: grid; min-height: 0; flex: 1 1 auto; align-content: start; gap: 9px; overflow: auto; padding: 1px 2px 2px 0; }
+.flashcard-trash-list > article { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: center; gap: 14px; border: 1px solid #e8ebf2; border-radius: 11px; padding: 13px; background: #fff; box-shadow: 0 2px 8px #18233a06; }
+.flashcard-trash-main { display: grid; min-width: 0; gap: 7px; }
+.flashcard-trash-meta { display: flex; min-width: 0; align-items: center; flex-wrap: wrap; gap: 7px; }
+.flashcard-trash-meta time { color: #9099aa; font-size: 9px; }
+.flashcard-trash-meta > span { border-radius: 6px; padding: 3px 6px; color: #6273bf; background: #f2f4ff; font-size: 9px; }
+.flashcard-trash-list strong { color: #35415a; font-size: 12px; line-height: 1.45; overflow-wrap: anywhere; }
+.flashcard-trash-note { color: #77839a; font-size: 9px; line-height: 1.45; overflow-wrap: anywhere; }
+.flashcard-trash-answer { max-height: 110px; overflow: auto; border: 1px solid #edf0f5; border-radius: 8px; padding: 8px 10px; color: #5e6a80; background: #fafbfe; font-size: 10px; line-height: 1.5; }
+.flashcard-trash-actions { display: flex; flex: 0 0 auto; flex-direction: column; align-items: stretch; gap: 6px; }
+.flashcard-trash-actions > .button { min-height: 34px; justify-content: center; padding-inline: 10px; font-size: 10px; white-space: nowrap; }
+.flashcard-trash-actions .flashcard-trash-delete { border-color: #f0dfe1; color: #ad535b; background: #fffafa; }
+.flashcard-trash-actions .flashcard-trash-delete:hover { border-color: #e8c6ca; color: #963f48; background: #fff1f2; }
+.flashcard-trash-empty { display: grid; min-height: 200px; flex: 1; align-content: center; justify-items: center; gap: 7px; color: #8a95a8; text-align: center; }
+.flashcard-trash-empty > span { display: grid; width: 42px; height: 42px; place-items: center; border: 1px solid #e7eaf2; border-radius: 12px; color: #8994aa; background: #f7f8fb; }
+.flashcard-trash-empty > strong { color: #46516a; font-size: 12px; }
+.flashcard-trash-empty > p { margin: 0; color: #8993a5; font-size: 10px; }
+@media (max-width: 700px) {
+  .flashcard-trash-panel { padding: 12px; }
+  .flashcard-trash-list > article { grid-template-columns: minmax(0, 1fr); gap: 10px; padding: 11px; }
+  .flashcard-trash-actions { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .flashcard-trash-actions > .button { min-height: 44px; gap: 5px; padding-inline: 6px; font-size: 11px; }
+  .flashcard-trash-answer { max-height: 90px; }
+}
+.flashcard-trash-panel { display: flex; flex-direction: column; }
