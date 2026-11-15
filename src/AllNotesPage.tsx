@@ -1,4 +1,5 @@
 import { useMemo, useState } from 'react'
+import type { CSSProperties } from 'react'
 import { BookOpen, CalendarDays, Clock3, FileText, Folder, Paperclip, RotateCcw, Search, SlidersHorizontal, Star, Tag } from 'lucide-react'
 import type { Note, NoteAttachment } from './types'
 import { searchNotes } from './noteSearch'
@@ -20,6 +21,7 @@ const sortLabels: Record<SortMode, string> = {
 const collator = new Intl.Collator('pl', { sensitivity: 'base', numeric: true })
 const dateLabel = new Intl.DateTimeFormat('pl-PL', { dateStyle: 'medium' })
 const noteCountLabel = (count: number) => count === 1 ? 'notatka' : count % 10 >= 2 && count % 10 <= 4 && (count % 100 < 12 || count % 100 > 14) ? 'notatki' : 'notatek'
+const entryColorStyle = (color?: string): CSSProperties | undefined => color ? { '--entry-color': color } as CSSProperties : undefined
 
 function notePreview(content: string) {
   return content
@@ -30,7 +32,7 @@ function notePreview(content: string) {
     .trim()
 }
 
-export function AllNotesPage({ notes, attachments, searchAttachments = attachments, advancedSearch = true, preset = 'all', initialFolder = '', onFolderChange, onOpen }: {
+export function AllNotesPage({ notes, attachments, searchAttachments = attachments, advancedSearch = true, preset = 'all', initialFolder = '', onFolderChange, getNoteColor, onOpen }: {
   notes: Note[]
   attachments: NoteAttachment[]
   searchAttachments?: NoteAttachment[]
@@ -38,6 +40,7 @@ export function AllNotesPage({ notes, attachments, searchAttachments = attachmen
   preset?: AllNotesPreset
   initialFolder?: string
   onFolderChange?: (folder: string) => void
+  getNoteColor: (note: Note) => string | undefined
   onOpen: (noteId: string) => void
 }) {
   const [query, setQuery] = useState('')
@@ -128,7 +131,8 @@ export function AllNotesPage({ notes, attachments, searchAttachments = attachmen
     {filteredNotes.length ? <div className="all-notes-grid">{filteredNotes.map(note => {
       const preview = notePreview(note.content)
       const attachmentCount = attachmentCounts.get(note.id) ?? 0
-      return <button type="button" className="all-notes-card" key={note.id} onClick={() => onOpen(note.id)}>
+      const color = getNoteColor(note)
+      return <button type="button" className={`all-notes-card ${color ? 'has-entry-color' : ''}`} style={entryColorStyle(color)} key={note.id} onClick={() => onOpen(note.id)}>
         <span className="all-notes-card-top"><span className="all-notes-card-folder"><Folder size={13} />{note.folder || 'Poziom główny'}</span>{note.favorite && <Star className="all-notes-card-star" size={15} fill="currentColor" aria-label="Ulubiona notatka" />}</span>
         <strong className="all-notes-card-title">{note.title || 'Bez tytułu'}</strong>
         <span className="all-notes-card-preview">{preview || 'Ta notatka nie ma jeszcze treści.'}</span>

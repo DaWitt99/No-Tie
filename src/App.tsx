@@ -13,7 +13,7 @@ import { NoteSearchDialog } from './NoteSearchDialog'
 import { NoteConnections } from './NoteConnections'
 import { KnowledgeGraphDialog } from './KnowledgeGraphDialog'
 import { DailyNotesDialog } from './DailyNotesDialog'
-import { TaskManagerDialog } from './TaskManagerDialog'
+import { TaskManagerPage } from './TaskManagerDialog'
 import { SavedSearchDialog } from './SavedSearchDialog'
 import { TemplateManagerDialog } from './TemplateManagerDialog'
 import { NoteAttachmentsPanel } from './NoteAttachmentsPanel'
@@ -27,11 +27,11 @@ import { AllNotesPage, type AllNotesPreset } from './AllNotesPage'
 import { AiSelectionEditDialog } from './AiSelectionEditDialog'
 import { FeatureManagerDialog } from './FeatureManagerDialog'
 import { AppLockDialog } from './AppLockDialog'
-import { AttachmentManagerDialog } from './AttachmentManagerDialog'
+import { AttachmentManagerPage } from './AttachmentManagerDialog'
 import { DuplicateManagerDialog } from './DuplicateManagerDialog'
-import { NoteBoardDialog, type NoteWorkflowStatus } from './NoteBoardDialog'
+import { NoteBoardPage, type NoteWorkflowStatus } from './NoteBoardDialog'
 import { NoteReminderDialog } from './NoteReminderDialog'
-import { ProjectDashboardDialog } from './ProjectDashboardDialog'
+import { ProjectDashboardPage } from './ProjectDashboardDialog'
 import { AiNoteToolsDialog, type AiNoteTool } from './AiNoteToolsDialog'
 import { NotePropertiesEditor } from './NotePropertiesEditor'
 import { MarkdownSourceEditor } from './MarkdownSourceEditor'
@@ -80,6 +80,10 @@ const SAVED_SEARCHES_PAGE_ID = '__no_tie_saved_searches_page__'
 const NOTE_TEMPLATES_PAGE_ID = '__no_tie_note_templates_page__'
 const ALL_NOTES_PAGE_ID = '__no_tie_all_notes_page__'
 const FLASHCARDS_PAGE_ID = '__no_tie_flashcards_page__'
+const TASKS_PAGE_ID = '__no_tie_tasks_page__'
+const PROJECTS_PAGE_ID = '__no_tie_projects_page__'
+const ATTACHMENTS_PAGE_ID = '__no_tie_attachments_page__'
+const NOTE_BOARD_PAGE_ID = '__no_tie_note_board_page__'
 
 function folderParents(path: string): string[] {
   const parts = path.split('/').map(part => part.trim()).filter(Boolean)
@@ -314,7 +318,6 @@ function App() {
   const [savedSearches, setSavedSearches] = useState<SavedSearch[]>([])
   const [templates, setTemplates] = useState<NoteTemplate[]>(defaultTemplates)
   const [showDailyNotes, setShowDailyNotes] = useState(false)
-  const [showTaskManager, setShowTaskManager] = useState(false)
   const [showAiEdit, setShowAiEdit] = useState(false)
   const [aiNoteTool, setAiNoteTool] = useState<AiNoteTool | null>(null)
   const [aiNoteGeneratorMinimized, setAiNoteGeneratorMinimized] = useState(false)
@@ -322,9 +325,6 @@ function App() {
   const [selectedTextFlashcard, setSelectedTextFlashcard] = useState<{ noteId: string; text: string } | null>(null)
   const [showKnowledgeGraph, setShowKnowledgeGraph] = useState(false)
   const [showDuplicateManager, setShowDuplicateManager] = useState(false)
-  const [showAttachmentManager, setShowAttachmentManager] = useState(false)
-  const [showNoteBoard, setShowNoteBoard] = useState(false)
-  const [showProjectDashboard, setShowProjectDashboard] = useState(false)
   const [showNoteReminder, setShowNoteReminder] = useState(false)
   const [attachmentIndexing, setAttachmentIndexing] = useState('')
   const [showHelp, setShowHelp] = useState(false)
@@ -442,9 +442,7 @@ function App() {
     if (id === 'smartFolders' && !enabled && activeFilter.startsWith('smart:')) { setActiveFilter('all'); setQuery('') }
     if (!enabled) {
       if (id === 'duplicateManager') setShowDuplicateManager(false)
-      if (id === 'attachmentManager') setShowAttachmentManager(false)
-      if (id === 'noteBoard') setShowNoteBoard(false)
-      if (id === 'projectDashboard') setShowProjectDashboard(false)
+      if ((id === 'attachmentManager' && activeReviewSessionId === ATTACHMENTS_PAGE_ID) || (id === 'noteBoard' && activeReviewSessionId === NOTE_BOARD_PAGE_ID) || (id === 'projectDashboard' && activeReviewSessionId === PROJECTS_PAGE_ID)) setActiveReviewSessionId('')
       if (id === 'noteReminders') setShowNoteReminder(false)
       if (id === 'audioNotes' && attachments.find(attachment => attachment.id === previewAttachmentId)?.mimeType.startsWith('audio/')) setPreviewAttachmentId('')
       if ((id === 'aiSummaries' && aiNoteTool === 'summary') || (id === 'aiTaskExtraction' && aiNoteTool === 'tasks') || (id === 'aiFlashcards' && (aiNoteTool === 'flashcards' || aiNoteTool === 'quiz'))) setAiNoteTool(null)
@@ -680,7 +678,11 @@ function App() {
   const showingNoteTemplatesPage = activeReviewSessionId === NOTE_TEMPLATES_PAGE_ID
   const showingAllNotesPage = activeReviewSessionId === ALL_NOTES_PAGE_ID
   const showingFlashcardsPage = activeReviewSessionId === FLASHCARDS_PAGE_ID
-  const showingWorkspacePage = showingReviewSessionsOverview || showingSavedSearchesPage || showingNoteTemplatesPage || showingAllNotesPage || showingFlashcardsPage || showCreateNotePage || Boolean(activeReviewSession)
+  const showingTaskManagerPage = activeReviewSessionId === TASKS_PAGE_ID
+  const showingProjectDashboardPage = activeReviewSessionId === PROJECTS_PAGE_ID
+  const showingAttachmentManagerPage = activeReviewSessionId === ATTACHMENTS_PAGE_ID
+  const showingNoteBoardPage = activeReviewSessionId === NOTE_BOARD_PAGE_ID
+  const showingWorkspacePage = showingReviewSessionsOverview || showingSavedSearchesPage || showingNoteTemplatesPage || showingAllNotesPage || showingFlashcardsPage || showingTaskManagerPage || showingProjectDashboardPage || showingAttachmentManagerPage || showingNoteBoardPage || showCreateNotePage || Boolean(activeReviewSession)
   useLayoutEffect(() => { showingFlashcardsPageRef.current = showingFlashcardsPage }, [showingFlashcardsPage])
   const activeSmartFolder = featureFlags.smartFolders && activeFilter.startsWith('smart:') ? savedSearches.find(search => search.id === activeFilter.slice('smart:'.length)) : undefined
   const breadcrumbFolderPath = showingAllNotesPage
@@ -693,8 +695,8 @@ function App() {
   const breadcrumbFolders = breadcrumbFolderPath === '__root__'
     ? [{ path: '__root__', label: 'Poziom główny' }]
     : folderParents(breadcrumbFolderPath).map(path => ({ path, label: path.split('/').at(-1) ?? path }))
-  const showingToolsBreadcrumb = showingSavedSearchesPage || showingNoteTemplatesPage || showingReviewSessionsOverview || showingFlashcardsPage || Boolean(activeReviewSession)
-  const toolsBreadcrumbTitle = showingSavedSearchesPage ? 'Zapisane widoki' : showingNoteTemplatesPage ? 'Szablony' : showingReviewSessionsOverview ? 'Wszystkie powtórki' : showingFlashcardsPage ? 'Fiszki' : activeReviewSession?.title ?? ''
+  const showingToolsBreadcrumb = showingSavedSearchesPage || showingNoteTemplatesPage || showingReviewSessionsOverview || showingFlashcardsPage || showingTaskManagerPage || showingProjectDashboardPage || showingAttachmentManagerPage || showingNoteBoardPage || Boolean(activeReviewSession)
+  const toolsBreadcrumbTitle = showingSavedSearchesPage ? 'Zapisane widoki' : showingNoteTemplatesPage ? 'Szablony' : showingReviewSessionsOverview ? 'Wszystkie powtórki' : showingFlashcardsPage ? 'Fiszki' : showingTaskManagerPage ? 'Zadania' : showingProjectDashboardPage ? 'Pulpit projektów' : showingAttachmentManagerPage ? 'Załączniki' : showingNoteBoardPage ? 'Statusy notatek' : activeReviewSession?.title ?? ''
   const notesRef = useRef<Note[]>([])
   const backupSnapshotRef = useRef({ notes, assets, attachments, reviewSessions, savedSearches, templates, folderColors, flashcards, flashcardTrash, trashEntries })
   useLayoutEffect(() => {
@@ -973,11 +975,13 @@ function App() {
   }
 
   function selectNote(id: string) {
+    setShowCreateNotePage(false)
     setEditorSelection({ noteId: id, mode: editorMode, text: '' })
     setSelectedId(id)
   }
 
   function openAllNotesFolder(folder: string) {
+    setShowCreateNotePage(false)
     setActiveReviewSessionId(ALL_NOTES_PAGE_ID)
     setAllNotesPreset('all')
     setAllNotesFolderPreset(folder)
@@ -2515,7 +2519,10 @@ function App() {
 
   return (
     <main className={`app-shell ${mobileDrawer !== 'none' ? 'drawer-open' : ''} ${showChat ? 'with-ollama-chat' : ''} ${showLibrary ? '' : 'library-hidden'} ${showMainSidebar ? '' : 'sidebar-hidden'}`}>
-      <aside className={`sidebar ${mobileDrawer === 'sidebar' ? 'mobile-visible' : ''}`}>
+      <aside className={`sidebar ${mobileDrawer === 'sidebar' ? 'mobile-visible' : ''}`} onClickCapture={event => {
+        const target = event.target
+        if (target instanceof Element && target.closest('.nav-item, .folder-file-item')) setShowCreateNotePage(false)
+      }}>
         <div className="sidebar-content">
           <div className="brand-row"><div className="brand-mark">N</div><span>No-Tie</span><button className="mobile-close icon-button" onClick={() => setMobileDrawer('none')} aria-label="Zamknij menu"><X size={18} /></button></div>
           <button className="new-note-button" onClick={openCreateNote}><Plus size={17} /><span>Nowa notatka</span><kbd>N</kbd></button>
@@ -2528,14 +2535,14 @@ function App() {
           <div className="sidebar-section workspace-tools">
             <div className="section-heading"><span className="section-label">NARZĘDZIA</span></div>
             <button className={`nav-item ${showingFlashcardsPage ? 'active' : ''}`} onClick={() => { setActiveReviewSessionId(FLASHCARDS_PAGE_ID); setActiveFilter('all'); setMobileDrawer('none') }}><Brain size={16} /><span>Fiszki</span><span className="nav-count">{flashcards.filter(card => !card.suspended && card.dueAt <= Date.now()).length}</span></button>
-            <button className="nav-item" onClick={() => setShowTaskManager(true)}><CheckSquare2 size={16} /><span>Zadania</span><span className="nav-count">{parsedTasks.filter(task => !task.done).length}</span></button>
+            <button className={`nav-item ${showingTaskManagerPage ? 'active' : ''}`} onClick={() => { setActiveReviewSessionId(TASKS_PAGE_ID); setMobileDrawer('none') }}><CheckSquare2 size={16} /><span>Zadania</span><span className="nav-count">{parsedTasks.filter(task => !task.done).length}</span></button>
             <button className="nav-item" onClick={() => setShowDailyNotes(true)}><CalendarDays size={16} /><span>Notatki dzienne</span></button>
             <button className={`nav-item ${showingReviewSessionsOverview || activeReviewSession ? 'active' : ''}`} onClick={() => { setActiveReviewSessionId(REVIEW_SESSIONS_OVERVIEW_ID); setMobileDrawer('none') }}><Repeat2 size={16} /><span>Powtórki</span><span className="nav-count">{reviewSessions.length}</span></button>
             <button className={`nav-item ${showingSavedSearchesPage ? 'active' : ''}`} onClick={() => { setActiveReviewSessionId(SAVED_SEARCHES_PAGE_ID); setMobileDrawer('none') }}><BookmarkPlus size={16} /><span>Zapisane widoki</span><span className="nav-count">{savedSearches.length}</span></button>
             <button className={`nav-item ${showingNoteTemplatesPage ? 'active' : ''}`} onClick={() => { setActiveReviewSessionId(NOTE_TEMPLATES_PAGE_ID); setMobileDrawer('none') }}><FilePlus2 size={16} /><span>Szablony</span><span className="nav-count">{templates.length}</span></button>
-            {featureFlags.attachmentManager && <button className="nav-item" onClick={() => setShowAttachmentManager(true)}><Paperclip size={16} /><span>Załączniki</span><span className="nav-count">{attachments.filter(attachment => featureFlags.audioNotes || !attachment.mimeType.startsWith('audio/')).length}</span></button>}
-            {featureFlags.noteBoard && <button className="nav-item" onClick={() => setShowNoteBoard(true)}><Columns3 size={16} /><span>Statusy notatek</span></button>}
-            {featureFlags.projectDashboard && <button className="nav-item" onClick={() => setShowProjectDashboard(true)}><BarChart3 size={16} /><span>Pulpit projektów</span></button>}
+            {featureFlags.attachmentManager && <button className={`nav-item ${showingAttachmentManagerPage ? 'active' : ''}`} onClick={() => { setActiveReviewSessionId(ATTACHMENTS_PAGE_ID); setMobileDrawer('none') }}><Paperclip size={16} /><span>Załączniki</span><span className="nav-count">{attachments.filter(attachment => featureFlags.audioNotes || !attachment.mimeType.startsWith('audio/')).length}</span></button>}
+            {featureFlags.noteBoard && <button className={`nav-item ${showingNoteBoardPage ? 'active' : ''}`} onClick={() => { setActiveReviewSessionId(NOTE_BOARD_PAGE_ID); setMobileDrawer('none') }}><Columns3 size={16} /><span>Statusy notatek</span></button>}
+            {featureFlags.projectDashboard && <button className={`nav-item ${showingProjectDashboardPage ? 'active' : ''}`} onClick={() => { setActiveReviewSessionId(PROJECTS_PAGE_ID); setMobileDrawer('none') }}><BarChart3 size={16} /><span>Pulpit projektów</span></button>}
             <button className="nav-item" onClick={() => setShowKnowledgeGraph(true)}><Network size={16} /><span>Mapa powiązań</span></button>
             {featureFlags.duplicateManager && <button className="nav-item" onClick={() => setShowDuplicateManager(true)}><Copy size={16} /><span>Duplikaty</span></button>}
             <button className="nav-item" onClick={() => setShowBackupTrash(true)}><Archive size={16} /><span>Kopie i kosz</span><span className="nav-count">{trashEntries.length}</span></button>
@@ -2608,8 +2615,8 @@ function App() {
           </nav>
           <div className="topbar-actions">
             <span className={`save-indicator ${saved ? 'is-saved' : ''}`}><span className="save-dot" />{saved ? 'Zapisano' : 'Zapisywanie…'}</span>
-            {selectedNote && featureFlags.noteReminders && <button type="button" className="icon-button note-history-button" onClick={() => setShowNoteReminder(true)} title="Ustaw przypomnienie o notatce" aria-label="Ustaw przypomnienie o notatce"><Bell size={16} /></button>}
-            {selectedNote && <button className="icon-button note-history-button" onClick={() => void openNoteHistory()} title="Historia wersji notatki" aria-label="Historia wersji notatki"><History size={17} /></button>}
+            {!showingWorkspacePage && selectedNote && featureFlags.noteReminders && <button type="button" className="icon-button note-history-button" onClick={() => setShowNoteReminder(true)} title="Ustaw przypomnienie o notatce" aria-label="Ustaw przypomnienie o notatce"><Bell size={16} /></button>}
+            {!showingWorkspacePage && selectedNote && <button className="icon-button note-history-button" onClick={() => void openNoteHistory()} title="Historia wersji notatki" aria-label="Historia wersji notatki"><History size={17} /></button>}
             <details className="topbar-dropdown topbar-dropdown-right" onBlur={event => { if (!event.currentTarget.contains(event.relatedTarget as Node | null)) event.currentTarget.removeAttribute('open') }}>
               <summary className={`topbar-dropdown-trigger ollama-menu-trigger ${showChat ? 'active' : ''}`} aria-label="Menu Ollama" title="Ollama"><MessageCircle size={16} /><span className="topbar-dropdown-label">Ollama</span><ChevronDown size={13} /></summary>
               <div className="topbar-dropdown-menu" role="group" aria-label="Ollama i operacje na paczce">
@@ -2634,11 +2641,19 @@ function App() {
             onClose={() => setActiveReviewSessionId('')}
           />
         ) : showingNoteTemplatesPage ? (
-          <TemplateManagerDialog templates={templates} onSave={setTemplates} onClose={() => setActiveReviewSessionId('')} />
+          <TemplateManagerDialog templates={templates} notes={notes} assets={assets} onSave={setTemplates} onClose={() => setActiveReviewSessionId('')} />
+        ) : showingTaskManagerPage ? (
+          <TaskManagerPage notes={notes} tasks={parsedTasks} onUpdate={updateTask} onOpenNote={openLinkedNote} onCreate={createTask} onClose={() => setActiveReviewSessionId('')} />
+        ) : showingProjectDashboardPage ? (
+          <ProjectDashboardPage notes={notes} tasks={parsedTasks} onOpenNote={openLinkedNote} onClose={() => setActiveReviewSessionId('')} />
+        ) : showingAttachmentManagerPage ? (
+          <AttachmentManagerPage notes={notes} attachments={attachments.filter(attachment => featureFlags.audioNotes || !attachment.mimeType.startsWith('audio/')).map(attachment => featureFlags.attachmentIndex ? attachment : { ...attachment, extractedText: undefined })} indexing={attachmentIndexing} onOpenNote={openLinkedNote} onPreview={attachment => setPreviewAttachmentId(attachment.id)} onDelete={attachment => void deleteAttachment(attachment)} onIndex={featureFlags.attachmentIndex ? attachment => void indexAttachment(attachment) : undefined} onClose={() => setActiveReviewSessionId('')} />
+        ) : showingNoteBoardPage ? (
+          <NoteBoardPage notes={notes} onSetStatus={setNoteWorkflowStatus} onOpen={openLinkedNote} onClose={() => setActiveReviewSessionId('')} />
         ) : showCreateNotePage ? (
           <CreateNotePage templates={templates} folders={folders} initialFolder={createNoteInitialFolder} notes={notes} assets={assets} onCreate={(template, folder) => createNote(template, folder)} onClose={() => setShowCreateNotePage(false)} />
         ) : showingAllNotesPage ? (
-          <AllNotesPage key={`${allNotesPreset}:${allNotesPresetRevision}`} preset={allNotesPreset} initialFolder={allNotesFolderPreset} onFolderChange={setAllNotesFolderPreset} notes={notes} attachments={attachments} searchAttachments={attachments.filter(attachment => featureFlags.audioNotes || !attachment.mimeType.startsWith('audio/')).map(attachment => featureFlags.attachmentIndex ? attachment : { ...attachment, extractedText: undefined })} advancedSearch={featureFlags.advancedQuery} onOpen={openLinkedNote} />
+          <AllNotesPage key={`${allNotesPreset}:${allNotesPresetRevision}`} preset={allNotesPreset} initialFolder={allNotesFolderPreset} onFolderChange={setAllNotesFolderPreset} notes={notes} attachments={attachments} searchAttachments={attachments.filter(attachment => featureFlags.audioNotes || !attachment.mimeType.startsWith('audio/')).map(attachment => featureFlags.attachmentIndex ? attachment : { ...attachment, extractedText: undefined })} advancedSearch={featureFlags.advancedQuery} getNoteColor={noteDisplayColor} onOpen={openLinkedNote} />
         ) : showingFlashcardsPage ? (
           <Suspense fallback={<div className="editor-loading">Otwieram fiszki…</div>}><FlashcardsPage cards={flashcards} notes={notes} attachments={attachments} trash={flashcardTrash} aiTaskNotices={flashcardAiTasks} onBeginAiTask={beginFlashcardAiTask} onFinishAiTask={finishFlashcardAiTask} onCreate={createFlashcard} onUpdate={updateFlashcard} onReview={rateFlashcard} onSetDueAt={setFlashcardDueAt} onToggleSuspend={toggleFlashcardSuspended} onDelete={trashFlashcard} onRestoreTrash={restoreFlashcardTrash} onPurgeTrash={id => setFlashcardTrash(current => current.filter(entry => entry.id !== id))} onRegenerate={regenerateFlashcard} onFindSimilar={findSimilarFlashcards} onAiAssist={assistFlashcards} onOpenNote={noteId => { setActiveReviewSessionId(''); openLinkedNote(noteId) }} /></Suspense>
         ) : showingReviewSessionsOverview ? (
@@ -2708,7 +2723,6 @@ function App() {
       {colorTarget && <div className="modal-backdrop" role="presentation" onMouseDown={event => { if (event.target === event.currentTarget) setColorTarget(null) }}><section className="folder-dialog entry-color-dialog" role="dialog" aria-modal="true" aria-labelledby="entry-color-title"><div className="folder-dialog-mark"><Palette size={19} /></div><h2 id="entry-color-title">Ustaw kolor</h2><p>{colorTarget.kind === 'folder' ? <>Kolor folderu <strong>„{colorTarget.path.split('/').at(-1)}”</strong> będzie widoczny po lewej i na kartach jego notatek w bibliotece.</> : <>Kolor pliku <strong>„{notes.find(note => note.id === colorTarget.id)?.title ?? 'notatka'}”</strong> będzie widoczny po lewej i w bibliotece.</>}</p><div className="entry-color-grid">{entryColors.map(color => <button key={color.value} className="entry-color-option" type="button" aria-label={`Ustaw kolor: ${color.label}`} aria-pressed={(colorTarget.kind === 'note' ? notes.find(note => note.id === colorTarget.id)?.color : folderColors[colorTarget.path]) === color.value} onClick={() => applyEntryColor(color.value)}><span className="entry-color-swatch" style={{ backgroundColor: color.value }} /><span>{color.label}</span></button>)}</div><div className="folder-dialog-actions"><button className="button secondary" onClick={() => applyEntryColor(undefined)}>Domyślny / kolor folderu</button><button className="button secondary" onClick={() => setColorTarget(null)}>Zamknij</button></div></section></div>}
       {showOllamaSettings && <div className="modal-backdrop" role="presentation" onMouseDown={event => { if (event.target === event.currentTarget) setShowOllamaSettings(false) }}><section className="folder-dialog ollama-settings-dialog" role="dialog" aria-modal="true" aria-labelledby="ollama-settings-title"><div className="folder-dialog-mark"><MessageCircle size={19} /></div><h2 id="ollama-settings-title">Lokalny model Ollama</h2><p>Podłącz uruchomiony serwer Ollama. Domyślny adres lokalny to <code>http://localhost:11434</code>.</p><form onSubmit={event => { event.preventDefault(); saveOllamaSettings() }}><label htmlFor="ollama-base-url">Adres serwera</label><input id="ollama-base-url" autoFocus type="url" value={ollamaDraftUrl} onChange={event => { setOllamaDraftUrl(event.target.value); setOllamaModels([]); setOllamaSettingsMessage('') }} placeholder="http://localhost:11434" /><div className="ollama-model-label"><label htmlFor="ollama-model-name">Model</label><button type="button" className="link-button" onClick={() => void discoverOllamaModels()} disabled={checkingOllama}><span>{checkingOllama ? 'Łączenie…' : 'Pobierz listę modeli'}</span></button></div><input id="ollama-model-name" list="ollama-model-options" value={ollamaDraftModel} onChange={event => setOllamaDraftModel(event.target.value)} placeholder="np. llama3.2" /><datalist id="ollama-model-options">{ollamaModels.map(model => <option key={model.name} value={model.name} />)}</datalist>{featureFlags.semanticSearch && <><label htmlFor="ollama-embedding-model">Model embeddingów do wyszukiwania semantycznego</label><input id="ollama-embedding-model" list="ollama-model-options" value={embeddingDraftModel} onChange={event => setEmbeddingDraftModel(event.target.value)} placeholder="nomic-embed-text" /></>}{featureFlags.audioNotes && <><label htmlFor="audio-transcription-url">Lokalny serwer transkrypcji audio</label><input id="audio-transcription-url" type="url" value={transcriptionDraftUrl} onChange={event => setTranscriptionDraftUrl(event.target.value)} placeholder="http://localhost:8000/v1/audio/transcriptions" /><small className="ollama-settings-help">Wskaż pełny adres endpointu zgodnego z OpenAI Whisper API, np. serwera faster-whisper-server. Odpowiedź powinna zawierać `text`; znaczniki i identyfikatory mówców są opcjonalne. Ollama samo nie transkrybuje plików audio.</small></>}{ollamaSettingsMessage && <p className="ollama-settings-status" role="status">{ollamaSettingsMessage}</p>}{ollamaSettingsError && <p className="ollama-settings-error" role="alert">{ollamaSettingsError}</p>}<p className="ollama-settings-help">Modele pobierzesz poleceniem <code>ollama pull llama3.2</code>. Rozmowy są obsługiwane przez lokalny serwer.</p><div className="folder-dialog-actions"><button type="button" className="button secondary" onClick={() => setShowOllamaSettings(false)}>Anuluj</button><button type="submit" className="button primary">Zapisz ustawienia</button></div></form></section></div>}
       {showDailyNotes && <DailyNotesDialog notes={notes} onSelect={openDailyNote} onClose={() => setShowDailyNotes(false)} />}
-      {showTaskManager && <TaskManagerDialog notes={notes} tasks={parsedTasks} onUpdate={updateTask} onOpenNote={noteId => { setShowTaskManager(false); openLinkedNote(noteId) }} onCreate={createTask} onClose={() => setShowTaskManager(false)} />}
       {showBackupTrash && <BackupTrashDialog backups={autoBackups} trash={trashEntries} busy={backupBusy} onCreateBackup={() => void createAutomaticBackup(false)} onDownloadBackup={fileName => void downloadAutomaticBackup(fileName)} onRestoreBackup={fileName => void restoreAutomaticBackup(fileName)} onDeleteBackup={fileName => void removeAutomaticBackup(fileName)} onRestoreTrash={entryId => void restoreTrashEntry(entryId)} onDeleteTrash={entryId => void deleteTrashEntry(entryId)} onEmptyTrash={() => void emptyTrash()} onClose={() => setShowBackupTrash(false)} />}
       {showKnowledgeGraph && <KnowledgeGraphDialog notes={notes} onOpen={note => { setShowKnowledgeGraph(false); openLinkedNote(note.id) }} onClose={() => setShowKnowledgeGraph(false)} />}
       {showQuickSearch && <NoteSearchDialog
@@ -2744,10 +2758,7 @@ function App() {
       {showLockSetup && featureFlags.appLock && <AppLockDialog mode="setup" onSetPin={configureAppLockPin} onUnlock={async () => false} onClose={() => setShowLockSetup(false)} />}
       {appLocked && featureFlags.appLock && hasLockPin && <AppLockDialog mode="unlock" onSetPin={async () => {}} onUnlock={unlockApp} />}
       {showNoteReminder && selectedNote && featureFlags.noteReminders && <NoteReminderDialog note={selectedNote} onSave={value => setNoteReminder(selectedNote.id, value)} onClose={() => setShowNoteReminder(false)} />}
-      {showNoteBoard && featureFlags.noteBoard && <NoteBoardDialog notes={notes} onSetStatus={setNoteWorkflowStatus} onOpen={id => { setShowNoteBoard(false); openLinkedNote(id) }} onClose={() => setShowNoteBoard(false)} />}
-      {showProjectDashboard && featureFlags.projectDashboard && <ProjectDashboardDialog notes={notes} tasks={parsedTasks} onOpenNote={id => { setShowProjectDashboard(false); openLinkedNote(id) }} onClose={() => setShowProjectDashboard(false)} />}
       {showDuplicateManager && featureFlags.duplicateManager && <DuplicateManagerDialog notes={notes} onOpen={id => { setShowDuplicateManager(false); openLinkedNote(id) }} onMerge={(targetId, sourceId) => void mergeDuplicateNotes(targetId, sourceId)} onClose={() => setShowDuplicateManager(false)} />}
-      {showAttachmentManager && featureFlags.attachmentManager && <AttachmentManagerDialog notes={notes} attachments={attachments.filter(attachment => featureFlags.audioNotes || !attachment.mimeType.startsWith('audio/')).map(attachment => featureFlags.attachmentIndex ? attachment : { ...attachment, extractedText: undefined })} indexing={attachmentIndexing} onOpenNote={id => { setShowAttachmentManager(false); openLinkedNote(id) }} onPreview={attachment => setPreviewAttachmentId(attachment.id)} onDelete={attachment => void deleteAttachment(attachment)} onIndex={featureFlags.attachmentIndex ? attachment => void indexAttachment(attachment) : undefined} onClose={() => setShowAttachmentManager(false)} />}
       {!!flashcardAiTasks.length && <div className="flashcard-ai-task-notification-stack" style={{ top: `calc(env(safe-area-inset-top, 0px) + ${aiNoteGeneratorMinimized ? 154 : 122}px)`, maxHeight: `calc(100dvh - env(safe-area-inset-top, 0px) - ${aiNoteGeneratorMinimized ? 170 : 138}px)` }}>
         {flashcardAiTasks.map(task => {
           const duration = formatFlashcardAiDuration((task.finishedAt ?? reviewClockNow) - task.startedAt)

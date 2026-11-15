@@ -1,5 +1,5 @@
 import { useMemo, useState, type FormEvent } from 'react'
-import { Bell, CheckSquare2, Plus, X } from 'lucide-react'
+import { ArrowLeft, Bell, CheckSquare2, Plus } from 'lucide-react'
 import type { Note } from './types'
 import type { ParsedTask, TaskPatch, TaskRepeat, TaskStatus } from './knowledge'
 
@@ -7,7 +7,7 @@ type TaskPriority = ParsedTask['priority']
 const priorityRank: Record<TaskPriority, number> = { high: 0, normal: 1, low: 2 }
 const statusLabels: Record<TaskStatus, string> = { todo: 'Do zrobienia', doing: 'W toku', done: 'Zrobione' }
 
-export function TaskManagerDialog({ notes, tasks, onUpdate, onOpenNote, onCreate, onClose }: {
+export function TaskManagerPage({ notes, tasks, onUpdate, onOpenNote, onCreate, onClose }: {
   notes: Note[]; tasks: ParsedTask[]; onUpdate: (task: ParsedTask, patch: TaskPatch) => void; onOpenNote: (noteId: string) => void
   onCreate: (noteId: string, title: string, dueDate: string, priority: TaskPriority, repeat?: TaskRepeat, remindAt?: string, dependency?: string) => void; onClose: () => void
 }) {
@@ -37,14 +37,14 @@ export function TaskManagerDialog({ notes, tasks, onUpdate, onOpenNote, onCreate
   </article>
   const grouped = view === 'kanban' ? (['todo', 'doing', 'done'] as TaskStatus[]).map(status => ({ title: statusLabels[status], tasks: visibleTasks.filter(task => task.status === status) }))
     : view === 'timeline' ? [...new Set(visibleTasks.map(task => task.dueDate || 'Bez terminu'))].sort().map(day => ({ title: day, tasks: visibleTasks.filter(task => (task.dueDate || 'Bez terminu') === day) })) : []
-  return <div className="modal-backdrop task-backdrop" role="presentation" onMouseDown={event => { if (event.target === event.currentTarget) onClose() }}>
-    <section className={`task-manager-dialog task-view-${view}`} role="dialog" aria-modal="true" aria-labelledby="task-manager-title">
-      <header><span className="folder-dialog-mark"><CheckSquare2 size={19} /></span><div><h2 id="task-manager-title">Zadania</h2><p>{tasks.filter(task => !task.done).length} otwartych · {tasks.filter(task => task.done).length} ukończonych</p></div><button type="button" className="icon-button" aria-label="Zamknij zadania" onClick={onClose}><X size={17} /></button></header>
+  return <section className={`workspace-tool-page task-manager-page task-view-${view}`} aria-labelledby="task-manager-title">
+      <header className="workspace-tool-heading"><span className="workspace-tool-mark"><CheckSquare2 size={21} /></span><div><p className="eyebrow">NARZĘDZIA</p><h1 id="task-manager-title">Zadania</h1><p>{tasks.filter(task => !task.done).length} otwartych · {tasks.filter(task => task.done).length} ukończonych</p></div><button type="button" className="icon-button" aria-label="Wróć do notatek" title="Wróć do notatek" onClick={onClose}><ArrowLeft size={17} /></button></header>
+      <div className="workspace-tool-content task-manager-content">
       <form className="task-create-form task-create-advanced" onSubmit={submit}><input aria-label="Nazwa nowego zadania" value={draft} onChange={event => setDraft(event.target.value)} placeholder="Dodaj zadanie…" /><select aria-label="Notatka dla nowego zadania" value={noteId} onChange={event => setNoteId(event.target.value)}>{notes.map(note => <option key={note.id} value={note.id}>{note.title || 'Bez tytułu'}</option>)}</select><input type="date" aria-label="Termin zadania" value={dueDate} onChange={event => setDueDate(event.target.value)} /><select aria-label="Powtarzanie" value={repeat} onChange={event => setRepeat(event.target.value as TaskRepeat)}><option value="">Bez powtarzania</option><option value="daily">Codziennie</option><option value="weekly">Co tydzień</option><option value="monthly">Co miesiąc</option></select><input type="datetime-local" aria-label="Przypomnienie" value={remindAt} onChange={event => setRemindAt(event.target.value)} /><select aria-label="Zależność od zadania" value={dependency} onChange={event => setDependency(event.target.value)}><option value="">Bez zależności</option>{tasks.filter(task => !task.done).map(task => <option key={task.id} value={task.id}>{task.text}</option>)}</select><select aria-label="Priorytet nowego zadania" value={priority} onChange={event => setPriority(event.target.value as TaskPriority)}><option value="high">Wysoki</option><option value="normal">Zwykły</option><option value="low">Niski</option></select><button type="submit" className="button primary" disabled={!draft.trim() || !notes.length}><Plus size={15} />Dodaj</button></form>
       <div className="task-toolbar"><div className="task-view-switch" role="group" aria-label="Widok zadań">{(['list', 'kanban', 'timeline'] as const).map(mode => <button key={mode} type="button" className={view === mode ? 'active' : ''} onClick={() => setView(mode)}>{mode === 'list' ? 'Lista' : mode === 'kanban' ? 'Kanban' : 'Oś czasu'}</button>)}</div><label className="task-show-completed"><input type="checkbox" checked={showCompleted} onChange={event => setShowCompleted(event.target.checked)} />Pokaż ukończone</label><button type="button" className="button secondary" onClick={() => { if (!('Notification' in window)) return; void Notification.requestPermission() }}><Bell size={14} />Włącz przypomnienia</button></div>
       {view === 'list' ? <div className="task-list" aria-label="Lista zadań">{visibleTasks.map(renderTask)}</div> : <div className={`task-board task-board-${view}`}>{grouped.map(group => <section key={group.title}><h3>{group.title}<span>{group.tasks.length}</span></h3>{group.tasks.map(renderTask)}</section>)}</div>}
       {!visibleTasks.length && <div className="task-empty"><CheckSquare2 size={23} /><strong>{showCompleted ? 'Brak zadań' : 'Wszystkie zadania wykonane'}</strong><span>Dodaj zadanie powyżej albo użyj listy zadań w Markdown.</span></div>}
-      <footer>Zmiany pozostają w składni checklisty Markdown. Terminy, statusy, cykliczność i zależności zapisują się w komentarzu metadanych.</footer>
+      <footer className="task-page-footer">Zmiany pozostają w składni checklisty Markdown. Terminy, statusy, cykliczność i zależności zapisują się w komentarzu metadanych.</footer>
+      </div>
     </section>
-  </div>
 }
