@@ -13,6 +13,7 @@ import { shapeById, shapeCategories, shapeLibrary } from './shapeLibrary'
 type Tool = 'select' | 'rect' | 'roundRect' | 'ellipse' | 'line' | 'arrow' | 'polygon' | 'shape' | 'freehand' | 'text' | 'pen'
 type ArrowMode = 'end' | 'start' | 'both' | 'none'
 type Box = { x: number; y: number; width: number; height: number }
+type ViewBox = Box
 type Point = { x: number; y: number }
 type ResizeHandle = 'n' | 'ne' | 'e' | 'se' | 's' | 'sw' | 'w' | 'nw'
 type GeometryDraft = { x: string; y: string; width: string; height: string }
@@ -24,6 +25,8 @@ type Interaction =
   | { type: 'move'; ids: string[]; elements: SVGElement[]; others: Box[]; startX: number; startY: number; lastX: number; lastY: number; bounds: Box; moved: boolean }
   | { type: 'resize'; ids: string[]; targets: { element: SVGElement; source: SVGElement; box: Box }[]; startBounds: Box; handle: ResizeHandle; moved: boolean }
   | { type: 'pen-node'; element: SVGPathElement; index: number; handle: 'anchor' | 'incoming' | 'outgoing'; points: PenNode[]; moved: boolean }
+  | { type: 'guide'; index: number; axis: 'x' | 'y'; moved: boolean; created?: boolean }
+  | { type: 'pan'; startClientX: number; startClientY: number; viewBox: ViewBox }
   | { type: 'marquee'; x: number; y: number; additive: boolean; initialIds: string[]; moved: boolean }
 
 type OverlayOptions = {
@@ -39,12 +42,13 @@ type EditorComment = { id: string; x: number; y: number; text: string }
 type Checkpoint = { id: string; label: string; createdAt: number; content: string }
 type MiniObject = { id: string; box: Box; color: string }
 type EditorPanel = 'canvas' | 'style' | 'layers' | 'workflow'
-type EditorGuide = { axis: 'x' | 'y'; value: number }
+type DocumentUnit = 'px' | 'mm' | 'in'
+type EditorGuide = { axis: 'x' | 'y'; value: number; locked?: boolean }
 type EditorViewOptions = { grid: boolean; gridSize: number; snap: boolean; rulers: boolean; guides: EditorGuide[] }
 
 type TextEdit = { input: HTMLInputElement; x: number; y: number; element?: SVGElement; fontSize: number; keepTool: boolean }
 type Drawing = Svg
-type PenNode = Point & { incoming?: Point; outgoing?: Point }
+type PenNode = Point & { incoming?: Point; outgoing?: Point; mode?: 'smooth' | 'corner' | 'symmetric' }
 type ActivePen = { id: string; element: SVGPathElement; points: PenNode[] }
 
 const WIDTH = 800
@@ -52,6 +56,27 @@ const HEIGHT = 500
 const SNAP_DISTANCE = 4
 const OBJECT_TAGS = new Set(['g', 'rect', 'circle', 'ellipse', 'line', 'polygon', 'polyline', 'path', 'text', 'image', 'use'])
 const SVG_NS = 'http://www.w3.org/2000/svg'
+
+function readViewBox(stage: SVGSVGElement): ViewBox {
+  const values = (stage.getAttribute('viewBox') ?? `0 0 ${WIDTH} ${HEIGHT}`).split(/[ ,]+/).map(Number)
+  return values.length === 4 && values.every(Number.isFinite) && values[2] > 0 && values[3] > 0
+    ? { x: values[0], y: values[1], width: values[2], height: values[3] }
+    : { x: 0, y: 0, width: WIDTH, height: HEIGHT }
+}
+
+function colorContrastOnWhite(value: string): number | undefined {
+  const match = value.trim().match(/^#([\da-f]{3}|[\da-f]{6})$/i)
+  if (!match) return undefined
+  const hex = match[1].length === 3 ? match[1].split('').map(character => character + character).join('') : match[1]
+  const channels = [0, 2, 4].map(index => parseInt(hex.slice(index, index + 2), 16) / 255).map(channel => channel <= .04045 ? channel / 12.92 : ((channel + .055) / 1.055) ** 2.4)
+  const luminance = .2126 * channels[0] + .7152 * channels[1] + .0722 * channels[2]
+  return 1.05 / (luminance + .05)
+}
+
+function canConnectToPort(element: SVGElement | undefined, side: 'start' | 'end'): boolean {
+  const type = element?.getAttribute('data-connector-port') ?? 'free'
+  return type === 'free' || type === 'both' || (side === 'start' ? type === 'output' : type === 'input')
+}
 
 function shapeTransform(box: Box): string {
   return `translate(${rounded(box.x)} ${rounded(box.y)}) scale(${rounded(box.width / 100)} ${rounded(box.height / 100)})`
@@ -79,8 +104,8 @@ function penPath(points: PenNode[]): string {
     const start = points[index]
     const end = points[index + 1]
     const next = points[Math.min(points.length - 1, index + 2)]
-    const control1 = start.outgoing ?? { x: start.x + (end.x - previous.x) / 6, y: start.y + (end.y - previous.y) / 6 }
-    const control2 = end.incoming ?? { x: end.x - (next.x - start.x) / 6, y: end.y - (next.y - start.y) / 6 }
+    const control1 = start.mode === 'corner' ? start : start.outgoing ?? { x: start.x + (end.x - previous.x) / 6, y: start.y + (end.y - previous.y) / 6 }
+    const control2 = end.mode === 'corner' ? end : end.incoming ?? { x: end.x - (next.x - start.x) / 6, y: end.y - (next.y - start.y) / 6 }
     path += ` C ${rounded(control1.x)} ${rounded(control1.y)} ${rounded(control2.x)} ${rounded(control2.y)} ${rounded(end.x)} ${rounded(end.y)}`
   }
   return path
@@ -568,7 +593,7 @@ function setLineEndpoint(line: SVGLineElement, side: 'start' | 'end', point: { x
 }
 
 function updateConnectors(stage: SVGSVGElement) {
-  stage.querySelectorAll<SVGLineElement>('line[data-start-target], line[data-end-target], line[data-auto-route="true"]').forEach(line => {
+  stage.querySelectorAll<SVGLineElement>('line[data-start-target], line[data-end-target], line[data-auto-route="true"], line[data-connector-label]').forEach(line => {
     const startTarget = line.getAttribute('data-start-target')
     const startAnchor = line.getAttribute('data-start-anchor')
     const endTarget = line.getAttribute('data-end-target')
@@ -589,9 +614,12 @@ function updateConnectors(stage: SVGSVGElement) {
     if (end) setLineEndpoint(line, 'end', end)
     const lineId = line.getAttribute('data-object-id')
     const routeEnabled = line.getAttribute('data-auto-route') === 'true'
+    const routeStyle = line.getAttribute('data-route-style') ?? 'orthogonal'
+    const hasLabel = Boolean(line.getAttribute('data-connector-label')?.trim())
     const existingRoute = lineId ? stage.querySelector<SVGPathElement>(`[data-connector-visual-for="${CSS.escape(lineId)}"]`) : null
-    if (!routeEnabled || !lineId) {
+    if ((!routeEnabled && !hasLabel) || !lineId) {
       existingRoute?.remove()
+      if (lineId) stage.querySelector(`[data-connector-label-for="${CSS.escape(lineId)}"]`)?.remove()
       line.removeAttribute('stroke-opacity')
       return
     }
@@ -613,13 +641,26 @@ function updateConnectors(stage: SVGSVGElement) {
       return false
     })
     const score = (route: Point[]) => route.slice(1).reduce((value, point, index) => value + (blocked(route[index], point) ? 1000 : 0) + Math.hypot(point.x - route[index].x, point.y - route[index].y), 0)
-    const route = routes.sort((a, b) => score(a) - score(b))[0]
-    const pathData = route.map((point, index) => `${index ? 'L' : 'M'} ${rounded(point.x)} ${rounded(point.y)}`).join(' ')
+    const route = routeStyle === 'straight' ? [startPoint, endPoint] : routes.sort((a, b) => score(a) - score(b))[0]
+    let pathData = route.map((point, index) => `${index ? 'L' : 'M'} ${rounded(point.x)} ${rounded(point.y)}`).join(' ')
+    if (routeStyle === 'rounded' && route.length > 2) {
+      const parts = [`M ${rounded(route[0].x)} ${rounded(route[0].y)}`]
+      for (let index = 1; index < route.length - 1; index++) {
+        const previous = route[index - 1]; const corner = route[index]; const next = route[index + 1]
+        const radius = Math.min(12, Math.hypot(corner.x - previous.x, corner.y - previous.y) / 2, Math.hypot(next.x - corner.x, next.y - corner.y) / 2)
+        const before = { x: corner.x + (previous.x - corner.x) * radius / Math.max(radius, Math.hypot(previous.x - corner.x, previous.y - corner.y)), y: corner.y + (previous.y - corner.y) * radius / Math.max(radius, Math.hypot(previous.x - corner.x, previous.y - corner.y)) }
+        const after = { x: corner.x + (next.x - corner.x) * radius / Math.max(radius, Math.hypot(next.x - corner.x, next.y - corner.y)), y: corner.y + (next.y - corner.y) * radius / Math.max(radius, Math.hypot(next.x - corner.x, next.y - corner.y)) }
+        parts.push(`L ${rounded(before.x)} ${rounded(before.y)} Q ${rounded(corner.x)} ${rounded(corner.y)} ${rounded(after.x)} ${rounded(after.y)}`)
+      }
+      parts.push(`L ${rounded(route.at(-1)!.x)} ${rounded(route.at(-1)!.y)}`)
+      pathData = parts.join(' ')
+    }
     const visual = existingRoute ?? document.createElementNS(SVG_NS, 'path')
     visual.setAttribute('data-connector-visual-for', lineId)
+    visual.setAttribute('id', `connector-route-${lineId}`)
     visual.setAttribute('d', pathData)
     visual.setAttribute('fill', 'none')
-    visual.setAttribute('stroke', line.getAttribute('stroke') ?? '#596fd8')
+    visual.setAttribute('stroke', routeEnabled ? (line.getAttribute('stroke') ?? '#596fd8') : 'none')
     visual.setAttribute('stroke-width', line.getAttribute('stroke-width') ?? '3')
     visual.setAttribute('stroke-linecap', 'round')
     visual.setAttribute('stroke-linejoin', 'round')
@@ -629,7 +670,17 @@ function updateConnectors(stage: SVGSVGElement) {
       else visual.removeAttribute(`marker-${side}`)
     }
     if (!existingRoute) stage.append(visual)
-    line.setAttribute('stroke-opacity', '0')
+    if (routeEnabled) line.setAttribute('stroke-opacity', '0')
+    else line.removeAttribute('stroke-opacity')
+    if (hasLabel) {
+      const label = stage.querySelector<SVGTextElement>(`[data-connector-label-for="${CSS.escape(lineId)}"]`) ?? document.createElementNS(SVG_NS, 'text')
+      label.setAttribute('data-connector-label-for', lineId); label.setAttribute('data-object-id', `connector-label-${lineId}`)
+      label.setAttribute('fill', line.getAttribute('stroke') ?? '#39445e'); label.setAttribute('font-size', '13'); label.setAttribute('pointer-events', 'all')
+      let textPath = label.querySelector('textPath')
+      if (!textPath) { textPath = document.createElementNS(SVG_NS, 'textPath'); textPath.setAttribute('startOffset', '50%'); textPath.setAttribute('text-anchor', 'middle'); label.append(textPath) }
+      textPath.setAttribute('href', `#connector-route-${lineId}`); textPath.textContent = line.getAttribute('data-connector-label') ?? ''
+      if (!label.parentNode) stage.append(label)
+    }
   })
 }
 
@@ -729,6 +780,7 @@ function nearestGap(moving: Box, others: Box[], axis: 'x' | 'y') {
 function renderOverlay(stage: Drawing, ids: string[], options: OverlayOptions = {}) {
   stage.node.querySelectorAll('[data-editor-ui]').forEach(element => element.remove())
   const layer = stage.group().attr({ 'data-editor-ui': 'true', 'pointer-events': 'none' })
+  const viewport = readViewBox(stage.node)
   const grid = stage.node.getAttribute('data-editor-grid') === 'true'
   const gridSize = Math.max(4, Number(stage.node.getAttribute('data-editor-grid-size')) || 20)
   if (grid) {
@@ -748,21 +800,30 @@ function renderOverlay(stage: Drawing, ids: string[], options: OverlayOptions = 
     pattern.append(line)
     defs.append(pattern)
     layer.node.prepend(defs)
-    layer.rect(WIDTH, HEIGHT).fill(`url(#${patternId})`)
+    layer.rect(viewport.width, viewport.height).move(viewport.x, viewport.y).fill(`url(#${patternId})`)
   }
   const guides = (() => { try { return JSON.parse(stage.node.getAttribute('data-editor-guides') ?? '[]') as EditorGuide[] } catch { return [] } })()
-  guides.forEach(guide => {
-    if (guide.axis === 'x') layer.line(guide.value, 0, guide.value, HEIGHT).stroke({ color: '#e3518b', width: 1, dasharray: '5 4' })
-    else layer.line(0, guide.value, WIDTH, guide.value).stroke({ color: '#e3518b', width: 1, dasharray: '5 4' })
+  const selectedPenNodeValue = stage.node.getAttribute('data-selected-pen-node')
+  const selectedPenNode = selectedPenNodeValue === null ? -1 : Number(selectedPenNodeValue)
+  guides.forEach((guide, index) => {
+    const line = guide.axis === 'x'
+      ? layer.line(guide.value, viewport.y, guide.value, viewport.y + viewport.height)
+      : layer.line(viewport.x, guide.value, viewport.x + viewport.width, guide.value)
+    line.stroke({ color: '#e3518b', width: 1, dasharray: '5 4' }).attr({ 'data-editor-guide-index': `${index}`, 'pointer-events': guide.locked ? 'none' : 'stroke', cursor: guide.locked ? 'default' : (guide.axis === 'x' ? 'ew-resize' : 'ns-resize') })
   })
   if (stage.node.getAttribute('data-editor-rulers') === 'true') {
-    for (let x = 0; x <= WIDTH; x += 100) {
-      layer.line(x, 0, x, 9).stroke({ color: '#8992a6', width: 1 })
-      layer.text(`${x}`).font({ family: 'sans-serif', size: 8 }).fill('#737d93').move(x + 2, 2)
+    const step = Math.max(10, Math.pow(10, Math.floor(Math.log10(Math.max(viewport.width / 8, 1)))) / 2)
+    const firstX = Math.ceil(viewport.x / step) * step
+    const firstY = Math.ceil(viewport.y / step) * step
+    layer.rect(viewport.width, 15).move(viewport.x, viewport.y).fill('#f6f7fb').attr({ 'data-ruler-axis': 'y', 'pointer-events': 'all', cursor: 'crosshair' })
+    layer.rect(19, viewport.height).move(viewport.x, viewport.y).fill('#f6f7fb').attr({ 'data-ruler-axis': 'x', 'pointer-events': 'all', cursor: 'crosshair' })
+    for (let x = firstX; x <= viewport.x + viewport.width; x += step) {
+      layer.line(x, viewport.y, x, viewport.y + 9).stroke({ color: '#8992a6', width: 1 })
+      layer.text(`${rounded(x)}`).font({ family: 'sans-serif', size: 8 }).fill('#737d93').move(x + 2, viewport.y + 2)
     }
-    for (let y = 0; y <= HEIGHT; y += 100) {
-      layer.line(0, y, 9, y).stroke({ color: '#8992a6', width: 1 })
-      layer.text(`${y}`).font({ family: 'sans-serif', size: 8 }).fill('#737d93').move(2, y + 2)
+    for (let y = firstY; y <= viewport.y + viewport.height; y += step) {
+      layer.line(viewport.x, y, viewport.x + 9, y).stroke({ color: '#8992a6', width: 1 })
+      layer.text(`${rounded(y)}`).font({ family: 'sans-serif', size: 8 }).fill('#737d93').move(viewport.x + 2, y + 2)
     }
   }
   for (const element of directObjects(stage.node).filter(item => item.tagName.toLowerCase() === 'line')) {
@@ -804,7 +865,7 @@ function renderOverlay(stage: Drawing, ids: string[], options: OverlayOptions = 
           layer.circle(7).center(location.x, location.y).fill('#fff').stroke({ color: '#28a58b', width: 1.3 })
             .attr({ 'data-pen-handle': handle, 'data-pen-node-index': `${index}`, 'data-pen-object': element.getAttribute('data-object-id') ?? '', 'pointer-events': 'all', cursor: 'move' })
         }
-        layer.circle(10).center(point.x, point.y).fill('#fff').stroke({ color: '#5066d2', width: 1.7 })
+        layer.circle(10).center(point.x, point.y).fill(index === selectedPenNode ? '#d9f8ef' : '#fff').stroke({ color: index === selectedPenNode ? '#159879' : '#5066d2', width: 1.7 })
           .attr({ 'data-pen-node': `${index}`, 'data-pen-object': element.getAttribute('data-object-id') ?? '', 'pointer-events': 'all', cursor: 'move' })
       })
     }
@@ -835,8 +896,10 @@ function renderOverlay(stage: Drawing, ids: string[], options: OverlayOptions = 
     for (const name of anchorNames()) {
       const point = anchorPosition(element, name)
       if (!point) continue
-      layer.circle(8).center(point.x, point.y).fill('#ffffff').stroke({ color: '#6879db', width: 1.7 })
-        .attr({ 'data-anchor-target': id, 'data-anchor': name, 'pointer-events': 'all', cursor: 'crosshair' })
+      const port = element.getAttribute('data-connector-port') ?? 'free'
+      const color = port === 'input' ? '#2b9a83' : port === 'output' ? '#e76c75' : port === 'both' ? '#8a5bc2' : '#6879db'
+      layer.circle(8).center(point.x, point.y).fill('#ffffff').stroke({ color, width: 1.7 })
+        .attr({ 'data-anchor-target': id, 'data-anchor': name, 'data-port-type': port, 'pointer-events': 'all', cursor: 'crosshair', 'aria-label': `${port} port ${name}` })
     }
   }
   if (activeTool === 'select' && !stage.node.hasAttribute('data-connector-dragging')) {
@@ -864,8 +927,8 @@ function renderOverlay(stage: Drawing, ids: string[], options: OverlayOptions = 
     layer.rect(labelWidth, 23).radius(5).center(centerX, centerY).fill('#fff').stroke({ color: '#d8deef', width: 1 })
     layer.text(label).font({ family: 'sans-serif', size: 11, weight: 650 }).fill('#53618b').center(centerX, centerY)
   }
-  if (options.snapX !== undefined) layer.line(options.snapX, 0, options.snapX, HEIGHT).stroke({ color: '#e25b91', width: 1.5, dasharray: '5 5' })
-  if (options.snapY !== undefined) layer.line(0, options.snapY, WIDTH, options.snapY).stroke({ color: '#e25b91', width: 1.5, dasharray: '5 5' })
+  if (options.snapX !== undefined) layer.line(options.snapX, viewport.y, options.snapX, viewport.y + viewport.height).stroke({ color: '#e25b91', width: 1.5, dasharray: '5 5' })
+  if (options.snapY !== undefined) layer.line(viewport.x, options.snapY, viewport.x + viewport.width, options.snapY).stroke({ color: '#e25b91', width: 1.5, dasharray: '5 5' })
   if (options.movingBounds && options.otherBounds) {
     const horizontal = nearestGap(options.movingBounds, options.otherBounds, 'x')
     const vertical = nearestGap(options.movingBounds, options.otherBounds, 'y')
@@ -886,24 +949,25 @@ function findObjectTarget(stage: SVGSVGElement, target: EventTarget | null): SVG
   return undefined
 }
 
-function resizedBounds(start: Box, handle: ResizeHandle, point: { x: number; y: number }, keepSquare = false): Box {
-  if (keepSquare) {
+function resizedBounds(start: Box, handle: ResizeHandle, point: { x: number; y: number }, keepSquare = false, aspectRatio?: number): Box {
+  if (keepSquare || aspectRatio) {
+    const ratio = keepSquare ? 1 : Math.max(.1, aspectRatio ?? start.width / Math.max(start.height, .1))
     const centerX = start.x + start.width / 2
     const centerY = start.y + start.height / 2
-    if (handle.includes('w') || handle.includes('e')) {
-      if (handle.includes('n') || handle.includes('s')) {
-        const anchorX = handle.includes('w') ? start.x + start.width : start.x
-        const anchorY = handle.includes('n') ? start.y + start.height : start.y
-        const size = Math.max(.1, Math.max(Math.abs(point.x - anchorX), Math.abs(point.y - anchorY)))
-        const x = handle.includes('w') ? anchorX - size : anchorX
-        const y = handle.includes('n') ? anchorY - size : anchorY
-        return { x, y, width: size, height: size }
-      }
-      const size = Math.max(.1, handle.includes('w') ? start.x + start.width - point.x : point.x - start.x)
-      return { x: handle.includes('w') ? start.x + start.width - size : start.x, y: centerY - size / 2, width: size, height: size }
+    const hasX = handle.includes('w') || handle.includes('e')
+    const hasY = handle.includes('n') || handle.includes('s')
+    const anchorX = handle.includes('w') ? start.x + start.width : start.x
+    const anchorY = handle.includes('n') ? start.y + start.height : start.y
+    const rawWidth = hasX ? Math.abs(point.x - anchorX) : start.width
+    const rawHeight = hasY ? Math.abs(point.y - anchorY) : start.height
+    const width = Math.max(.1, hasX && hasY ? Math.max(rawWidth, rawHeight * ratio) : hasX ? rawWidth : rawHeight * ratio)
+    const height = width / ratio
+    return {
+      x: hasX ? (handle.includes('w') ? anchorX - width : anchorX) : centerX - width / 2,
+      y: hasY ? (handle.includes('n') ? anchorY - height : anchorY) : centerY - height / 2,
+      width,
+      height,
     }
-    const size = Math.max(.1, handle.includes('n') ? start.y + start.height - point.y : point.y - start.y)
-    return { x: centerX - size / 2, y: handle.includes('n') ? start.y + start.height - size : start.y, width: size, height: size }
   }
   let left = start.x
   let top = start.y
@@ -1026,6 +1090,9 @@ export function VectorEditor({
   const fontSizeRef = useRef(24)
   const polygonSidesRef = useRef(6)
   const arrowModeRef = useRef<ArrowMode>('end')
+  const viewBoxRef = useRef<ViewBox>({ x: 0, y: 0, width: WIDTH, height: HEIGHT })
+  const documentSizeRef = useRef({ width: WIDTH, height: HEIGHT })
+  const spacePanRef = useRef(false)
   const viewOptionsRef = useRef<EditorViewOptions>({ grid: false, gridSize: 20, snap: false, rulers: false, guides: [] })
   const autoRouteRef = useRef(false)
   const eyedropperRef = useRef(false)
@@ -1069,13 +1136,49 @@ export function VectorEditor({
   const [checkpoints, setCheckpoints] = useState<Checkpoint[]>([])
   const [miniObjects, setMiniObjects] = useState<MiniObject[]>([])
   const [exportSize, setExportSize] = useState({ width: 800, height: 500 })
-  const [exportFormat, setExportFormat] = useState<'svg' | 'png'>('svg')
+  const [exportFormat, setExportFormat] = useState<'svg' | 'png' | 'sprite'>('svg')
   const [exportTransparent, setExportTransparent] = useState(true)
   const [vectorizeDetail, setVectorizeDetail] = useState(32)
   const [artboardPreset, setArtboardPreset] = useState('360x220')
   const [workflowMessage, setWorkflowMessage] = useState('')
   const [showMinimap, setShowMinimap] = useState(true)
+  const [viewBox, setViewBox] = useState<ViewBox>(viewBoxRef.current)
+  const [documentSize, setDocumentSize] = useState({ width: WIDTH, height: HEIGHT })
+  const [documentUnit, setDocumentUnit] = useState<DocumentUnit>('px')
+  const [lockDocumentRatio, setLockDocumentRatio] = useState(true)
+  const documentRatio = useRef(WIDTH / HEIGHT)
+  const shortcutKeyRef = useRef('p')
+  const [guideLockAll, setGuideLockAll] = useState(false)
+  const [selectedPenNodeIndex, setSelectedPenNodeIndex] = useState<number | null>(null)
+  const [penNodeMode, setPenNodeMode] = useState<'smooth' | 'corner' | 'symmetric'>('smooth')
+  const [gradientKind, setGradientKind] = useState<'linear' | 'radial'>('linear')
+  const [gradientAngle, setGradientAngle] = useState(45)
+  const [gradientMiddle, setGradientMiddle] = useState('#9daaf5')
+  const [connectorStyle, setConnectorStyle] = useState<'straight' | 'orthogonal' | 'rounded'>('orthogonal')
+  const [connectorLabel, setConnectorLabel] = useState('')
+  const [connectorPortType, setConnectorPortType] = useState<'free' | 'input' | 'output' | 'both'>('free')
+  const [groupConstraint, setGroupConstraint] = useState<'free' | 'aspect'>('free')
+  const [commandPaletteOpen, setCommandPaletteOpen] = useState(false)
+  const [commandQuery, setCommandQuery] = useState('')
+  const [accessibilityReport, setAccessibilityReport] = useState<string[]>([])
+  const [optimizationEnabled, setOptimizationEnabled] = useState(true)
+  const [artboardExportId, setArtboardExportId] = useState('')
+  const [offsetDistance, setOffsetDistance] = useState(4)
+  const [patternKind, setPatternKind] = useState<'dots' | 'lines' | 'diagonal'>('dots')
+  const [optimizationReport, setOptimizationReport] = useState('')
+  const [accessibilityOpen, setAccessibilityOpen] = useState(false)
+  const [selectedStyle, setSelectedStyle] = useState<{ fill: string; stroke: string; strokeWidth: string; opacity: string; fontSize: string; fontFamily: string } | null>(null)
+  const [stylePresets, setStylePresets] = useState<{ name: string; fill: string; stroke: string; strokeWidth: string; opacity: string; fontSize: string; fontFamily: string }[]>(() => {
+    try {
+      const stored = JSON.parse(localStorage.getItem('no-tie-svg-style-presets') ?? '[]')
+      return Array.isArray(stored) ? stored.filter(item => item && typeof item.name === 'string' && typeof item.fill === 'string' && typeof item.stroke === 'string') : []
+    } catch { return [] }
+  })
+  const [shortcutKey, setShortcutKey] = useState(() => {
+    try { return localStorage.getItem('no-tie-svg-command-shortcut') || 'p' } catch { return 'p' }
+  })
   const imageInput = useRef<HTMLInputElement>(null)
+  const replaceImageInput = useRef<HTMLInputElement>(null)
   const editorSessionId = useRef('')
   if (!editorSessionId.current) editorSessionId.current = crypto.randomUUID()
   const storageId = asset?.id ?? editorSessionId.current
@@ -1094,6 +1197,8 @@ export function VectorEditor({
   useEffect(() => { polygonSidesRef.current = polygonSides }, [polygonSides])
   useEffect(() => { arrowModeRef.current = arrowMode }, [arrowMode])
   useEffect(() => { viewOptionsRef.current = viewOptions }, [viewOptions])
+  useEffect(() => { documentSizeRef.current = documentSize }, [documentSize])
+  useEffect(() => { shortcutKeyRef.current = shortcutKey }, [shortcutKey])
   useEffect(() => { autoRouteRef.current = autoRoute }, [autoRoute])
   useEffect(() => { fontFamilyRef.current = fontFamily }, [fontFamily])
   useEffect(() => { fontWeightRef.current = fontWeight }, [fontWeight])
@@ -1110,6 +1215,14 @@ export function VectorEditor({
     stage.setAttribute('data-editor-guides', JSON.stringify(viewOptions.guides))
     renderOverlay(drawing.current!, selectedIdsRef.current)
   }, [viewOptions])
+
+  useEffect(() => {
+    viewBoxRef.current = viewBox
+    const stage = drawing.current
+    if (!stage) return
+    stage.viewbox(viewBox.x, viewBox.y, viewBox.width, viewBox.height)
+    renderOverlay(stage, selectedIdsRef.current)
+  }, [viewBox])
 
   useEffect(() => {
     const key = `no-tie-svg-comments:${storageId}`
@@ -1142,6 +1255,70 @@ export function VectorEditor({
     }
   }
 
+  function changeViewBox(next: ViewBox) {
+    const safe = { x: Number.isFinite(next.x) ? next.x : 0, y: Number.isFinite(next.y) ? next.y : 0, width: Math.max(1, next.width), height: Math.max(1, next.height) }
+    viewBoxRef.current = safe
+    setViewBox(safe)
+    if (drawing.current) drawing.current.viewbox(safe.x, safe.y, safe.width, safe.height)
+  }
+
+  function zoomAtCenter(scale: number) {
+    const current = viewBoxRef.current
+    const width = Math.max(documentSize.width / 20, Math.min(documentSize.width * 20, current.width * scale))
+    const height = width * current.height / current.width
+    const centerX = current.x + current.width / 2
+    const centerY = current.y + current.height / 2
+    changeViewBox({ x: centerX - width / 2, y: centerY - height / 2, width, height })
+  }
+
+  function fitViewToContent(selectionOnly = false) {
+    const stage = drawing.current
+    if (!stage) return
+    const bounds = selectionOnly
+      ? unionBoxes(elementsForIds(stage.node, selectedIdsRef.current).map(getBox))
+      : unionBoxes(directObjects(stage.node).map(getBox))
+    if (!bounds) {
+      changeViewBox({ x: 0, y: 0, width: documentSize.width, height: documentSize.height })
+      return
+    }
+    const margin = Math.max(12, Math.max(bounds.width, bounds.height) * .06)
+    const aspect = viewBoxRef.current.width / viewBoxRef.current.height
+    let width = bounds.width + margin * 2
+    let height = bounds.height + margin * 2
+    if (width / height > aspect) height = width / aspect
+    else width = height * aspect
+    changeViewBox({ x: bounds.x + bounds.width / 2 - width / 2, y: bounds.y + bounds.height / 2 - height / 2, width, height })
+  }
+
+  function unitScale(unit = documentUnit) {
+    return unit === 'mm' ? 96 / 25.4 : unit === 'in' ? 96 : 1
+  }
+
+  function displayedDimension(value: number) {
+    return Number((value / unitScale()).toFixed(documentUnit === 'px' ? 0 : 2))
+  }
+
+  function changeDocumentDimension(axis: 'width' | 'height', displayedValue: number) {
+    const value = Math.max(1, displayedValue * unitScale())
+    const current = documentSizeRef.current
+    const next = axis === 'width'
+      ? { width: value, height: lockDocumentRatio ? value / documentRatio.current : current.height }
+      : { height: value, width: lockDocumentRatio ? value * documentRatio.current : current.width }
+    if (!lockDocumentRatio) documentRatio.current = next.width / next.height
+    documentSizeRef.current = next
+    setDocumentSize(next)
+    if (drawing.current) {
+      drawing.current.node.setAttribute('width', `${next.width}`)
+      drawing.current.node.setAttribute('height', `${next.height}`)
+      drawing.current.node.querySelectorAll<SVGRectElement>('[data-background]').forEach(background => background.setAttribute(axis, `${axis === 'width' ? next.width : next.height}`))
+    }
+    changeViewBox({ x: 0, y: 0, width: next.width, height: next.height })
+  }
+
+  function documentLength(value: number) {
+    return `${Number((value / unitScale()).toFixed(documentUnit === 'px' ? 0 : 2))}${documentUnit}`
+  }
+
   const select = (ids: string[]) => {
     const stage = drawing.current
     const unique = [...new Set(stage ? expandGroupSelection(stage.node, ids) : ids)]
@@ -1150,12 +1327,32 @@ export function VectorEditor({
     if (stage) {
       setHasSelectedGroup(elementsForIds(stage.node, unique).some(element => element.hasAttribute('data-group-id')))
       const selectedElements = elementsForIds(stage.node, unique)
+      if (!selectedElements.some(element => element.hasAttribute('data-editor-pen'))) {
+        setSelectedPenNodeIndex(null)
+        stage.node.removeAttribute('data-selected-pen-node')
+      }
+      else if (selectedPenNodeIndex !== null) stage.node.setAttribute('data-selected-pen-node', `${selectedPenNodeIndex}`)
       const bounds = unionBoxes(selectedElements.map(getBox))
       setSelectionBounds(bounds ?? null)
       setGeometryDraft(bounds ? boxDraft(bounds) : null)
       setRotationDraft(selectedElements[0]?.getAttribute('data-editor-rotation') ?? '0')
       const first = selectedElements[0]
       setOpacity(Math.round(Number(first?.getAttribute('opacity') ?? 1) * 100))
+      if (first) setSelectedStyle({ fill: first.getAttribute('fill') ?? 'none', stroke: first.getAttribute('stroke') ?? 'none', strokeWidth: first.getAttribute('stroke-width') ?? '1', opacity: first.getAttribute('opacity') ?? '1', fontSize: first.getAttribute('font-size') ?? '', fontFamily: first.getAttribute('font-family') ?? '' })
+      setGroupConstraint(selectedElements.some(element => element.getAttribute('data-layout-constraint') === 'aspect') ? 'aspect' : 'free')
+      const selectedLine = selectedElements.find(element => element.tagName.toLowerCase() === 'line')
+      if (selectedLine) {
+        const style = selectedLine.getAttribute('data-route-style')
+        setConnectorStyle(style === 'straight' || style === 'rounded' ? style : 'orthogonal')
+        setConnectorLabel(selectedLine.getAttribute('data-connector-label') ?? '')
+        const routed = selectedLine.getAttribute('data-auto-route') === 'true'
+        setAutoRoute(routed); autoRouteRef.current = routed
+      } else {
+        setAutoRoute(false); autoRouteRef.current = false; setConnectorLabel('')
+      }
+      const selectedShape = selectedElements.find(element => !['line', 'text'].includes(element.tagName.toLowerCase()))
+      const port = selectedShape?.getAttribute('data-connector-port')
+      setConnectorPortType(port === 'input' || port === 'output' || port === 'both' ? port : 'free')
       const selectedText = selectedElements.find(element => element.tagName.toLowerCase() === 'text')
       if (selectedText) {
         const family = selectedText.getAttribute('font-family') ?? 'Inter, sans-serif'
@@ -1216,6 +1413,11 @@ export function VectorEditor({
       try {
         const parsed = new DOMParser().parseFromString(sanitizeSvg(asset.svg), 'image/svg+xml')
         stage.svg(parsed.documentElement.innerHTML)
+        const parsedViewBox = parsed.documentElement.getAttribute('viewBox')
+        if (parsedViewBox) {
+          const values = parsedViewBox.split(/[ ,]+/).map(Number)
+          if (values.length === 4 && values.every(Number.isFinite) && values[2] > 0 && values[3] > 0) stage.viewbox(values[0], values[1], values[2], values[3])
+        }
       } catch {
         stage.rect(WIDTH, HEIGHT).fill('#fffdf9').attr({ 'data-background': 'true' })
       }
@@ -1224,6 +1426,13 @@ export function VectorEditor({
     }
     ensureObjectIds(stage.node)
     updateConnectors(stage.node)
+    const initialViewBox = readViewBox(stage.node)
+    viewBoxRef.current = initialViewBox
+    setViewBox(initialViewBox)
+    documentSizeRef.current = { width: initialViewBox.width, height: initialViewBox.height }
+    documentRatio.current = initialViewBox.width / initialViewBox.height
+    setDocumentSize({ width: initialViewBox.width, height: initialViewBox.height })
+    setExportSize({ width: Math.round(initialViewBox.width), height: Math.round(initialViewBox.height) })
     stage.node.setAttribute('data-editor-grid', `${viewOptionsRef.current.grid}`)
     stage.node.setAttribute('data-editor-grid-size', `${viewOptionsRef.current.gridSize}`)
     stage.node.setAttribute('data-editor-rulers', `${viewOptionsRef.current.rulers}`)
@@ -1237,13 +1446,14 @@ export function VectorEditor({
     setCanUndo(false)
     setCanRedo(false)
 
-    const point = (event: PointerEvent) => {
+    const point = (event: PointerEvent, snap = true) => {
       const bounds = stage.node.getBoundingClientRect()
+      const visible = viewBoxRef.current
       const location = {
-        x: Number(Math.max(0, Math.min(WIDTH, (event.clientX - bounds.left) * WIDTH / bounds.width)).toFixed(1)),
-        y: Number(Math.max(0, Math.min(HEIGHT, (event.clientY - bounds.top) * HEIGHT / bounds.height)).toFixed(1)),
+        x: Number((visible.x + (event.clientX - bounds.left) * visible.width / bounds.width).toFixed(1)),
+        y: Number((visible.y + (event.clientY - bounds.top) * visible.height / bounds.height).toFixed(1)),
       }
-      if (viewOptionsRef.current.snap) {
+      if (snap && viewOptionsRef.current.snap) {
         const size = Math.max(2, viewOptionsRef.current.gridSize)
         return { x: Math.round(location.x / size) * size, y: Math.round(location.y / size) * size }
       }
@@ -1265,9 +1475,10 @@ export function VectorEditor({
       input.value = existing?.textContent ?? ''
       input.placeholder = 'Wpisz tekst…'
       input.setAttribute('aria-label', 'Tekst schematu')
-      input.style.left = `${x * bounds.width / WIDTH}px`
-      input.style.top = `${y * bounds.height / HEIGHT}px`
-      input.style.fontSize = `${size * bounds.width / WIDTH}px`
+      const visible = viewBoxRef.current
+      input.style.left = `${(x - visible.x) * bounds.width / visible.width}px`
+      input.style.top = `${(y - visible.y) * bounds.height / visible.height}px`
+      input.style.fontSize = `${size * bounds.width / visible.width}px`
       input.style.color = existing?.getAttribute('fill') ?? strokeColorRef.current
       container.append(input)
       textEdit.current = { input, x, y, element: existing, fontSize: size, keepTool }
@@ -1361,7 +1572,26 @@ export function VectorEditor({
         && clickedObject?.tagName.toLowerCase() === 'text'
       if (!allowTextDoubleClick) event.preventDefault()
       stage.node.focus({ preventScroll: true })
-      const location = point(event)
+      const location = point(event, !(event.button === 1 || spacePanRef.current))
+      if (event.button === 1 || spacePanRef.current) {
+        stage.node.setPointerCapture(event.pointerId)
+        interaction.current = { type: 'pan', startClientX: event.clientX, startClientY: event.clientY, viewBox: { ...viewBoxRef.current } }
+        stage.node.setAttribute('data-panning', 'true')
+        return
+      }
+      const guideHit = event.target instanceof Element ? event.target.closest('[data-editor-guide-index]') : null
+      const rulerHit = event.target instanceof Element ? event.target.closest('[data-ruler-axis]') : null
+      if (guideHit || rulerHit) {
+        const guides = viewOptionsRef.current.guides
+        const axis = (guideHit ? guides[Number(guideHit.getAttribute('data-editor-guide-index'))]?.axis : rulerHit?.getAttribute('data-ruler-axis')) as 'x' | 'y' | undefined
+        if (!axis) return
+        const guideIndex = guideHit ? Number(guideHit.getAttribute('data-editor-guide-index')) : guides.length
+        if (guideHit && (guides[guideIndex]?.locked || guideLockAll)) return
+        if (rulerHit) setViewOptions(current => ({ ...current, guides: [...current.guides, { axis, value: axis === 'x' ? location.x : location.y, locked: guideLockAll }] }))
+        stage.node.setPointerCapture(event.pointerId)
+        interaction.current = { type: 'guide', index: guideIndex, axis, moved: false, created: Boolean(rulerHit) }
+        return
+      }
       if (eyedropperRef.current) {
         const target = findObjectTarget(stage.node, event.target)
         if (target) {
@@ -1415,7 +1645,7 @@ export function VectorEditor({
       if (currentTool !== 'select') {
         const anchorCandidate = (currentTool === 'line' || currentTool === 'arrow') ? findAnchorHit(event.target) : undefined
         const anchorElement = anchorCandidate ? elementsForIds(stage.node, [anchorCandidate.id])[0] : undefined
-        const anchor = anchorElement?.getAttribute('data-layer-locked') === 'true' ? undefined : anchorCandidate
+        const anchor = anchorElement?.getAttribute('data-layer-locked') === 'true' || !canConnectToPort(anchorElement, 'start') ? undefined : anchorCandidate
         const target = anchor ? elementsForIds(stage.node, [anchor.id])[0] : undefined
         const anchorPoint = target && anchor ? anchorPosition(target, anchor.anchor) : undefined
         const startPoint = anchorPoint ?? location
@@ -1440,6 +1670,8 @@ export function VectorEditor({
         const element = id ? elementsForIds(stage.node, [id])[0] as SVGPathElement | undefined : undefined
         const points = element ? readPenPoints(element) : []
         if (element && element.getAttribute('data-layer-locked') !== 'true' && points[index]) {
+          setSelectedPenNodeIndex(index); setPenNodeMode(points[index].mode ?? 'smooth')
+          stage.node.setAttribute('data-selected-pen-node', `${index}`)
           select([id!])
           interaction.current = { type: 'pen-node', element, index, handle, points, moved: false }
           return
@@ -1516,8 +1748,17 @@ export function VectorEditor({
     const move = (event: PointerEvent) => {
       const current = interaction.current
       if (!current) return
-      const location = point(event)
-      if (current.type === 'freehand') {
+      const location = point(event, current.type !== 'pan')
+      if (current.type === 'pan') {
+        const bounds = stage.node.getBoundingClientRect()
+        const dx = (event.clientX - current.startClientX) * current.viewBox.width / Math.max(1, bounds.width)
+        const dy = (event.clientY - current.startClientY) * current.viewBox.height / Math.max(1, bounds.height)
+        changeViewBox({ ...current.viewBox, x: current.viewBox.x - dx, y: current.viewBox.y - dy })
+      } else if (current.type === 'guide') {
+        current.moved = true
+        const value = current.axis === 'x' ? location.x : location.y
+        setViewOptions(options => ({ ...options, guides: options.guides.map((guide, index) => index === current.index ? { ...guide, value } : guide) }))
+      } else if (current.type === 'freehand') {
         current.keepTool = current.keepTool || event.ctrlKey
         const samples = typeof event.getCoalescedEvents === 'function' ? event.getCoalescedEvents() : [event]
         samples.forEach(sample => {
@@ -1536,7 +1777,18 @@ export function VectorEditor({
           node.x = location.x; node.y = location.y
           if (node.incoming) node.incoming = { x: node.incoming.x + dx, y: node.incoming.y + dy }
           if (node.outgoing) node.outgoing = { x: node.outgoing.x + dx, y: node.outgoing.y + dy }
-        } else node[current.handle] = location
+        } else {
+          node[current.handle] = location
+          if (node.mode === 'symmetric' || node.mode === 'smooth') {
+            const otherHandle = current.handle === 'incoming' ? 'outgoing' : 'incoming'
+            const dx = location.x - node.x; const dy = location.y - node.y
+            const currentLength = Math.hypot(dx, dy)
+            const otherLength = node[otherHandle] ? Math.hypot(node[otherHandle]!.x - node.x, node[otherHandle]!.y - node.y) : currentLength
+            const length = node.mode === 'symmetric' ? currentLength : otherLength
+            const angle = Math.atan2(dy, dx) + Math.PI
+            node[otherHandle] = { x: node.x + Math.cos(angle) * length, y: node.y + Math.sin(angle) * length }
+          }
+        }
         current.element.setAttribute('data-pen-points', JSON.stringify(current.points))
         current.element.setAttribute('d', penPath(current.points))
         renderOverlay(stage, [current.element.getAttribute('data-object-id') ?? ''])
@@ -1554,7 +1806,7 @@ export function VectorEditor({
           const hit = findAnchorHit(hovered)
           const endShape = hit ? elementsForIds(stage.node, [hit.id])[0] : undefined
           const end = endShape && hit ? anchorPosition(endShape, hit.anchor) : undefined
-          if (hit && end && hit.id !== current.startTarget) {
+          if (hit && end && hit.id !== current.startTarget && canConnectToPort(endShape, 'end')) {
             current.element.plot(current.x, current.y, end.x, end.y)
             current.element.attr({ 'data-end-target': hit.id, 'data-end-anchor': hit.anchor })
           } else {
@@ -1583,7 +1835,7 @@ export function VectorEditor({
         const targetPoint = target && hit ? anchorPosition(target, hit.anchor) : undefined
         const otherSide = current.side === 'start' ? 'end' : 'start'
         const otherTarget = current.line.getAttribute(`data-${otherSide}-target`)
-        if (hit && targetPoint && hit.id !== current.id && hit.id !== otherTarget) {
+        if (hit && targetPoint && hit.id !== current.id && hit.id !== otherTarget && canConnectToPort(target, current.side)) {
           setLineEndpoint(current.line, current.side, targetPoint)
           current.line.setAttribute(`data-${current.side}-target`, hit.id)
           current.line.setAttribute(`data-${current.side}-anchor`, hit.anchor)
@@ -1596,7 +1848,8 @@ export function VectorEditor({
         renderOverlay(stage, [current.id])
       } else if (current.type === 'resize') {
         const keepSquare = current.targets.length === 1 && current.targets[0].element.tagName.toLowerCase() === 'circle'
-        const bounds = resizedBounds(current.startBounds, current.handle, location, keepSquare)
+        const constrained = current.targets.some(target => target.element.getAttribute('data-layout-constraint') === 'aspect')
+        const bounds = resizedBounds(current.startBounds, current.handle, location, keepSquare, constrained ? current.startBounds.width / Math.max(current.startBounds.height, .1) : undefined)
         current.moved = current.moved || Math.abs(bounds.width - current.startBounds.width) + Math.abs(bounds.height - current.startBounds.height) + Math.abs(bounds.x - current.startBounds.x) + Math.abs(bounds.y - current.startBounds.y) > .1
         const scaleX = current.startBounds.width > 0 ? bounds.width / current.startBounds.width : 1
         const scaleY = current.startBounds.height > 0 ? bounds.height / current.startBounds.height : 1
@@ -1647,7 +1900,11 @@ export function VectorEditor({
       const current = interaction.current
       if (!current) return
       interaction.current = null
-      if (current.type === 'freehand') {
+      if (current.type === 'pan') {
+        stage.node.removeAttribute('data-panning')
+      } else if (current.type === 'guide') {
+        if (!current.moved && !current.created && current.index < viewOptionsRef.current.guides.length) setViewOptions(options => ({ ...options, guides: options.guides.filter((_guide, index) => index !== current.index) }))
+      } else if (current.type === 'freehand') {
         current.keepTool = current.keepTool || event.ctrlKey
         const location = point(event)
         const last = current.points.at(-1)!
@@ -1692,7 +1949,7 @@ export function VectorEditor({
           const hit = findAnchorHit(document.elementFromPoint(event.clientX, event.clientY))
           const target = hit ? elementsForIds(stage.node, [hit.id])[0] : undefined
           const anchor = target && hit ? anchorPosition(target, hit.anchor) : undefined
-          if (hit && anchor && hit.id !== current.startTarget) {
+          if (hit && anchor && hit.id !== current.startTarget && canConnectToPort(target, 'end')) {
             current.element.plot(current.x, current.y, anchor.x, anchor.y)
             current.element.attr({ 'data-end-target': hit.id, 'data-end-anchor': hit.anchor })
           }
@@ -1737,7 +1994,17 @@ export function VectorEditor({
         event.preventDefault()
         const ids = new Set(selectedIdsRef.current)
         detachConnectors(stage.node, [...ids])
-        elementsForIds(stage.node, [...ids]).forEach(element => element.remove())
+        elementsForIds(stage.node, [...ids]).forEach(element => {
+          if (element.tagName.toLowerCase() === 'line') {
+            const id = element.getAttribute('data-object-id')
+            if (id) {
+              stage.node.querySelector(`[data-connector-visual-for="${CSS.escape(id)}"]`)?.remove()
+              stage.node.querySelector(`[data-connector-label-for="${CSS.escape(id)}"]`)?.remove()
+            }
+          }
+          element.remove()
+        })
+        updateConnectors(stage.node)
         select([])
         recordHistory(stage)
       } else if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === 'd' && selectedIdsRef.current.length) {
@@ -1749,9 +2016,12 @@ export function VectorEditor({
     const historyKeydown = (event: KeyboardEvent) => {
       const dialog = mount.current?.closest('[role="dialog"]')
       if (!dialog || !(event.target instanceof Node) || !dialog.contains(event.target)) return
+      const editingText = event.target instanceof Element && Boolean(event.target.closest('input, textarea, select, [contenteditable="true"]'))
+      if ((event.metaKey || event.ctrlKey) && event.shiftKey && !editingText && event.key.toLowerCase() === shortcutKeyRef.current.toLowerCase()) {
+        event.preventDefault(); event.stopPropagation(); setCommandPaletteOpen(true); setCommandQuery(''); return
+      }
       if (!(event.metaKey || event.ctrlKey)) return
       const key = event.key.toLowerCase()
-      const editingText = event.target instanceof Element && Boolean(event.target.closest('input, textarea, select, [contenteditable="true"]'))
       if (key === 'g' && !editingText && selectedIdsRef.current.length) {
         event.preventDefault()
         event.stopPropagation()
@@ -1797,12 +2067,40 @@ export function VectorEditor({
       }
     }
 
+    const wheel = (event: WheelEvent) => {
+      if (!event.ctrlKey && !event.metaKey) return
+      event.preventDefault()
+      const bounds = stage.node.getBoundingClientRect()
+      const current = viewBoxRef.current
+      const ratioX = Math.max(0, Math.min(1, (event.clientX - bounds.left) / bounds.width))
+      const ratioY = Math.max(0, Math.min(1, (event.clientY - bounds.top) / bounds.height))
+      const anchorX = current.x + ratioX * current.width
+      const anchorY = current.y + ratioY * current.height
+      const scale = event.deltaY < 0 ? .88 : 1.14
+      const width = Math.max(documentSizeRef.current.width / 20, Math.min(documentSizeRef.current.width * 20, current.width * scale))
+      const height = width * current.height / current.width
+      changeViewBox({ x: anchorX - ratioX * width, y: anchorY - ratioY * height, width, height })
+    }
+    const spaceDown = (event: KeyboardEvent) => {
+      const dialog = mount.current?.closest('[role="dialog"]')
+      const editing = event.target instanceof Element && Boolean(event.target.closest('input, textarea, select, [contenteditable="true"]'))
+      if (event.code !== 'Space' || editing || !(event.target instanceof Node) || !dialog?.contains(event.target)) return
+      spacePanRef.current = true
+      event.preventDefault()
+    }
+    const spaceUp = (event: KeyboardEvent) => {
+      if (event.code === 'Space') spacePanRef.current = false
+    }
+
     stage.node.addEventListener('pointerdown', start)
     stage.node.addEventListener('pointermove', move)
     stage.node.addEventListener('pointerup', finish)
     stage.node.addEventListener('pointercancel', finish)
     stage.node.addEventListener('keydown', keydown)
     stage.node.addEventListener('dblclick', doubleClick)
+    stage.node.addEventListener('wheel', wheel, { passive: false })
+    window.addEventListener('keydown', spaceDown, true)
+    window.addEventListener('keyup', spaceUp, true)
     window.addEventListener('keydown', historyKeydown, true)
     return () => {
       stage.node.removeEventListener('pointerdown', start)
@@ -1811,6 +2109,9 @@ export function VectorEditor({
       stage.node.removeEventListener('pointercancel', finish)
       stage.node.removeEventListener('keydown', keydown)
       stage.node.removeEventListener('dblclick', doubleClick)
+      stage.node.removeEventListener('wheel', wheel)
+      window.removeEventListener('keydown', spaceDown, true)
+      window.removeEventListener('keyup', spaceUp, true)
       window.removeEventListener('keydown', historyKeydown, true)
       textEdit.current?.input.remove()
       textEdit.current = null
@@ -1932,7 +2233,17 @@ export function VectorEditor({
     const stage = drawing.current
     if (!stage || !selectedIdsRef.current.length) return
     detachConnectors(stage.node, selectedIdsRef.current)
-    elementsForIds(stage.node, selectedIdsRef.current).forEach(element => element.remove())
+    elementsForIds(stage.node, selectedIdsRef.current).forEach(element => {
+      if (element.tagName.toLowerCase() === 'line') {
+        const id = element.getAttribute('data-object-id')
+        if (id) {
+          stage.node.querySelector(`[data-connector-visual-for="${CSS.escape(id)}"]`)?.remove()
+          stage.node.querySelector(`[data-connector-label-for="${CSS.escape(id)}"]`)?.remove()
+        }
+      }
+      element.remove()
+    })
+    updateConnectors(stage.node)
     select([])
     recordHistory(stage)
     renderOverlay(stage, [])
@@ -2130,10 +2441,10 @@ export function VectorEditor({
     select(selectedIdsRef.current)
   }
 
-  function applyBoolean(operation: 'union' | 'subtract' | 'intersect') {
+  function applyBoolean(operation: 'union' | 'subtract' | 'intersect' | 'exclude') {
     const stage = drawing.current
     const originals = stage ? elementsForIds(stage.node, selectedIdsRef.current) : []
-    if (!stage || originals.length < 2) return
+    if (!stage || originals.length < 2 || (operation === 'exclude' && originals.length !== 2)) return
     const bounds = unionBoxes(originals.map(getBox))
     if (!bounds) return
     const cloneClean = (source: SVGElement) => {
@@ -2152,11 +2463,43 @@ export function VectorEditor({
     const combined = document.createElementNS(SVG_NS, 'g')
     const id = crypto.randomUUID()
     combined.setAttribute('data-object-id', id)
-    combined.setAttribute('data-layer-name', operation === 'union' ? 'Suma kształtów' : operation === 'subtract' ? 'Różnica kształtów' : 'Część wspólna')
+    combined.setAttribute('data-layer-name', operation === 'union' ? 'Suma kształtów' : operation === 'subtract' ? 'Różnica kształtów' : operation === 'exclude' ? 'Wykluczające się kształty' : 'Część wspólna')
     const defs = stage.node.querySelector('defs') ?? document.createElementNS(SVG_NS, 'defs')
     if (!defs.parentNode) stage.node.prepend(defs)
     if (operation === 'union') {
-      originals.forEach(element => combined.append(cloneClean(element)))
+      const maskId = `editor-union-${crypto.randomUUID()}`
+      const mask = document.createElementNS(SVG_NS, 'mask')
+      mask.setAttribute('id', maskId); mask.setAttribute('maskUnits', 'userSpaceOnUse')
+      mask.setAttribute('x', `${bounds.x}`); mask.setAttribute('y', `${bounds.y}`); mask.setAttribute('width', `${Math.max(1, bounds.width)}`); mask.setAttribute('height', `${Math.max(1, bounds.height)}`)
+      originals.forEach(source => {
+        const silhouette = cloneClean(source)
+        ;[silhouette, ...Array.from(silhouette.querySelectorAll('*'))].forEach(node => { node.setAttribute('fill', 'white'); node.setAttribute('stroke', 'white') })
+        mask.append(silhouette)
+      })
+      defs.append(mask)
+      const silhouette = document.createElementNS(SVG_NS, 'rect')
+      silhouette.setAttribute('x', `${bounds.x}`); silhouette.setAttribute('y', `${bounds.y}`); silhouette.setAttribute('width', `${Math.max(1, bounds.width)}`); silhouette.setAttribute('height', `${Math.max(1, bounds.height)}`)
+      silhouette.setAttribute('fill', originals[0].getAttribute('fill') && originals[0].getAttribute('fill') !== 'none' ? originals[0].getAttribute('fill')! : fillColorRef.current)
+      silhouette.setAttribute('mask', `url(#${maskId})`)
+      combined.append(silhouette)
+    } else if (operation === 'exclude') {
+      originals.slice(0, 2).forEach((element, index) => {
+        const maskId = `editor-exclude-${crypto.randomUUID()}`
+        const mask = document.createElementNS(SVG_NS, 'mask')
+        mask.setAttribute('id', maskId); mask.setAttribute('maskUnits', 'userSpaceOnUse')
+        mask.setAttribute('x', `${bounds.x}`); mask.setAttribute('y', `${bounds.y}`)
+        mask.setAttribute('width', `${Math.max(1, bounds.width)}`); mask.setAttribute('height', `${Math.max(1, bounds.height)}`)
+        const white = document.createElementNS(SVG_NS, 'rect')
+        white.setAttribute('x', `${bounds.x}`); white.setAttribute('y', `${bounds.y}`)
+        white.setAttribute('width', `${Math.max(1, bounds.width)}`); white.setAttribute('height', `${Math.max(1, bounds.height)}`); white.setAttribute('fill', 'white')
+        const other = originals[index === 0 ? 1 : 0]
+        const black = cloneClean(other)
+        ;[black, ...Array.from(black.querySelectorAll('*'))].forEach(node => { node.setAttribute('fill', 'black'); node.setAttribute('stroke', 'black') })
+        mask.append(white, black); defs.append(mask)
+        const subject = cloneClean(element)
+        subject.setAttribute('mask', `url(#${maskId})`)
+        combined.append(subject)
+      })
     } else {
       const cutter = originals.at(-1)!
       const effectId = `editor-${operation}-${crypto.randomUUID()}`
@@ -2169,9 +2512,9 @@ export function VectorEditor({
         combined.setAttribute('clip-path', `url(#${effectId})`)
       } else {
         effect.setAttribute('maskUnits', 'userSpaceOnUse')
-        effect.setAttribute('x', '0'); effect.setAttribute('y', '0'); effect.setAttribute('width', `${WIDTH}`); effect.setAttribute('height', `${HEIGHT}`)
+        effect.setAttribute('x', '0'); effect.setAttribute('y', '0'); effect.setAttribute('width', `${documentSizeRef.current.width}`); effect.setAttribute('height', `${documentSizeRef.current.height}`)
         const white = document.createElementNS(SVG_NS, 'rect')
-        white.setAttribute('x', '0'); white.setAttribute('y', '0'); white.setAttribute('width', `${WIDTH}`); white.setAttribute('height', `${HEIGHT}`); white.setAttribute('fill', 'white')
+        white.setAttribute('x', '0'); white.setAttribute('y', '0'); white.setAttribute('width', `${documentSizeRef.current.width}`); white.setAttribute('height', `${documentSizeRef.current.height}`); white.setAttribute('fill', 'white')
         const black = cloneClean(cutter)
         ;[black, ...Array.from(black.querySelectorAll('*'))].forEach(node => { node.setAttribute('fill', 'black'); node.setAttribute('stroke', 'black') })
         effect.append(white, black)
@@ -2187,27 +2530,348 @@ export function VectorEditor({
     recordHistory(stage)
   }
 
+  function selectedElements() {
+    const stage = drawing.current
+    return stage ? elementsForIds(stage.node, selectedIdsRef.current) : []
+  }
+
+  function updateSelected(action: (element: SVGElement, index: number) => void) {
+    const stage = drawing.current
+    const elements = selectedElements()
+    if (!stage || !elements.length) return
+    elements.forEach(action)
+    updateConnectors(stage.node)
+    recordHistory(stage)
+    select(selectedIdsRef.current)
+  }
+
+  function applyPathOperation(operation: 'close' | 'simplify' | 'split' | 'join') {
+    const stage = drawing.current
+    if (!stage) return
+    const paths = selectedElements().filter(element => element.tagName.toLowerCase() === 'path') as SVGPathElement[]
+    if (!paths.length) return
+    if (operation === 'join' && paths.length > 1) {
+      const sourceTransform = paths[0].getAttribute('transform') ?? ''
+      if (paths.some(path => (path.getAttribute('transform') ?? '') !== sourceTransform)) {
+        setWorkflowMessage('Przed połączeniem ścieżek dopasuj ich transformacje do siebie.')
+        return
+      }
+      if (paths.some(path => path.id && stage.node.querySelector(`[href="#${CSS.escape(path.id)}"]`))) {
+        setWorkflowMessage('Odłącz najpierw tekst umieszczony na tych ścieżkach.')
+        return
+      }
+      detachConnectors(stage.node, paths.map(path => path.getAttribute('data-object-id') ?? '').filter(Boolean))
+      const joined = document.createElementNS(SVG_NS, 'path')
+      const id = crypto.randomUUID()
+      joined.setAttribute('d', paths.map(path => path.getAttribute('d') ?? '').join(' '))
+      if (sourceTransform) joined.setAttribute('transform', sourceTransform)
+      joined.removeAttribute('data-editor-pen'); joined.removeAttribute('data-pen-points')
+      for (const attribute of ['fill', 'stroke', 'stroke-width', 'stroke-linecap', 'stroke-linejoin', 'opacity']) {
+        const value = paths[0].getAttribute(attribute)
+        if (value !== null) joined.setAttribute(attribute, value)
+      }
+      joined.setAttribute('data-object-id', id); joined.setAttribute('data-layer-name', 'Połączone ścieżki')
+      paths.forEach(path => path.remove()); stage.node.append(joined); select([id])
+    } else if (operation === 'split' && paths.length === 1) {
+      const source = paths[0]
+      try {
+        const length = source.getTotalLength()
+        if (length < 2) return
+        detachConnectors(stage.node, [source.getAttribute('data-object-id') ?? ''])
+        const samples = Array.from({ length: 101 }, (_, index) => source.getPointAtLength(length * index / 100))
+        const pathData = (points: SVGPoint[]) => points.map((point, index) => `${index ? 'L' : 'M'} ${rounded(point.x)} ${rounded(point.y)}`).join(' ')
+        const clones = [samples.slice(0, 51), samples.slice(50)].map(points => {
+          const clone = source.cloneNode(false) as SVGPathElement
+          clone.setAttribute('d', pathData(points)); clone.setAttribute('data-object-id', crypto.randomUUID()); clone.setAttribute('fill', 'none')
+          clone.removeAttribute('data-editor-pen'); clone.removeAttribute('data-pen-points')
+          clone.removeAttribute('data-group-id')
+          clone.removeAttribute('id')
+          return clone
+        })
+        if (source.id) clones[0].setAttribute('id', source.id)
+        source.replaceWith(...clones); select(clones.map(element => element.getAttribute('data-object-id')!))
+      } catch { setWorkflowMessage('Nie udało się podzielić tej ścieżki.') }
+    } else {
+      paths.forEach(path => {
+        let data = path.getAttribute('d') ?? ''
+        if (operation === 'close') {
+          if (!/z\s*$/i.test(data)) path.setAttribute('d', `${data} Z`)
+          path.removeAttribute('data-editor-pen'); path.removeAttribute('data-pen-points')
+        } else {
+          try {
+            const length = path.getTotalLength()
+            const sampleCount = Math.max(3, Math.min(800, Math.ceil(length / 2)))
+            const samples = Array.from({ length: sampleCount }, (_, index) => {
+              const point = path.getPointAtLength(length * index / (sampleCount - 1))
+              return { x: point.x, y: point.y }
+            })
+            const simplified = simplifyStroke(samples, Math.max(0.5, offsetDistance / 3))
+            data = simplified.map((point, index) => `${index ? 'L' : 'M'} ${rounded(point.x)} ${rounded(point.y)}`).join(' ')
+            path.setAttribute('d', data); path.removeAttribute('data-editor-pen'); path.removeAttribute('data-pen-points')
+          } catch { /* Ignore paths the browser cannot measure. */ }
+        }
+      })
+    }
+    updateConnectors(stage.node)
+    recordHistory(stage); select(selectedIdsRef.current)
+  }
+
+  function applyStrokeOffset() {
+    const stage = drawing.current
+    if (!stage) return
+    const elements = selectedElements()
+    elements.forEach(source => {
+      const clone = source.cloneNode(true) as SVGElement
+      const id = source.getAttribute('data-object-id') ?? crypto.randomUUID()
+      const label = source.getAttribute('data-layer-name') ?? 'Obrys'
+      source.removeAttribute('data-object-id'); source.removeAttribute('data-layer-name')
+      clone.removeAttribute('data-object-id'); clone.removeAttribute('data-layer-name')
+      clone.setAttribute('fill', 'none')
+      clone.setAttribute('stroke', fillColorRef.current)
+      clone.setAttribute('stroke-width', `${Math.max(.5, Number(source.getAttribute('stroke-width')) || strokeWidthRef.current) + Math.max(0, offsetDistance) * 2}`)
+      clone.setAttribute('stroke-linejoin', 'round'); clone.setAttribute('pointer-events', 'none')
+      const group = document.createElementNS(SVG_NS, 'g')
+      group.setAttribute('data-object-id', id); group.setAttribute('data-layer-name', label); group.setAttribute('data-layout-constraint', source.getAttribute('data-layout-constraint') ?? '')
+      if (!source.getAttribute('data-layout-constraint')) group.removeAttribute('data-layout-constraint')
+      group.append(clone, source); source.replaceWith(group)
+    })
+    recordHistory(stage); select(selectedIdsRef.current)
+    setWorkflowMessage('Dodano edytowalny obrys o wskazanym odsunięciu.')
+  }
+
+  function clipSelectedImage() {
+    const stage = drawing.current
+    const elements = selectedElements()
+    const image = elements.find(element => element.tagName.toLowerCase() === 'image')
+    const shape = elements.find(element => element !== image && element.tagName.toLowerCase() !== 'text')
+    if (!stage || !image || !shape) return
+    const defs = stage.node.querySelector('defs') ?? document.createElementNS(SVG_NS, 'defs')
+    if (!defs.parentNode) stage.node.prepend(defs)
+    const clip = document.createElementNS(SVG_NS, 'clipPath')
+    const id = `clip-${crypto.randomUUID()}`
+    clip.setAttribute('id', id); clip.setAttribute('clipPathUnits', 'userSpaceOnUse')
+    const clone = shape.cloneNode(true) as SVGElement
+    clone.removeAttribute('data-object-id'); clone.removeAttribute('data-layer-name'); clone.removeAttribute('fill'); clone.removeAttribute('stroke')
+    clip.append(clone); defs.append(clip); image.setAttribute('clip-path', `url(#${id})`)
+    shape.setAttribute('visibility', 'hidden')
+    shape.setAttribute('data-layer-name', `${shape.getAttribute('data-layer-name') || 'Kształt'} · maska przycięcia`)
+    recordHistory(stage); select([image.getAttribute('data-object-id') ?? '']); setWorkflowMessage('Przycięto obraz do kształtu. Kształt źródłowy ukryto; możesz go przywrócić w warstwach.')
+  }
+
+  function applyGradient() {
+    const stage = drawing.current
+    const elements = selectedElements()
+    if (!stage || !elements.length) return
+    const defs = stage.node.querySelector('defs') ?? document.createElementNS(SVG_NS, 'defs')
+    if (!defs.parentNode) stage.node.prepend(defs)
+    const id = `gradient-${crypto.randomUUID()}`
+    const gradient = document.createElementNS(SVG_NS, gradientKind === 'linear' ? 'linearGradient' : 'radialGradient')
+    gradient.setAttribute('id', id); gradient.setAttribute('gradientUnits', 'objectBoundingBox')
+    if (gradientKind === 'linear') {
+      const radians = gradientAngle * Math.PI / 180
+      gradient.setAttribute('x1', `${50 - Math.cos(radians) * 50}%`); gradient.setAttribute('y1', `${50 - Math.sin(radians) * 50}%`)
+      gradient.setAttribute('x2', `${50 + Math.cos(radians) * 50}%`); gradient.setAttribute('y2', `${50 + Math.sin(radians) * 50}%`)
+    } else { gradient.setAttribute('cx', '50%'); gradient.setAttribute('cy', '50%'); gradient.setAttribute('r', '70%') }
+    for (const [offset, color] of [['0%', fillColor], ['50%', gradientMiddle], ['100%', strokeColor]] as const) {
+      const stop = document.createElementNS(SVG_NS, 'stop')
+      stop.setAttribute('offset', offset); stop.setAttribute('stop-color', color); gradient.append(stop)
+    }
+    defs.append(gradient)
+    elements.forEach(element => element.setAttribute('fill', `url(#${id})`))
+    recordHistory(stage)
+  }
+
+  function applyPattern() {
+    const stage = drawing.current
+    const elements = selectedElements()
+    if (!stage || !elements.length) return
+    const defs = stage.node.querySelector('defs') ?? document.createElementNS(SVG_NS, 'defs')
+    if (!defs.parentNode) stage.node.prepend(defs)
+    const pattern = document.createElementNS(SVG_NS, 'pattern')
+    const id = `pattern-${crypto.randomUUID()}`
+    pattern.setAttribute('id', id); pattern.setAttribute('patternUnits', 'userSpaceOnUse'); pattern.setAttribute('width', '16'); pattern.setAttribute('height', '16')
+    if (patternKind === 'dots') {
+      const dot = document.createElementNS(SVG_NS, 'circle'); dot.setAttribute('cx', '4'); dot.setAttribute('cy', '4'); dot.setAttribute('r', '2'); dot.setAttribute('fill', strokeColor); pattern.append(dot)
+    } else {
+      const line = document.createElementNS(SVG_NS, 'path')
+      line.setAttribute('d', patternKind === 'lines' ? 'M 0 3 H 16' : 'M -4 4 L 4 -4 M 0 16 L 16 0 M 12 20 L 20 12')
+      line.setAttribute('stroke', strokeColor); line.setAttribute('stroke-width', '2'); pattern.append(line)
+    }
+    defs.append(pattern); elements.forEach(element => element.setAttribute('fill', `url(#${id})`)); recordHistory(stage)
+  }
+
+  function applyTextToPath() {
+    const stage = drawing.current
+    const elements = selectedElements()
+    const path = elements.find(element => element.tagName.toLowerCase() === 'path')
+    const text = elements.find(element => element.tagName.toLowerCase() === 'text')
+    if (!stage || !path || !text) return
+    const pathId = path.id || `text-path-${crypto.randomUUID()}`
+    path.setAttribute('id', pathId)
+    const textPath = document.createElementNS(SVG_NS, 'textPath')
+    textPath.setAttribute('href', `#${pathId}`); textPath.setAttribute('startOffset', '0%'); textPath.textContent = text.textContent ?? ''
+    const result = document.createElementNS(SVG_NS, 'text')
+    for (const attribute of ['fill', 'font-size', 'font-family', 'font-weight', 'font-style', 'text-anchor']) {
+      const value = text.getAttribute(attribute)
+      if (value !== null) result.setAttribute(attribute, value)
+    }
+    const id = crypto.randomUUID()
+    result.setAttribute('data-object-id', id); result.setAttribute('data-layer-name', 'Tekst na ścieżce'); result.append(textPath)
+    text.replaceWith(result); select([id]); recordHistory(stage)
+  }
+
+  function applyImageTransform(axis: 'x' | 'y') {
+    updateSelected(element => {
+      if (element.tagName.toLowerCase() !== 'image') return
+      const box = { x: Number(element.getAttribute('x')) || 0, y: Number(element.getAttribute('y')) || 0, width: Number(element.getAttribute('width')) || 1, height: Number(element.getAttribute('height')) || 1 }
+      if (!element.hasAttribute('data-editor-base-transform')) element.setAttribute('data-editor-base-transform', element.getAttribute('transform') ?? '')
+      const key = axis === 'x' ? 'data-image-flip-x' : 'data-image-flip-y'
+      const next = element.getAttribute(key) !== 'true'
+      if (next) element.setAttribute(key, 'true')
+      else element.removeAttribute(key)
+      const transforms = [element.getAttribute('data-editor-base-transform')]
+      if (element.getAttribute('data-image-flip-x') === 'true') transforms.push(`translate(${2 * box.x + box.width} 0) scale(-1 1)`)
+      if (element.getAttribute('data-image-flip-y') === 'true') transforms.push(`translate(0 ${2 * box.y + box.height}) scale(1 -1)`)
+      const transform = transforms.filter(Boolean).join(' ').trim()
+      if (transform) element.setAttribute('transform', transform)
+      else element.removeAttribute('transform')
+    })
+  }
+
+  async function replaceSelectedImage(file?: File) {
+    const stage = drawing.current
+    const image = selectedElements().find(element => element.tagName.toLowerCase() === 'image') as SVGImageElement | undefined
+    if (!stage || !image || !file || !/^image\/(png|jpeg|gif|webp)$/i.test(file.type)) return
+    try {
+      const data = await new Promise<string>((resolve, reject) => { const reader = new FileReader(); reader.onload = () => typeof reader.result === 'string' ? resolve(reader.result) : reject(); reader.onerror = () => reject(); reader.readAsDataURL(file) })
+      image.setAttribute('href', data); image.setAttribute('data-layer-name', file.name); recordHistory(stage)
+      setWorkflowMessage(`Zastąpiono obraz plikiem ${file.name}.`)
+    } catch { setWorkflowMessage('Nie udało się zastąpić obrazu.') }
+  }
+
+  function copyStyle() {
+    const element = selectedElements()[0]
+    if (!element) return
+    setSelectedStyle({ fill: element.getAttribute('fill') ?? 'none', stroke: element.getAttribute('stroke') ?? 'none', strokeWidth: element.getAttribute('stroke-width') ?? '1', opacity: element.getAttribute('opacity') ?? '1', fontSize: element.getAttribute('font-size') ?? '', fontFamily: element.getAttribute('font-family') ?? '' })
+  }
+
+  function pasteStyle() {
+    if (!selectedStyle) return
+    updateSelected(element => {
+      for (const [attribute, value] of [['fill', selectedStyle.fill], ['stroke', selectedStyle.stroke], ['stroke-width', selectedStyle.strokeWidth], ['opacity', selectedStyle.opacity], ['font-size', selectedStyle.fontSize], ['font-family', selectedStyle.fontFamily]] as const) {
+        if (value) element.setAttribute(attribute, value)
+      }
+    })
+  }
+
+  function saveStylePreset() {
+    const element = selectedElements()[0]
+    if (!element) return
+    const name = window.prompt('Nazwa zapisywanego stylu:')?.trim()
+    if (!name) return
+    const preset = { name, fill: element.getAttribute('fill') ?? 'none', stroke: element.getAttribute('stroke') ?? 'none', strokeWidth: element.getAttribute('stroke-width') ?? '1', opacity: element.getAttribute('opacity') ?? '1', fontSize: element.getAttribute('font-size') ?? '', fontFamily: element.getAttribute('font-family') ?? '' }
+    setStylePresets(current => {
+      const next = [...current.filter(item => item.name !== name), preset].slice(-20)
+      try { localStorage.setItem('no-tie-svg-style-presets', JSON.stringify(next)) } catch { /* Keep the preset for this editing session. */ }
+      return next
+    })
+  }
+
+  function applyStylePreset(preset: (typeof stylePresets)[number]) {
+    updateSelected(element => {
+      for (const [attribute, value] of [['fill', preset.fill], ['stroke', preset.stroke], ['stroke-width', preset.strokeWidth], ['opacity', preset.opacity], ['font-size', preset.fontSize], ['font-family', preset.fontFamily]] as const) {
+        if (value) element.setAttribute(attribute, value)
+      }
+    })
+  }
+
+  function addSelectedNodeTitle() {
+    updateSelected((element, index) => {
+      if (!element.getAttribute('aria-label')) element.setAttribute('aria-label', element.getAttribute('data-layer-name') || `${element.tagName.toLowerCase()} ${index + 1}`)
+    })
+  }
+
+  function inspectAccessibility() {
+    const stage = drawing.current
+    if (!stage) return
+    const objects = directObjects(stage.node)
+    const issues: string[] = []
+    objects.forEach((element, index) => {
+      const label = element.getAttribute('aria-label') || element.querySelector('title')?.textContent
+      if (!label) issues.push(`${element.tagName.toLowerCase()} ${index + 1}: brak opisu dostępności`)
+      if (element.tagName.toLowerCase() === 'image' && !(element as SVGImageElement).getAttribute('aria-label')) issues.push(`${element.tagName.toLowerCase()} ${index + 1}: obraz nie ma tekstu alternatywnego`)
+      if (element.tagName.toLowerCase() === 'text') {
+        const contrast = colorContrastOnWhite(element.getAttribute('fill') ?? '#000000')
+        if (contrast !== undefined && contrast < 4.5) issues.push(`tekst ${index + 1}: kontrast ${contrast.toFixed(1)}:1 jest niższy niż zalecane 4.5:1 na białym tle`)
+      }
+    })
+    setAccessibilityReport(issues); setAccessibilityOpen(true)
+  }
+
+  function optimizeSvgDocument(svg: SVGSVGElement) {
+    const references = new Set<string>()
+    svg.querySelectorAll('*').forEach(element => Array.from(element.attributes).forEach(attribute => {
+      for (const match of attribute.value.matchAll(/url\(#([^)]+)\)/g)) references.add(match[1])
+      if (['href', 'xlink:href'].includes(attribute.name.toLowerCase()) && attribute.value.startsWith('#')) references.add(attribute.value.slice(1))
+    }))
+    svg.querySelectorAll('defs [id]').forEach(element => { if (!references.has(element.id) && !(element.tagName.toLowerCase() === 'symbol' && element.id.startsWith('sprite-'))) element.remove() })
+    svg.querySelectorAll('path[d]').forEach(element => element.setAttribute('d', element.getAttribute('d')!.replace(/(-?\d*\.\d{3,})/g, value => `${Number(Number(value).toFixed(2))}`)))
+    svg.querySelectorAll('g').forEach(group => { if (!group.children.length && !group.textContent?.trim()) group.remove() })
+    svg.querySelectorAll('[data-editor-ui]').forEach(element => element.remove())
+  }
+
+  function optimizeCurrentSvg() {
+    const stage = drawing.current
+    if (!stage) return
+    optimizeSvgDocument(stage.node)
+    recordHistory(stage)
+    setOptimizationReport(`Usunięto nieużywane definicje i zaokrąglono współrzędne ścieżek. Pozostało ${stage.node.querySelectorAll('defs > *').length} definicji.`)
+  }
+
   function addArtboard() {
     const stage = drawing.current
     if (!stage) return
     const [width, height] = artboardPreset.split('x').map(Number)
     const count = directObjects(stage.node).filter(element => element.hasAttribute('data-artboard')).length
-    const columns = Math.max(1, Math.floor((WIDTH - 20) / (width + 20)))
-    const rows = Math.max(1, Math.floor((HEIGHT - 20) / (height + 20)))
-    if (count >= columns * rows) return
+    const columns = Math.max(1, Math.floor((documentSize.width - 20) / (width + 20)))
     const x = 20 + (count % columns) * (width + 20)
     const y = 20 + Math.floor(count / columns) * (height + 20)
+    if (y + height > documentSize.height) changeDocumentDimension('height', displayedDimension(y + height + 20))
+    if (x + width > documentSize.width) changeDocumentDimension('width', displayedDimension(x + width + 20))
     const board = stage.rect(width, height).move(x, y).fill('#ffffff').stroke({ color: '#aeb7cb', width: 1, dasharray: '7 5' })
     const id = crypto.randomUUID()
     board.attr({ 'data-object-id': id, 'data-artboard': 'true', 'data-layer-name': `Plansza ${count + 1}`, 'data-layer-locked': 'true', 'pointer-events': 'all' })
     const firstOther = directObjects(stage.node).find(element => element !== board.node)
     if (firstOther) stage.node.insertBefore(board.node, firstOther)
     recordHistory(stage)
+    setArtboardExportId(id)
     select([id])
   }
 
+  function duplicateArtboard(id: string) {
+    const stage = drawing.current
+    const board = stage ? elementsForIds(stage.node, [id])[0] : undefined
+    const box = board ? getBox(board) : undefined
+    if (!stage || !board || !box) return
+    const clone = board.cloneNode(true) as SVGElement
+    const newId = crypto.randomUUID()
+    clone.setAttribute('data-object-id', newId); clone.setAttribute('data-layer-name', `${board.getAttribute('data-layer-name') || 'Plansza'} — kopia`)
+    moveElementBy(clone, box.width + 20, 0)
+    stage.node.insertBefore(clone, board.nextSibling)
+    if (box.x + box.width * 2 + 20 > documentSize.width) changeDocumentDimension('width', displayedDimension(box.x + box.width * 2 + 20))
+    recordHistory(stage); select([newId]); setArtboardExportId(newId)
+  }
+
+  function chooseArtboardExport(id: string) {
+    setArtboardExportId(id)
+    if (!id) { setExportSize({ width: Math.round(documentSize.width), height: Math.round(documentSize.height) }); return }
+    const board = id && drawing.current ? elementsForIds(drawing.current.node, [id])[0] : undefined
+    const box = board ? getBox(board) : undefined
+    if (box) setExportSize({ width: Math.max(1, Math.round(box.width)), height: Math.max(1, Math.round(box.height)) })
+  }
+
   function addGuide(axis: 'x' | 'y') {
-    const value = axis === 'x' ? WIDTH / 2 : HEIGHT / 2
+    const value = axis === 'x' ? documentSize.width / 2 : documentSize.height / 2
     setViewOptions(current => ({ ...current, guides: [...current.guides, { axis, value }] }))
   }
 
@@ -2258,27 +2922,6 @@ export function VectorEditor({
     select([id])
   }
 
-  function setGradientFill() {
-    const stage = drawing.current
-    const elements = stage ? elementsForIds(stage.node, selectedIdsRef.current) : []
-    if (!stage || !elements.length) return
-    const defs = stage.node.querySelector('defs') ?? document.createElementNS(SVG_NS, 'defs')
-    if (!defs.parentNode) stage.node.prepend(defs)
-    const gradient = document.createElementNS(SVG_NS, 'linearGradient')
-    const id = `gradient-${crypto.randomUUID()}`
-    gradient.setAttribute('id', id); gradient.setAttribute('x1', '0%'); gradient.setAttribute('y1', '0%'); gradient.setAttribute('x2', '100%'); gradient.setAttribute('y2', '100%')
-    for (const [offset, color] of [['0%', fillColor], ['100%', strokeColor]] as const) {
-      const stop = document.createElementNS(SVG_NS, 'stop')
-      stop.setAttribute('offset', offset); stop.setAttribute('stop-color', color); stop.setAttribute('stop-opacity', '1'); gradient.append(stop)
-    }
-    defs.append(gradient)
-    elements.forEach(element => {
-      element.setAttribute('fill', `url(#${id})`)
-      element.querySelectorAll('[fill]').forEach(child => child.setAttribute('fill', `url(#${id})`))
-    })
-    recordHistory(stage)
-  }
-
   function createCheckpoint() {
     const stage = drawing.current
     if (!stage) return
@@ -2305,16 +2948,47 @@ export function VectorEditor({
     setCommentDraft(null)
   }
 
+  function exportSpriteSource(): string | undefined {
+    const stage = drawing.current
+    if (!stage) return undefined
+    const boards = directObjects(stage.node).filter(element => element.hasAttribute('data-artboard'))
+    const chosen = boards.filter(board => !artboardExportId || board.getAttribute('data-object-id') === artboardExportId)
+    const exportBoards: (SVGElement | null)[] = chosen.length ? chosen : [null]
+    const defs = stage.node.querySelector('defs')?.cloneNode(true) as SVGDefsElement | undefined
+    const svg = document.createElementNS(SVG_NS, 'svg')
+    svg.setAttribute('xmlns', SVG_NS); svg.setAttribute('width', '1'); svg.setAttribute('height', '1'); svg.setAttribute('viewBox', '0 0 1 1')
+    const outputDefs = defs ?? document.createElementNS(SVG_NS, 'defs')
+    if (!defs) svg.append(outputDefs)
+    exportBoards.forEach((board, index) => {
+      const box = board ? getBox(board) : { x: 0, y: 0, width: documentSize.width, height: documentSize.height }
+      if (!box) return
+      const symbol = document.createElementNS(SVG_NS, 'symbol')
+      const label = board?.getAttribute('data-layer-name') || `plansza-${index + 1}`
+      const symbolId = label.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '') || `plansza-${index + 1}`
+      symbol.setAttribute('id', `sprite-${symbolId}-${index + 1}`); symbol.setAttribute('viewBox', `${box.x} ${box.y} ${Math.max(1, box.width)} ${Math.max(1, box.height)}`)
+      directObjects(stage.node).filter(element => !element.hasAttribute('data-artboard') && intersect(box, getBox(element) ?? { x: -1, y: -1, width: 0, height: 0 })).forEach(element => symbol.append(element.cloneNode(true)))
+      outputDefs.append(symbol)
+    })
+    if (outputDefs.parentNode !== svg) svg.append(outputDefs)
+    if (optimizationEnabled) optimizeSvgDocument(svg)
+    return sanitizeSvg(new XMLSerializer().serializeToString(svg))
+  }
+
   function exportSvgSource(): string | undefined {
     const stage = drawing.current
     if (!stage) return undefined
+    if (exportFormat === 'sprite') return exportSpriteSource()
     const copy = stage.node.cloneNode(true) as SVGSVGElement
     copy.querySelectorAll('[data-editor-ui]').forEach(element => element.remove())
     const removeBackground = fitToContent || (exportFormat === 'png' && exportTransparent)
     if (removeBackground) copy.querySelectorAll('[data-background]').forEach(element => element.remove())
     else copy.querySelectorAll('[data-background]').forEach(element => element.removeAttribute('data-background'))
+    copy.querySelectorAll('[data-artboard="true"]').forEach(element => element.remove())
     copy.setAttribute('width', `${exportSize.width}`); copy.setAttribute('height', `${exportSize.height}`)
-    if (fitToContent) {
+    const artboard = artboardExportId ? directObjects(stage.node).find(element => element.getAttribute('data-object-id') === artboardExportId) : undefined
+    const artboardBounds = artboard ? getBox(artboard) : undefined
+    if (artboardBounds) copy.setAttribute('viewBox', `${artboardBounds.x} ${artboardBounds.y} ${artboardBounds.width} ${artboardBounds.height}`)
+    else if (fitToContent) {
       const bounds = unionBoxes(directObjects(stage.node).map(getBox))
       if (bounds) {
         const margin = 20
@@ -2322,7 +2996,8 @@ export function VectorEditor({
         const width = Math.max(1, Math.ceil(bounds.width + margin * 2)); const height = Math.max(1, Math.ceil(bounds.height + margin * 2))
         copy.setAttribute('viewBox', `${x} ${y} ${width} ${height}`)
       }
-    }
+    } else copy.setAttribute('viewBox', `0 0 ${documentSize.width} ${documentSize.height}`)
+    if (optimizationEnabled) optimizeSvgDocument(copy)
     return sanitizeSvg(new XMLSerializer().serializeToString(copy))
   }
 
@@ -2330,11 +3005,11 @@ export function VectorEditor({
     try {
       const source = exportSvgSource()
       if (!source) return
-      const filename = `${asset?.fileName?.replace(/\.svg$/i, '') || 'schemat'}.${exportFormat}`
-      if (exportFormat === 'svg') {
+      const filename = `${asset?.fileName?.replace(/\.svg$/i, '') || 'schemat'}${artboardExportId ? '-plansza' : ''}.${exportFormat === 'png' ? 'png' : 'svg'}`
+      if (exportFormat !== 'png') {
         const url = URL.createObjectURL(new Blob([source], { type: 'image/svg+xml;charset=utf-8' }))
         const link = document.createElement('a'); link.href = url; link.download = filename; link.click(); window.setTimeout(() => URL.revokeObjectURL(url), 1000)
-        setWorkflowMessage('Pobrano plik SVG.')
+        setWorkflowMessage(exportFormat === 'sprite' ? 'Pobrano arkusz sprite SVG.' : 'Pobrano plik SVG.')
         return
       }
       const url = URL.createObjectURL(new Blob([source], { type: 'image/svg+xml;charset=utf-8' }))
@@ -2432,6 +3107,46 @@ export function VectorEditor({
     updateConnectors(stage.node); recordHistory(stage)
   }
 
+  function applyConnectorStyle(style: 'straight' | 'orthogonal' | 'rounded') {
+    const stage = drawing.current
+    const lines = selectedElements().filter(element => element.tagName.toLowerCase() === 'line')
+    if (!stage || !lines.length) return
+    setConnectorStyle(style)
+    const routeEnabled = style !== 'straight'
+    autoRouteRef.current = routeEnabled; setAutoRoute(routeEnabled)
+    lines.forEach(line => {
+      line.setAttribute('data-route-style', style)
+      if (style === 'straight') line.removeAttribute('data-auto-route')
+      else line.setAttribute('data-auto-route', 'true')
+      if (style === 'straight' && !line.hasAttribute('data-connector-label') && !line.hasAttribute('data-start-target') && !line.hasAttribute('data-end-target')) {
+        const id = line.getAttribute('data-object-id')
+        if (id) stage.node.querySelector(`[data-connector-visual-for="${CSS.escape(id)}"]`)?.remove()
+        line.removeAttribute('stroke-opacity')
+      }
+    })
+    updateConnectors(stage.node); recordHistory(stage)
+  }
+
+  function applyConnectorPortType(type: 'free' | 'input' | 'output' | 'both') {
+    setConnectorPortType(type)
+    updateSelected(element => {
+      if (['line', 'text'].includes(element.tagName.toLowerCase())) return
+      if (type === 'free') element.removeAttribute('data-connector-port')
+      else element.setAttribute('data-connector-port', type)
+    })
+  }
+
+  function saveConnectorLabel() {
+    const stage = drawing.current
+    const lines = selectedElements().filter(element => element.tagName.toLowerCase() === 'line')
+    if (!stage || !lines.length) return
+    lines.forEach(line => {
+      if (connectorLabel.trim()) line.setAttribute('data-connector-label', connectorLabel.trim())
+      else line.removeAttribute('data-connector-label')
+    })
+    updateConnectors(stage.node); recordHistory(stage)
+  }
+
   function applySampledColor(color: string) {
     setStrokeColor(color); strokeColorRef.current = color
     setFillColor(color); fillColorRef.current = color
@@ -2457,6 +3172,47 @@ export function VectorEditor({
       if (change.italic !== undefined) element.setAttribute('font-style', change.italic ? 'italic' : 'normal')
     })
     if (change.italic !== undefined) { setFontItalic(change.italic); fontItalicRef.current = change.italic }
+    recordHistory(stage)
+  }
+
+  function applyPenNodeMode(mode: 'smooth' | 'corner' | 'symmetric') {
+    const stage = drawing.current
+    const path = selectedElements().find(element => element.hasAttribute('data-editor-pen')) as SVGPathElement | undefined
+    const points = path ? readPenPoints(path) : []
+    const index = selectedPenNodeIndex
+    const node = index === null ? undefined : points[index]
+    if (!stage || !path || index === null || !node) return
+    node.mode = mode
+    setPenNodeMode(mode)
+    if (mode === 'corner') { delete node.incoming; delete node.outgoing }
+    else {
+      const previous = points[index - 1]
+      const next = points[index + 1]
+      const tangentX = previous && next ? (next.x - previous.x) / 6 : next ? (next.x - node.x) / 6 : previous ? (node.x - previous.x) / 6 : 10
+      const tangentY = previous && next ? (next.y - previous.y) / 6 : next ? (next.y - node.y) / 6 : previous ? (node.y - previous.y) / 6 : 0
+      let dx = node.outgoing ? node.outgoing.x - node.x : tangentX
+      let dy = node.outgoing ? node.outgoing.y - node.y : tangentY
+      const magnitude = mode === 'symmetric'
+        ? Math.max(1, Math.hypot(dx, dy))
+        : Math.max(1, Math.hypot(node.incoming ? node.incoming.x - node.x : 0, node.incoming ? node.incoming.y - node.y : 0), Math.hypot(dx, dy))
+      const lengthOut = mode === 'symmetric' || !node.outgoing ? magnitude : Math.hypot(dx, dy)
+      const lengthIn = mode === 'symmetric' || !node.incoming ? magnitude : Math.hypot(node.incoming.x - node.x, node.incoming.y - node.y)
+      const angle = Math.atan2(dy, dx)
+      node.outgoing = { x: node.x + Math.cos(angle) * lengthOut, y: node.y + Math.sin(angle) * lengthOut }
+      node.incoming = { x: node.x - Math.cos(angle) * lengthIn, y: node.y - Math.sin(angle) * lengthIn }
+    }
+    path.setAttribute('data-pen-points', JSON.stringify(points)); path.setAttribute('d', penPath(points))
+    recordHistory(stage); renderOverlay(stage, selectedIdsRef.current)
+  }
+
+  function applyGroupConstraint(value: 'free' | 'aspect') {
+    const stage = drawing.current
+    if (!stage) return
+    setGroupConstraint(value)
+    selectedElements().forEach(element => {
+      if (value === 'aspect') element.setAttribute('data-layout-constraint', 'aspect')
+      else element.removeAttribute('data-layout-constraint')
+    })
     recordHistory(stage)
   }
 
@@ -2502,6 +3258,10 @@ export function VectorEditor({
         copy.setAttribute('width', `${width}`)
         copy.setAttribute('height', `${height}`)
       }
+    } else {
+      copy.setAttribute('width', documentLength(documentSize.width))
+      copy.setAttribute('height', documentLength(documentSize.height))
+      copy.setAttribute('viewBox', `0 0 ${documentSize.width} ${documentSize.height}`)
     }
     onSave(sanitizeSvg(new XMLSerializer().serializeToString(copy)))
   }
@@ -2522,7 +3282,16 @@ export function VectorEditor({
   const layerItems = drawing.current ? [...directObjects(drawing.current.node)].reverse() : []
   const reusableSymbols = drawing.current ? Array.from(drawing.current.node.querySelectorAll<SVGSymbolElement>('defs symbol')) : []
   const selectedImage = drawing.current ? elementsForIds(drawing.current.node, selectedIds).find(element => element.tagName.toLowerCase() === 'image') : undefined
+  const artboards = drawing.current ? directObjects(drawing.current.node).filter(element => element.hasAttribute('data-artboard')) : []
+  const selectedPaths = selectedElements().filter(element => element.tagName.toLowerCase() === 'path')
+  const zoomPercent = Math.round(documentSize.width / Math.max(viewBox.width, 1) * 100)
   const palette = ['#596fd8', '#e76c75', '#2b9a83', '#f0a84b', '#222c42', '#8a5bc2', '#3e8cc9', '#ffffff', '#111827']
+  const paletteCommands = [
+    ...tools.map(item => ({ id: `tool:${item.id}`, label: `Narzędzie: ${item.label}` })),
+    { id: 'undo', label: 'Cofnij' }, { id: 'redo', label: 'Ponów' }, { id: 'fit', label: 'Dopasuj cały rysunek' },
+    { id: 'fitSelection', label: 'Dopasuj zaznaczenie' }, { id: 'accessibility', label: 'Sprawdź dostępność' },
+    { id: 'optimize', label: 'Optymalizuj SVG' }, { id: 'save', label: 'Zapisz grafikę' },
+  ].filter(command => command.label.toLowerCase().includes(commandQuery.trim().toLowerCase()))
 
   return (
     <div className="modal-backdrop" role="presentation" onMouseDown={event => { if (event.target === event.currentTarget) onClose() }}>
@@ -2585,24 +3354,61 @@ export function VectorEditor({
         </nav>
         <div className="drawing-feature-panel" role="tabpanel" data-revision={layerRevision}>
           {activePanel === 'canvas' && <div className="drawing-feature-row">
+            <button className="button secondary compact-feature-button" onClick={() => zoomAtCenter(1.2)} title="Powiększ"><Plus size={13} /></button>
+            <output className="feature-help" aria-label="Powiększenie">{zoomPercent}%</output>
+            <button className="button secondary compact-feature-button" onClick={() => zoomAtCenter(1 / 1.2)} title="Pomniejsz"><Minus size={13} /></button>
+            <button className="button secondary compact-feature-button" onClick={() => fitViewToContent(false)}>Dopasuj wszystko</button>
+            <button className="button secondary compact-feature-button" onClick={() => fitViewToContent(true)} disabled={!selectedIds.length}>Dopasuj zaznaczenie</button>
+            <label className="geometry-control"><span>Szerokość</span><input type="number" min="1" value={displayedDimension(documentSize.width)} onChange={event => changeDocumentDimension('width', Number(event.target.value) || 1)} /></label>
+            <label className="geometry-control"><span>Wysokość</span><input type="number" min="1" value={displayedDimension(documentSize.height)} onChange={event => changeDocumentDimension('height', Number(event.target.value) || 1)} /></label>
+            <label className="drawing-select-control"><span>Jednostka</span><select value={documentUnit} onChange={event => setDocumentUnit(event.target.value as DocumentUnit)}><option value="px">px</option><option value="mm">mm</option><option value="in">in</option></select></label>
+            <label className="fill-toggle"><input type="checkbox" checked={lockDocumentRatio} onChange={event => { setLockDocumentRatio(event.target.checked); documentRatio.current = documentSize.width / Math.max(documentSize.height, 1) }} />Zachowaj proporcje</label>
+            <span className="feature-help">Spacja + przeciągnięcie przesuwa płótno. Ctrl/Cmd + kółko zmienia powiększenie.</span>
             <label className="fill-toggle"><input type="checkbox" checked={viewOptions.grid} onChange={event => setViewOptions(current => ({ ...current, grid: event.target.checked }))} />Siatka</label>
             <label className="drawing-select-control"><span>Odstęp</span><select value={viewOptions.gridSize} onChange={event => setViewOptions(current => ({ ...current, gridSize: Number(event.target.value) }))}>{[8, 10, 16, 20, 25, 32, 40, 50].map(size => <option key={size} value={size}>{size} px</option>)}</select></label>
             <label className="fill-toggle"><input type="checkbox" checked={viewOptions.snap} onChange={event => setViewOptions(current => ({ ...current, snap: event.target.checked }))} />Przyciągaj</label>
             <label className="fill-toggle"><input type="checkbox" checked={viewOptions.rulers} onChange={event => setViewOptions(current => ({ ...current, rulers: event.target.checked }))} /><Ruler size={14} />Linijki</label>
+            <label className="fill-toggle"><input type="checkbox" checked={guideLockAll} onChange={event => { setGuideLockAll(event.target.checked); setViewOptions(current => ({ ...current, guides: current.guides.map(guide => ({ ...guide, locked: event.target.checked })) })) }} />Zablokuj prowadnice</label>
             <label className="fill-toggle"><input type="checkbox" checked={showMinimap} onChange={event => setShowMinimap(event.target.checked)} />Mini mapa</label>
             <button className="button secondary compact-feature-button" onClick={() => addGuide('x')}><Plus size={13} />Pionowa prowadnica</button>
             <button className="button secondary compact-feature-button" onClick={() => addGuide('y')}><Plus size={13} />Pozioma prowadnica</button>
             <button className="button secondary compact-feature-button" onClick={() => setViewOptions(current => ({ ...current, guides: [] }))} disabled={!viewOptions.guides.length}>Usuń prowadnice ({viewOptions.guides.length})</button>
-            {viewOptions.guides.map((guide, index) => <div className="geometry-control guide-position-control" key={`${guide.axis}-${index}`}><span>{guide.axis === 'x' ? 'Pionowa X' : 'Pozioma Y'}</span><input type="number" min="0" max={guide.axis === 'x' ? WIDTH : HEIGHT} value={guide.value} onChange={event => setViewOptions(current => ({ ...current, guides: current.guides.map((item, currentIndex) => currentIndex === index ? { ...item, value: Number(event.target.value) } : item) }))} /><button className="tool-button" onClick={() => setViewOptions(current => ({ ...current, guides: current.guides.filter((_item, currentIndex) => currentIndex !== index) }))} aria-label="Usuń prowadnicę"><X size={12} /></button></div>)}
+            {viewOptions.guides.map((guide, index) => <div className="geometry-control guide-position-control" key={`${guide.axis}-${index}`}><span>{guide.axis === 'x' ? 'Pionowa X' : 'Pozioma Y'}</span><input type="number" min="0" max={guide.axis === 'x' ? documentSize.width : documentSize.height} value={guide.value} disabled={guide.locked || guideLockAll} onChange={event => setViewOptions(current => ({ ...current, guides: current.guides.map((item, currentIndex) => currentIndex === index ? { ...item, value: Number(event.target.value) } : item) }))} /><label className="fill-toggle" title="Zablokuj prowadnicę"><input type="checkbox" checked={Boolean(guide.locked)} onChange={event => setViewOptions(current => ({ ...current, guides: current.guides.map((item, currentIndex) => currentIndex === index ? { ...item, locked: event.target.checked } : item) }))} /><Lock size={12} /></label><button className="tool-button" onClick={() => setViewOptions(current => ({ ...current, guides: current.guides.filter((_item, currentIndex) => currentIndex !== index) }))} aria-label="Usuń prowadnicę"><X size={12} /></button></div>)}
             <label className="drawing-select-control"><span>Plansza</span><select value={artboardPreset} onChange={event => setArtboardPreset(event.target.value)}><option value="360x220">Pozioma 360 × 220</option><option value="220x360">Pionowa 220 × 360</option><option value="220x220">Kwadrat 220 × 220</option></select></label>
             <button className="button secondary compact-feature-button" onClick={addArtboard}><Plus size={13} />Dodaj planszę</button>
+            {artboards.map((board, index) => {
+              const id = board.getAttribute('data-object-id') ?? ''
+              const label = board.getAttribute('data-layer-name') || `Plansza ${index + 1}`
+              return <div className={`drawing-artboard-row ${selectedIds.includes(id) ? 'selected' : ''}`} key={id}>
+                <button className="button secondary compact-feature-button" onClick={() => { select([id]); chooseArtboardExport(id) }}>Zaznacz {index + 1}</button>
+                <input aria-label={`Nazwa planszy ${index + 1}`} defaultValue={label} onBlur={event => changeLayer(id, element => element.setAttribute('data-layer-name', event.target.value.trim() || label))} onKeyDown={event => { if (event.key === 'Enter') event.currentTarget.blur() }} />
+                <button className="button secondary compact-feature-button" onClick={() => duplicateArtboard(id)}>Duplikuj</button>
+                <button className="button secondary compact-feature-button" onClick={() => chooseArtboardExport(id)}>Eksport</button>
+              </div>
+            })}
             <span className="feature-help">Siatka i prowadnice są pomocnicze; nie trafiają do zapisanego SVG.</span>
           </div>}
 
           {activePanel === 'style' && <div className="drawing-feature-row drawing-style-feature-row">
             <div className="drawing-palette" aria-label="Paleta kolorów">{palette.map(color => <button key={color} className="palette-swatch" style={{ backgroundColor: color }} onClick={() => { applyStrokeColor(color); applyFillColor(color) }} title={`Ustaw kolor ${color}`} aria-label={`Ustaw kolor ${color}`} />)}</div>
             <button className={`button secondary compact-feature-button ${eyedropper ? 'feature-active' : ''}`} onClick={() => setEyedropper(value => !value)} title="Kliknij figurę, aby pobrać jej kolor"><Pipette size={14} />Pipeta</button>
-            <button className="button secondary compact-feature-button" onClick={setGradientFill} disabled={!selectedIds.length} title="Utwórz gradient z kolorów wypełnienia i konturu">Gradient</button>
+            <button className="button secondary compact-feature-button" onClick={applyGradient} disabled={!selectedIds.length} title="Utwórz gradient trójstopniowy">Gradient</button>
+            <label className="drawing-select-control"><span>Typ gradientu</span><select value={gradientKind} onChange={event => setGradientKind(event.target.value as 'linear' | 'radial')}><option value="linear">Liniowy</option><option value="radial">Promieniowy</option></select></label>
+            {gradientKind === 'linear' && <label className="geometry-control"><span>Kąt °</span><input type="number" min="0" max="360" value={gradientAngle} onChange={event => setGradientAngle(Number(event.target.value))} /></label>}
+            <label className="color-control" title="Kolor środkowego punktu gradientu"><input type="color" value={gradientMiddle} onChange={event => setGradientMiddle(event.target.value)} aria-label="Kolor środkowego punktu gradientu" /><span>Środek</span></label>
+            <label className="drawing-select-control"><span>Wzorek</span><select value={patternKind} onChange={event => setPatternKind(event.target.value as 'dots' | 'lines' | 'diagonal')}><option value="dots">Kropki</option><option value="lines">Linie</option><option value="diagonal">Ukośny</option></select></label>
+            <button className="button secondary compact-feature-button" onClick={applyPattern} disabled={!selectedIds.length}>Wypełnij wzorkiem</button>
+            <button className="button secondary compact-feature-button" onClick={copyStyle} disabled={!selectedIds.length}>Kopiuj styl</button>
+            <button className="button secondary compact-feature-button" onClick={pasteStyle} disabled={!selectedIds.length || !selectedStyle}>Wklej styl</button>
+            <button className="button secondary compact-feature-button" onClick={saveStylePreset} disabled={!selectedIds.length}>Zapisz preset stylu</button>
+            {stylePresets.map(preset => <button key={preset.name} className="button secondary compact-feature-button" onClick={() => applyStylePreset(preset)} disabled={!selectedIds.length} title={`Zastosuj zapisany styl ${preset.name}`}>{preset.name}</button>)}
+            <button className="button secondary compact-feature-button" onClick={applyTextToPath} disabled={!selectedPaths.length || !selectedElements().some(element => element.tagName.toLowerCase() === 'text')}>Umieść tekst na ścieżce</button>
+            {selectedImage && <>
+              <button className="button secondary compact-feature-button" onClick={() => applyImageTransform('x')}>Odbij obraz ↔</button>
+              <button className="button secondary compact-feature-button" onClick={() => applyImageTransform('y')}>Odbij obraz ↕</button>
+              <input ref={replaceImageInput} hidden type="file" accept="image/png,image/jpeg,image/gif,image/webp" onChange={event => { void replaceSelectedImage(event.target.files?.[0]); event.currentTarget.value = '' }} />
+              <button className="button secondary compact-feature-button" onClick={() => replaceImageInput.current?.click()}>Zastąp obraz</button>
+            </>}
             <label className="line-width-control"><span>Przezroczystość</span><input type="range" min="0" max="100" step="1" value={opacity} onChange={event => applyObjectOpacity(Number(event.target.value))} /><output>{opacity}%</output></label>
             <label className="geometry-control"><span>Obrót °</span><input type="number" min="-360" max="360" step="1" value={rotationDraft} disabled={!selectedIds.length} onChange={event => setRotationDraft(event.target.value)} onKeyDown={event => { if (event.key === 'Enter') applyRotation() }} /></label>
             <button className="button secondary compact-feature-button" onClick={applyRotation} disabled={!selectedIds.length}><RotateCw size={13} />Obróć</button>
@@ -2610,6 +3416,9 @@ export function VectorEditor({
             <label className="drawing-select-control"><span>Grubość</span><select value={fontWeight} onChange={event => { setFontWeight(event.target.value); applyTypography({ weight: event.target.value }) }}><option value="400">Zwykła</option><option value="600">Półgruba</option><option value="700">Pogrubiona</option></select></label>
             <label className="drawing-select-control"><span>Wyrównanie</span><select value={textAlign} onChange={event => { setTextAlign(event.target.value); applyTypography({ align: event.target.value }) }}><option value="start">Do lewej</option><option value="middle">Do środka</option><option value="end">Do prawej</option></select></label>
             <label className="fill-toggle"><input type="checkbox" checked={fontItalic} onChange={event => applyTypography({ italic: event.target.checked })} disabled={!selectedIds.length} />Kursywa</label>
+            <label className="geometry-control"><span>Odsunięcie konturu</span><input type="number" min="0" max="60" value={offsetDistance} onChange={event => setOffsetDistance(Math.max(0, Number(event.target.value) || 0))} /></label>
+            <button className="button secondary compact-feature-button" onClick={applyStrokeOffset} disabled={!selectedIds.length}>Dodaj odsunięty kontur</button>
+            {selectedPenNodeIndex !== null && selectedPaths.some(path => path.hasAttribute('data-editor-pen')) && <label className="drawing-select-control"><span>Węzeł Béziera</span><select value={penNodeMode} onChange={event => applyPenNodeMode(event.target.value as 'smooth' | 'corner' | 'symmetric')}><option value="corner">Narożny</option><option value="smooth">Gładki</option><option value="symmetric">Symetryczny</option></select></label>}
             <span className="feature-help">Typografia działa na zaznaczonych elementach tekstowych. Przezroczystość stosuje się do całej figury.</span>
           </div>}
 
@@ -2624,9 +3433,18 @@ export function VectorEditor({
               <button className="button secondary compact-feature-button" onClick={() => alignSelection('y', 'end')} disabled={selectedIds.length < 2}>Wyrównaj do dołu</button>
               <button className="button secondary compact-feature-button" onClick={() => distributeSelection('y')} disabled={selectedIds.length < 3}>Rozłóż pionowo</button>
               <span className="toolbar-divider" />
-              <button className="button secondary compact-feature-button" onClick={() => applyBoolean('union')} disabled={selectedIds.length < 2} title="Łączy zaznaczenie w jedną warstwę grupową, zachowując edytowalne figury">Połącz w grupę</button>
+              <button className="button secondary compact-feature-button" onClick={groupSelected} disabled={selectedIds.length < 2} title="Grupuje figury i zachowuje je do osobnej edycji">Połącz w grupę</button>
+              <button className="button secondary compact-feature-button" onClick={() => applyBoolean('union')} disabled={selectedIds.length < 2} title="Tworzy jedną wypełnioną sylwetkę z sumy figur">Suma kształtów</button>
               <button className="button secondary compact-feature-button" onClick={() => applyBoolean('subtract')} disabled={selectedIds.length < 2}>Odejmij ostatnią</button>
               <button className="button secondary compact-feature-button" onClick={() => applyBoolean('intersect')} disabled={selectedIds.length < 2}>Część wspólna</button>
+              <button className="button secondary compact-feature-button" onClick={() => applyBoolean('exclude')} disabled={selectedIds.length !== 2}>Wyklucz wspólną część</button>
+              <span className="toolbar-divider" />
+              <button className="button secondary compact-feature-button" onClick={() => applyPathOperation('close')} disabled={!selectedPaths.length}>Zamknij ścieżkę</button>
+              <button className="button secondary compact-feature-button" onClick={() => applyPathOperation('simplify')} disabled={!selectedPaths.length}>Uprość ścieżkę</button>
+              <button className="button secondary compact-feature-button" onClick={() => applyPathOperation('split')} disabled={selectedPaths.length !== 1}>Podziel na pół</button>
+              <button className="button secondary compact-feature-button" onClick={() => applyPathOperation('join')} disabled={selectedPaths.length < 2}>Połącz ścieżki</button>
+              <button className="button secondary compact-feature-button" onClick={clipSelectedImage} disabled={!selectedImage || selectedElements().length < 2}>Przytnij obraz kształtem</button>
+              <label className="drawing-select-control"><span>Skalowanie grupy</span><select value={groupConstraint} onChange={event => applyGroupConstraint(event.target.value as 'free' | 'aspect')} disabled={!selectedIds.length}><option value="free">Dowolne</option><option value="aspect">Zachowaj proporcje</option></select></label>
               <button className="button secondary compact-feature-button" onClick={createSymbolFromSelection} disabled={!selectedIds.length}>Zapisz zaznaczenie jako symbol</button>
               {reusableSymbols.map((symbol, index) => <button key={symbol.id} className="button secondary compact-feature-button" onClick={() => insertSymbol(symbol.id ?? '')} title="Wstaw ponownie edytowalny symbol"><Plus size={12} />Symbol {index + 1}</button>)}
             </div>
@@ -2652,6 +3470,9 @@ export function VectorEditor({
           {activePanel === 'workflow' && <div className="drawing-workflow-grid">
             <section className="drawing-workflow-card"><h3><Waypoints size={15} />Połączenia i komentarze</h3>
               <label className="fill-toggle"><input type="checkbox" checked={autoRoute} onChange={event => applyRouteSetting(event.target.checked)} />Automatycznie omijaj figury dla strzałek</label>
+              <label className="drawing-select-control"><span>Prowadzenie</span><select value={connectorStyle} disabled={!selectedElements().some(element => element.tagName.toLowerCase() === 'line')} onChange={event => applyConnectorStyle(event.target.value as 'straight' | 'orthogonal' | 'rounded')}><option value="straight">Proste</option><option value="orthogonal">Łamane</option><option value="rounded">Zaokrąglone</option></select></label>
+              <label className="drawing-select-control"><span>Port zaznaczonej figury</span><select value={connectorPortType} disabled={!selectedIds.length || selectedElements().every(element => ['line', 'text'].includes(element.tagName.toLowerCase()))} onChange={event => applyConnectorPortType(event.target.value as 'free' | 'input' | 'output' | 'both')}><option value="free">Dowolny</option><option value="input">Wejście</option><option value="output">Wyjście</option><option value="both">Dwukierunkowy</option></select></label>
+              <div className="drawing-feature-row"><input className="drawing-connector-label-input" value={connectorLabel} onChange={event => setConnectorLabel(event.target.value)} placeholder="Etykieta strzałki" aria-label="Etykieta zaznaczonego połączenia" /><button className="button secondary compact-feature-button" onClick={saveConnectorLabel} disabled={!selectedElements().some(element => element.tagName.toLowerCase() === 'line')}>Ustaw etykietę</button></div>
               <button className="button secondary compact-feature-button" onClick={addComment}><MessageSquare size={14} />Dodaj komentarz do planszy</button>
               <p className="feature-help">Komentarze są zapisywane lokalnie na planszy i nie trafiają do wyeksportowanego SVG.</p>
               <div className="drawing-comment-list">{comments.map(comment => <div key={comment.id}><span>{comment.text}</span><button onClick={() => setComments(current => current.filter(item => item.id !== comment.id))} aria-label="Usuń komentarz"><X size={12} /></button></div>)}</div>
@@ -2666,8 +3487,21 @@ export function VectorEditor({
               <button className="button secondary compact-feature-button" onClick={createCheckpoint}><Plus size={14} />Zapisz punkt kontrolny</button>
               <div className="drawing-checkpoint-list">{checkpoints.map(checkpoint => <div key={checkpoint.id}><button onClick={() => restoreCheckpoint(checkpoint)} title={checkpoint.label}>{checkpoint.label}</button><button onClick={() => setCheckpoints(current => current.filter(item => item.id !== checkpoint.id))} aria-label="Usuń punkt kontrolny"><X size={12} /></button></div>)}</div>
             </section>
+            <section className="drawing-workflow-card"><h3><Check size={15} />Dostępność</h3>
+              <button className="button secondary compact-feature-button" onClick={inspectAccessibility}>Sprawdź opisy i kontrast</button>
+              <button className="button secondary compact-feature-button" onClick={addSelectedNodeTitle} disabled={!selectedIds.length}>Dodaj etykiety zaznaczeniu</button>
+              {accessibilityOpen && <div className="drawing-a11y-report" role="status">{accessibilityReport.length ? accessibilityReport.map((issue, index) => <p key={index}>{issue}</p>) : <p>Nie znaleziono brakujących opisów ani niskiego kontrastu tekstu.</p>}</div>}
+            </section>
+            <section className="drawing-workflow-card"><h3><History size={15} />Skróty i optymalizacja</h3>
+              <label className="geometry-control"><span>Otwórz paletę: Ctrl/Cmd + Shift +</span><input value={shortcutKey} maxLength={1} aria-label="Klawisz skrótu palety poleceń" onChange={event => { const key = event.target.value.slice(-1).toLowerCase() || 'p'; setShortcutKey(key); try { localStorage.setItem('no-tie-svg-command-shortcut', key) } catch { /* The shortcut still applies until the editor closes. */ } }} /></label>
+              <button className="button secondary compact-feature-button" onClick={() => setCommandPaletteOpen(true)}>Otwórz paletę poleceń</button>
+              <label className="fill-toggle"><input type="checkbox" checked={optimizationEnabled} onChange={event => setOptimizationEnabled(event.target.checked)} />Optymalizuj podczas eksportu SVG</label>
+              <button className="button secondary compact-feature-button" onClick={optimizeCurrentSvg}>Optymalizuj bieżący rysunek</button>
+              {optimizationReport && <p className="feature-help">{optimizationReport}</p>}
+            </section>
             <section className="drawing-workflow-card"><h3><Download size={15} />Eksport</h3>
-              <div className="drawing-feature-row"><label className="drawing-select-control"><span>Format</span><select value={exportFormat} onChange={event => setExportFormat(event.target.value as 'svg' | 'png')}><option value="svg">SVG</option><option value="png">PNG</option></select></label>
+              <div className="drawing-feature-row"><label className="drawing-select-control"><span>Format</span><select value={exportFormat} onChange={event => setExportFormat(event.target.value as 'svg' | 'png' | 'sprite')}><option value="svg">SVG</option><option value="sprite">Arkusz sprite SVG</option><option value="png">PNG</option></select></label>
+                <label className="drawing-select-control"><span>Obszar</span><select value={artboardExportId} onChange={event => chooseArtboardExport(event.target.value)}><option value="">Cały dokument</option>{artboards.map((board, index) => <option key={board.getAttribute('data-object-id')} value={board.getAttribute('data-object-id') ?? ''}>{board.getAttribute('data-layer-name') || `Plansza ${index + 1}`}</option>)}</select></label>
                 <label className="geometry-control"><span>Szerokość</span><input type="number" min="1" max="4096" value={exportSize.width} onChange={event => setExportSize(current => ({ ...current, width: Math.max(1, Number(event.target.value) || 1) }))} /></label>
                 <label className="geometry-control"><span>Wysokość</span><input type="number" min="1" max="4096" value={exportSize.height} onChange={event => setExportSize(current => ({ ...current, height: Math.max(1, Number(event.target.value) || 1) }))} /></label>
                 {exportFormat === 'png' && <label className="fill-toggle"><input type="checkbox" checked={exportTransparent} onChange={event => setExportTransparent(event.target.checked)} />Przezroczyste tło</label>}
@@ -2677,15 +3511,32 @@ export function VectorEditor({
             </section>
           </div>}
         </div>
+        {commandPaletteOpen && <div className="drawing-command-backdrop" role="presentation" onMouseDown={event => { if (event.target === event.currentTarget) setCommandPaletteOpen(false) }}>
+          <section className="drawing-command-palette" role="dialog" aria-modal="true" aria-label="Paleta poleceń SVG">
+            <input autoFocus value={commandQuery} onChange={event => setCommandQuery(event.target.value)} onKeyDown={event => { if (event.key === 'Escape') setCommandPaletteOpen(false); if (event.key === 'Enter' && paletteCommands[0]) { event.preventDefault(); event.currentTarget.parentElement?.querySelector('button')?.click() } }} placeholder="Szukaj narzędzia lub polecenia…" aria-label="Szukaj polecenia" />
+            <div>{paletteCommands.map(command => <button key={command.id} onClick={() => {
+              if (command.id.startsWith('tool:')) chooseTool(command.id.slice(5) as Tool)
+              else if (command.id === 'undo') undo()
+              else if (command.id === 'redo') redo()
+              else if (command.id === 'fit') fitViewToContent(false)
+              else if (command.id === 'fitSelection') fitViewToContent(true)
+              else if (command.id === 'accessibility') inspectAccessibility()
+              else if (command.id === 'optimize') optimizeCurrentSvg()
+              else if (command.id === 'save') save()
+              setCommandPaletteOpen(false)
+            }}>{command.label}</button>)}</div>
+            {!paletteCommands.length && <p>Brak pasujących poleceń.</p>}
+          </section>
+        </div>}
         <div className="drawing-stage-wrap">
-          <div className="drawing-canvas-area">
+          <div className="drawing-canvas-area" style={{ aspectRatio: `${documentSize.width} / ${documentSize.height}` }}>
             <div ref={mount} className="drawing-stage" />
-            {comments.map(comment => <div key={comment.id} className="drawing-comment-pin" style={{ left: `${comment.x / WIDTH * 100}%`, top: `${comment.y / HEIGHT * 100}%` }}>
+            {comments.map(comment => <div key={comment.id} className="drawing-comment-pin" style={{ left: `${comment.x / documentSize.width * 100}%`, top: `${comment.y / documentSize.height * 100}%` }}>
               <button onClick={() => setActiveCommentId(activeCommentId === comment.id ? null : comment.id)} title={comment.text} aria-label="Pokaż komentarz"><MessageSquare size={13} /></button>
               {activeCommentId === comment.id && <div className="drawing-comment-popover">{comment.text}<button onClick={() => setComments(current => current.filter(item => item.id !== comment.id))}><X size={12} /></button></div>}
             </div>)}
             {commentDraft && <CommentComposer onSave={saveComment} onCancel={() => setCommentDraft(null)} />}
-            {showMinimap && <div className="drawing-minimap" aria-label="Mini mapa planszy"><svg viewBox={`0 0 ${WIDTH} ${HEIGHT}`} role="img" aria-label="Podgląd całej planszy"><rect width={WIDTH} height={HEIGHT} fill="#fff" stroke="#ccd2df" />{miniObjects.map(item => <rect key={item.id} x={item.box.x} y={item.box.y} width={Math.max(2, item.box.width)} height={Math.max(2, item.box.height)} fill={item.color} opacity=".8" />)}</svg><span>{miniObjects.length} elementów</span></div>}
+            {showMinimap && <div className="drawing-minimap" aria-label="Mini mapa planszy"><svg style={{ aspectRatio: `${documentSize.width} / ${documentSize.height}` }} viewBox={`0 0 ${documentSize.width} ${documentSize.height}`} role="img" aria-label="Podgląd całej planszy"><rect width={documentSize.width} height={documentSize.height} fill="#fff" stroke="#ccd2df" />{miniObjects.map(item => <rect key={item.id} x={item.box.x} y={item.box.y} width={Math.max(2, item.box.width)} height={Math.max(2, item.box.height)} fill={item.color} opacity=".8" />)}</svg><span>{miniObjects.length} elementów</span></div>}
           </div>
         </div>
         <footer className="modal-footer advanced-modal-footer"><p>Pióro: klikaj węzły, przeciągaj uchwyty; Enter kończy ścieżkę. Pędzel wygładza szkice · Ctrl+G grupuje · Ctrl+Shift+G rozgrupowuje</p><div><button className="button secondary" onClick={onClose}>Anuluj</button><button className="button primary" onClick={save}>Zapisz grafikę</button></div></footer>

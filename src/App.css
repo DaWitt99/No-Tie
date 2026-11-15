@@ -1025,11 +1025,24 @@
 .drawing-layer-row input { min-width: 40px; flex: 1; height: 24px; border: 0; outline: 0; color: #4c566d; background: transparent; font-size: 10px; }
 .drawing-layer-row .tool-button { width: 24px; height: 24px; }
 .drawing-layer-color { display: block; width: 12px; height: 12px; border: 1px solid #cfd3df; border-radius: 3px; }
+.drawing-artboard-row { display: flex; min-width: min(100%, 520px); align-items: center; gap: 5px; padding: 4px; border: 1px solid #e7eaf2; border-radius: 7px; background: #fff; }
+.drawing-artboard-row.selected { border-color: #aab5ec; background: #f4f6ff; }
+.drawing-artboard-row input { min-width: 80px; width: 130px; height: 25px; padding: 0 6px; border: 1px solid #e7e9f0; border-radius: 5px; color: #58637a; font-size: 9px; }
 .drawing-workflow-grid { display: grid; grid-template-columns: repeat(4, minmax(160px, 1fr)); gap: 7px; }
 .drawing-workflow-card { display: flex; min-width: 0; flex-direction: column; align-items: flex-start; gap: 6px; padding: 7px; border: 1px solid #e9ebf2; border-radius: 8px; background: #fff; }
 .drawing-workflow-card h3 { display: flex; align-items: center; gap: 5px; margin: 0; color: #58637a; font-size: 10px; font-weight: 700; }
 .drawing-workflow-card .drawing-feature-row { gap: 5px; }
 .drawing-workflow-card .drawing-select-control input[type="range"] { width: 70px; }
+.drawing-connector-label-input { width: 120px; min-width: 60px; height: 27px; padding: 0 7px; border: 1px solid #e4e7ef; border-radius: 5px; color: #58637a; font-size: 9px; }
+.drawing-a11y-report { width: 100%; max-height: 66px; overflow: auto; color: #768097; font-size: 8px; }
+.drawing-a11y-report p { margin: 0 0 3px; }
+.drawing-command-backdrop { position: absolute; z-index: 20; inset: 0; display: grid; place-items: start center; padding: 16vh 16px 16px; background: #17203955; backdrop-filter: blur(3px); }
+.drawing-command-palette { display: flex; width: min(520px, 100%); max-height: min(60vh, 520px); flex-direction: column; gap: 7px; padding: 9px; border: 1px solid #dfe3ed; border-radius: 10px; background: #fff; box-shadow: 0 20px 55px #17203940; }
+.drawing-command-palette input { height: 36px; padding: 0 10px; border: 1px solid #e4e7ef; border-radius: 7px; color: #39445d; font-size: 12px; }
+.drawing-command-palette > div { display: flex; flex-direction: column; overflow: auto; }
+.drawing-command-palette > div button { padding: 8px 9px; border: 0; border-radius: 5px; color: #58637a; background: transparent; font-size: 11px; text-align: left; cursor: pointer; }
+.drawing-command-palette > div button:hover { color: #4f64cb; background: #f0f2ff; }
+.drawing-command-palette p { margin: 4px; color: #8a91a1; font-size: 10px; }
 .drawing-comment-list, .drawing-checkpoint-list { display: flex; width: 100%; max-height: 52px; flex-direction: column; gap: 3px; overflow: auto; }
 .drawing-comment-list > div, .drawing-checkpoint-list > div { display: flex; min-width: 0; align-items: center; gap: 4px; color: #727b8e; font-size: 9px; }
 .drawing-comment-list span { overflow: hidden; flex: 1; text-overflow: ellipsis; white-space: nowrap; }
@@ -1068,6 +1081,17 @@
   .app-shell.sidebar-hidden.with-ollama-chat.library-hidden { grid-template-columns: minmax(220px, 1fr) 250px; }
   .sidebar { padding-right: 11px; padding-left: 11px; }
   .editor-scroll { padding-right: 35px; padding-left: 35px; }
+}
+
+@media (max-width: 760px) {
+  .drawing-workflow-grid { grid-template-columns: repeat(2, minmax(145px, 1fr)); }
+  .drawing-artboard-row { min-width: 100%; flex-wrap: wrap; }
+}
+
+@media (max-width: 500px) {
+  .drawing-workflow-grid { grid-template-columns: minmax(0, 1fr); }
+  .drawing-stage-wrap { padding: 10px; }
+  .drawing-minimap { width: 98px; }
 }
 @media (max-width: 840px) and (min-width: 701px) {
   .app-shell { grid-template-columns: minmax(180px, 205px) minmax(220px, 270px) minmax(0, 1fr); }
