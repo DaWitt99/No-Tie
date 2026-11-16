@@ -1007,9 +1007,31 @@
 .drawing-feature-tabs button { display: inline-flex; min-height: 31px; flex: 0 0 auto; align-items: center; gap: 6px; padding: 0 10px; border: 1px solid transparent; border-radius: 7px 7px 0 0; color: #737b8c; background: transparent; font-size: 10px; cursor: pointer; }
 .drawing-feature-tabs button:hover { color: #5369d2; background: #f7f8ff; }
 .drawing-feature-tabs button.selected { border-color: #e7e9f0; border-bottom-color: #fff; color: #4f64cb; background: #fff; font-weight: 700; }
-.drawing-feature-panel { flex: 0 0 auto; max-height: 152px; overflow: auto; padding: 8px 14px; border-top: 1px solid #e8eaf0; border-bottom: 1px solid #e5e7ef; background: #fafbfe; scrollbar-width: thin; }
+.drawing-feature-panel { flex: 0 0 auto; max-height: 230px; overflow: auto; padding: 8px 14px; border-top: 1px solid #e8eaf0; border-bottom: 1px solid #e5e7ef; background: #fafbfe; scrollbar-width: thin; }
 .drawing-feature-row { display: flex; min-width: 0; align-items: center; flex-wrap: wrap; gap: 6px 10px; }
 .drawing-feature-row .feature-help { flex-basis: 100%; }
+.drawing-feature-groups { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 230px), 1fr)); align-items: start; gap: 7px; }
+.drawing-feature-group { display: flex; min-width: 0; flex-direction: column; align-items: flex-start; gap: 6px; padding: 7px; border: 1px solid #e9ebf2; border-radius: 8px; background: #fff; }
+.drawing-feature-group > h3, .drawing-layer-list-group > h3 { display: flex; align-items: center; margin: 0; color: #58637a; font-size: 10px; font-weight: 700; }
+.drawing-feature-group-controls { display: flex; width: 100%; min-width: 0; align-items: center; flex-wrap: wrap; gap: 6px; }
+.drawing-feature-group-controls .feature-help { flex-basis: 100%; }
+.drawing-feature-group-controls output.feature-help { flex: 0 0 auto; }
+.drawing-feature-details { width: 100%; min-width: 0; padding-top: 5px; border-top: 1px solid #eef0f5; color: #626d83; font-size: 9px; }
+.drawing-feature-details > summary { width: fit-content; color: #65718b; font-size: 9px; font-weight: 650; cursor: pointer; user-select: none; }
+.drawing-feature-details[open] > summary { margin-bottom: 6px; color: #5369d2; }
+.drawing-advanced-controls { display: flex; width: 100%; min-width: 0; align-items: center; flex-wrap: wrap; gap: 6px; padding: 7px; border-radius: 7px; background: #f8f9fc; }
+.drawing-inline-input { width: 130px; min-width: 70px; height: 27px; padding: 0 7px; border: 1px solid #e4e7ef; border-radius: 5px; color: #58637a; font-size: 9px; }
+.drawing-named-color, .drawing-font-row, .drawing-linked-image, .drawing-library-asset { display: flex; width: 100%; min-width: 0; align-items: center; gap: 6px; }
+.drawing-named-color > span, .drawing-font-row > span, .drawing-linked-image > span, .drawing-library-asset > span { overflow: hidden; flex: 1; color: #6d778c; text-overflow: ellipsis; white-space: nowrap; }
+.drawing-font-row small { color: #238a70; font-size: 8px; }
+.drawing-font-row small.drawing-font-missing { color: #c47738; }
+.drawing-pattern-preview { display: inline-flex; width: 38px; height: 38px; overflow: hidden; border: 1px solid #dfe3ed; border-radius: 5px; background-color: #fff; }
+.drawing-pattern-preview svg { width: 100%; height: 100%; }
+.drawing-linked-image > span { max-width: 180px; font-family: ui-monospace, monospace; font-size: 8px; }
+.drawing-shape-builder-actions { display: flex; align-items: center; flex-wrap: wrap; gap: 6px; }
+.toolbar-tool-hint { align-self: center; }
+.drawing-feature-group-wide { grid-column: 1 / -1; }
+.drawing-feature-group .drawing-artboard-row { flex: 1 1 100%; }
 .feature-help { color: #8a91a1; font-size: 9px; line-height: 1.4; }
 .compact-feature-button { min-height: 27px; gap: 4px; padding: 0 8px; font-size: 9px; white-space: nowrap; }
 .feature-active { border-color: #7485e2 !important; color: #4e63cb !important; background: #f0f2ff !important; }
@@ -1019,6 +1041,7 @@
 .drawing-feature-row .geometry-control input { width: 62px; }
 .guide-position-control .tool-button { width: 22px; height: 22px; }
 .drawing-layer-workspace { display: grid; grid-template-columns: minmax(0, 1fr); gap: 7px; }
+.drawing-layer-list-group { display: flex; min-width: 0; flex-direction: column; gap: 5px; padding: 7px; border: 1px solid #e9ebf2; border-radius: 8px; background: #fff; }
 .drawing-layer-list { display: flex; max-height: 90px; flex-direction: column; gap: 3px; overflow: auto; }
 .drawing-layer-row { display: flex; min-height: 29px; align-items: center; gap: 3px; padding: 1px 5px; border: 1px solid #edf0f5; border-radius: 6px; background: #fff; }
 .drawing-layer-row.selected { border-color: #aab5ec; background: #f4f6ff; }
@@ -1032,6 +1055,10 @@
 .drawing-workflow-card { display: flex; min-width: 0; flex-direction: column; align-items: flex-start; gap: 6px; padding: 7px; border: 1px solid #e9ebf2; border-radius: 8px; background: #fff; }
 .drawing-workflow-card h3 { display: flex; align-items: center; gap: 5px; margin: 0; color: #58637a; font-size: 10px; font-weight: 700; }
 .drawing-workflow-card .drawing-feature-row { gap: 5px; }
+.drawing-workflow-subgroup { display: flex; width: 100%; min-width: 0; flex-direction: column; align-items: flex-start; gap: 5px; padding-top: 6px; border-top: 1px solid #eef0f5; }
+.drawing-workflow-subgroup:first-of-type { padding-top: 0; border-top: 0; }
+.drawing-workflow-subgroup h4 { margin: 0; color: #7a8397; font-size: 9px; font-weight: 700; }
+.drawing-workflow-card > .drawing-feature-details { width: 100%; }
 .drawing-workflow-card .drawing-select-control input[type="range"] { width: 70px; }
 .drawing-connector-label-input { width: 120px; min-width: 60px; height: 27px; padding: 0 7px; border: 1px solid #e4e7ef; border-radius: 5px; color: #58637a; font-size: 9px; }
 .drawing-a11y-report { width: 100%; max-height: 66px; overflow: auto; color: #768097; font-size: 8px; }
@@ -1046,6 +1073,11 @@
 .drawing-comment-list, .drawing-checkpoint-list { display: flex; width: 100%; max-height: 52px; flex-direction: column; gap: 3px; overflow: auto; }
 .drawing-comment-list > div, .drawing-checkpoint-list > div { display: flex; min-width: 0; align-items: center; gap: 4px; color: #727b8e; font-size: 9px; }
 .drawing-comment-list span { overflow: hidden; flex: 1; text-overflow: ellipsis; white-space: nowrap; }
+.drawing-checkpoint-compare { display: grid; width: 100%; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 5px; }
+.drawing-checkpoint-compare figure { min-width: 0; margin: 0; }
+.drawing-checkpoint-compare figcaption { margin-bottom: 3px; color: #81899a; font-size: 8px; }
+.drawing-checkpoint-compare figure > div { overflow: hidden; border: 1px solid #e5e8f0; border-radius: 5px; background: #fff; }
+.drawing-checkpoint-compare svg { display: block; width: 100%; height: 76px; }
 .drawing-comment-list button, .drawing-checkpoint-list > div > button:last-child { display: grid; place-items: center; width: 22px; height: 21px; padding: 0; border: 0; border-radius: 4px; color: #81899a; background: transparent; cursor: pointer; }
 .drawing-checkpoint-list > div > button:first-child { overflow: hidden; flex: 1; padding: 2px 0; border: 0; color: #66718a; background: transparent; font-size: 9px; text-align: left; text-overflow: ellipsis; white-space: nowrap; cursor: pointer; }
 .drawing-stage-wrap { position: relative; }

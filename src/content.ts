@@ -124,17 +124,24 @@ export function sanitizeSvg(source: string): string {
     throw new Error('Nie udało się odczytać grafiki SVG.')
   }
 
-  const allowedTags = new Set(['svg', 'g', 'rect', 'circle', 'ellipse', 'line', 'path', 'polyline', 'polygon', 'text', 'textpath', 'tspan', 'image', 'use', 'symbol', 'defs', 'marker', 'clippath', 'mask', 'lineargradient', 'radialgradient', 'pattern', 'stop'])
-  const allowedAttributes = new Set(['xmlns', 'width', 'height', 'viewBox', 'x', 'y', 'x1', 'x2', 'y1', 'y2', 'cx', 'cy', 'r', 'rx', 'ry', 'd', 'points', 'fill', 'stroke', 'stroke-width', 'stroke-linecap', 'stroke-linejoin', 'stroke-dasharray', 'stroke-dashoffset', 'fill-opacity', 'stroke-opacity', 'opacity', 'visibility', 'text-anchor', 'font-family', 'font-size', 'font-weight', 'font-style', 'marker-end', 'marker-start', 'refX', 'refY', 'markerWidth', 'markerHeight', 'markerUnits', 'orient', 'id', 'transform', 'href', 'preserveAspectRatio', 'clip-path', 'mask', 'clipPathUnits', 'maskUnits', 'gradientUnits', 'gradientTransform', 'fx', 'fy', 'offset', 'stop-color', 'stop-opacity', 'startOffset', 'method', 'spacing', 'patternUnits', 'patternContentUnits', 'patternTransform', 'aria-label', 'data-object-id', 'data-group-id', 'data-shape-key', 'data-start-target', 'data-start-anchor', 'data-end-target', 'data-end-anchor', 'data-layer-name', 'data-layer-locked', 'data-editor-rotation', 'data-editor-base-transform', 'data-editor-pen', 'data-pen-points', 'data-image-flip-x', 'data-image-flip-y', 'data-connector-port', 'data-auto-route', 'data-route-style', 'data-connector-label', 'data-connector-label-for', 'data-connector-visual-for', 'data-artboard', 'data-layout-constraint'])
+  const allowedTags = new Set(['svg', 'g', 'rect', 'circle', 'ellipse', 'line', 'path', 'polyline', 'polygon', 'text', 'textpath', 'tspan', 'image', 'use', 'symbol', 'defs', 'marker', 'clippath', 'mask', 'lineargradient', 'radialgradient', 'pattern', 'stop', 'filter', 'fecolormatrix', 'fecomponenttransfer', 'fefuncr', 'fefuncg', 'fefuncb', 'fefunca'])
+  const allowedAttributes = new Set(['xmlns', 'width', 'height', 'viewBox', 'x', 'y', 'x1', 'x2', 'y1', 'y2', 'cx', 'cy', 'r', 'rx', 'ry', 'd', 'points', 'fill', 'fill-rule', 'stroke', 'stroke-width', 'stroke-linecap', 'stroke-linejoin', 'stroke-dasharray', 'stroke-dashoffset', 'fill-opacity', 'stroke-opacity', 'opacity', 'visibility', 'text-anchor', 'font-family', 'font-size', 'font-weight', 'font-style', 'letter-spacing', 'line-height', 'baseline-shift', 'mix-blend-mode', 'marker-end', 'marker-start', 'refX', 'refY', 'markerWidth', 'markerHeight', 'markerUnits', 'orient', 'id', 'transform', 'href', 'preserveAspectRatio', 'clip-path', 'clipPathUnits', 'mask', 'maskUnits', 'maskContentUnits', 'gradientUnits', 'gradientTransform', 'fx', 'fy', 'offset', 'stop-color', 'stop-opacity', 'startOffset', 'side', 'dy', 'method', 'spacing', 'patternUnits', 'patternContentUnits', 'patternTransform', 'color-interpolation-filters', 'type', 'values', 'slope', 'intercept', 'filter', 'aria-label', 'data-object-id', 'data-group-id', 'data-shape-key', 'data-start-target', 'data-start-anchor', 'data-end-target', 'data-end-anchor', 'data-layer-name', 'data-layer-locked', 'data-editor-rotation', 'data-editor-base-transform', 'data-editor-pen', 'data-pen-points', 'data-image-flip-x', 'data-image-flip-y', 'data-image-filter', 'data-connector-port', 'data-auto-route', 'data-route-style', 'data-connector-label', 'data-connector-label-for', 'data-connector-visual-for', 'data-artboard', 'data-layout-constraint'])
   document.querySelectorAll('*').forEach(element => {
     if (!allowedTags.has(element.tagName.toLowerCase())) {
       element.remove()
       return
     }
     Array.from(element.attributes).forEach(attribute => {
+      let decodedImagePath = attribute.value
+      try { decodedImagePath = decodeURIComponent(decodedImagePath) } catch { decodedImagePath = '' }
+      const imageSegments = decodedImagePath.replace(/^\.\//, '').split('/')
+      const relativeImage = element.tagName.toLowerCase() === 'image' && attribute.name.toLowerCase() === 'href'
+        && /^(?:\.\/)?[a-z\d_% .-]+(?:\/[a-z\d_% .-]+)*\.(?:png|jpe?g|gif|webp)$/i.test(attribute.value)
+        && imageSegments.every(segment => segment && segment !== '.' && segment !== '..')
       const unsafeReference = ['href', 'xlink:href'].includes(attribute.name.toLowerCase())
         && !attribute.value.startsWith('#')
         && !/^data:image\/(?:png|jpeg|gif|webp);base64,/i.test(attribute.value)
+        && !relativeImage
       if (!allowedAttributes.has(attribute.name) || unsafeReference || /^on/i.test(attribute.name) || /javascript:/i.test(attribute.value) || /url\s*\(\s*(['"]?)(?:https?:|data:|javascript:|\/\/)/i.test(attribute.value)) {
         element.removeAttribute(attribute.name)
       }

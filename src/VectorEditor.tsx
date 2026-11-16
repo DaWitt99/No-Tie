@@ -1,16 +1,17 @@
 import { useEffect, useRef, useState } from 'react'
 import {
-  AlignCenterHorizontal, AlignEndHorizontal, AlignStartHorizontal, ArrowDownWideNarrow, ArrowRight, Check, Circle,
+  AlignCenterHorizontal, AlignEndHorizontal, AlignStartHorizontal, ArrowDownWideNarrow, ArrowRight, Check, Circle, Combine,
   ClipboardCopy, ClipboardPaste, Copy, Download, Eye, EyeOff, Grid3X3, Group, History, ImagePlus, Layers,
-  Lock, MessageSquare, Minus, MousePointer2, Palette, Pencil, Pipette, Plus, RectangleHorizontal,
+  Lasso, Lock, MessageSquare, Minus, MousePointer2, Palette, Pencil, Pipette, Plus, RectangleHorizontal,
   RectangleVertical, Redo2, RotateCw, Ruler, Shapes, Trash2, Triangle, Type, Undo2, Ungroup, Unlock, Waypoints, X,
 } from 'lucide-react'
 import { SVG, type Svg } from '@svgdotjs/svg.js'
 import type { NoteAsset } from './types'
 import { sanitizeSvg } from './content'
 import { shapeById, shapeCategories, shapeLibrary } from './shapeLibrary'
+import { findGeometrySnap, lassoIntersectsBox, outlineOpenStroke, reversePathData } from './svgEditorGeometry'
 
-type Tool = 'select' | 'rect' | 'roundRect' | 'ellipse' | 'line' | 'arrow' | 'polygon' | 'shape' | 'freehand' | 'text' | 'pen'
+type Tool = 'select' | 'lasso' | 'shapeBuilder' | 'rect' | 'roundRect' | 'ellipse' | 'line' | 'arrow' | 'polygon' | 'shape' | 'freehand' | 'text' | 'pen'
 type ArrowMode = 'end' | 'start' | 'both' | 'none'
 type Box = { x: number; y: number; width: number; height: number }
 type ViewBox = Box
@@ -24,13 +25,16 @@ type Interaction =
   | { type: 'connect'; line: SVGLineElement; id: string; side: 'start' | 'end'; x: number; y: number; moved: boolean }
   | { type: 'move'; ids: string[]; elements: SVGElement[]; others: Box[]; startX: number; startY: number; lastX: number; lastY: number; bounds: Box; moved: boolean }
   | { type: 'resize'; ids: string[]; targets: { element: SVGElement; source: SVGElement; box: Box }[]; startBounds: Box; handle: ResizeHandle; moved: boolean }
-  | { type: 'pen-node'; element: SVGPathElement; index: number; handle: 'anchor' | 'incoming' | 'outgoing'; points: PenNode[]; moved: boolean }
+  | { type: 'pen-node'; element: SVGPathElement; index: number; indices: number[]; handle: 'anchor' | 'incoming' | 'outgoing'; points: PenNode[]; moved: boolean }
+  | { type: 'lasso'; points: Point[]; additive: boolean; initialIds: string[]; moved: boolean }
+  | { type: 'gradient-handle'; element: SVGElement; gradient: SVGLinearGradientElement; index: 0 | 1 | 2; bounds: Box; moved: boolean }
   | { type: 'guide'; index: number; axis: 'x' | 'y'; moved: boolean; created?: boolean }
   | { type: 'pan'; startClientX: number; startClientY: number; viewBox: ViewBox }
   | { type: 'marquee'; x: number; y: number; additive: boolean; initialIds: string[]; moved: boolean }
 
 type OverlayOptions = {
   marquee?: Box
+  lasso?: Point[]
   dimensions?: Box
   snapX?: number
   snapY?: number
@@ -44,7 +48,7 @@ type MiniObject = { id: string; box: Box; color: string }
 type EditorPanel = 'canvas' | 'style' | 'layers' | 'workflow'
 type DocumentUnit = 'px' | 'mm' | 'in'
 type EditorGuide = { axis: 'x' | 'y'; value: number; locked?: boolean }
-type EditorViewOptions = { grid: boolean; gridSize: number; snap: boolean; rulers: boolean; guides: EditorGuide[] }
+type EditorViewOptions = { grid: boolean; gridSize: number; snap: boolean; snapGeometry: boolean; smartGuides: boolean; rulers: boolean; guides: EditorGuide[] }
 
 type TextEdit = { input: HTMLInputElement; x: number; y: number; element?: SVGElement; fontSize: number; keepTool: boolean }
 type Drawing = Svg
@@ -700,7 +704,7 @@ function intersect(a: Box, b: Box): boolean {
   return a.x <= b.x + b.width && a.x + a.width >= b.x && a.y <= b.y + b.height && a.y + a.height >= b.y
 }
 
-function getSnap(bounds: Box, others: Box[], axis: 'x' | 'y'): Snap {
+function getSnap(bounds: Box, others: Box[], axis: 'x' | 'y', reference: Box = { x: 0, y: 0, width: WIDTH, height: HEIGHT }): Snap {
   const isX = axis === 'x'
   const start = isX ? bounds.x : bounds.y
   const size = isX ? bounds.width : bounds.height
@@ -710,7 +714,9 @@ function getSnap(bounds: Box, others: Box[], axis: 'x' | 'y'): Snap {
     const targetSize = isX ? box.width : box.height
     return [targetStart, targetStart + targetSize / 2, targetStart + targetSize]
   })
-  targetPoints.push(isX ? WIDTH / 2 : HEIGHT / 2)
+  const referenceStart = isX ? reference.x : reference.y
+  const referenceSize = isX ? reference.width : reference.height
+  targetPoints.push(referenceStart, referenceStart + referenceSize / 2, referenceStart + referenceSize)
 
   let best: Snap = undefined
   for (const movingPoint of movingPoints) {
@@ -805,6 +811,7 @@ function renderOverlay(stage: Drawing, ids: string[], options: OverlayOptions = 
   const guides = (() => { try { return JSON.parse(stage.node.getAttribute('data-editor-guides') ?? '[]') as EditorGuide[] } catch { return [] } })()
   const selectedPenNodeValue = stage.node.getAttribute('data-selected-pen-node')
   const selectedPenNode = selectedPenNodeValue === null ? -1 : Number(selectedPenNodeValue)
+  const selectedPenNodes = (() => { try { return new Set(JSON.parse(stage.node.getAttribute('data-selected-pen-nodes') ?? '[]') as number[]) } catch { return new Set([selectedPenNode]) } })()
   guides.forEach((guide, index) => {
     const line = guide.axis === 'x'
       ? layer.line(guide.value, viewport.y, guide.value, viewport.y + viewport.height)
@@ -865,9 +872,40 @@ function renderOverlay(stage: Drawing, ids: string[], options: OverlayOptions = 
           layer.circle(7).center(location.x, location.y).fill('#fff').stroke({ color: '#28a58b', width: 1.3 })
             .attr({ 'data-pen-handle': handle, 'data-pen-node-index': `${index}`, 'data-pen-object': element.getAttribute('data-object-id') ?? '', 'pointer-events': 'all', cursor: 'move' })
         }
-        layer.circle(10).center(point.x, point.y).fill(index === selectedPenNode ? '#d9f8ef' : '#fff').stroke({ color: index === selectedPenNode ? '#159879' : '#5066d2', width: 1.7 })
+        layer.circle(10).center(point.x, point.y).fill(selectedPenNodes.has(index) || index === selectedPenNode ? '#d9f8ef' : '#fff').stroke({ color: selectedPenNodes.has(index) || index === selectedPenNode ? '#159879' : '#5066d2', width: 1.7 })
           .attr({ 'data-pen-node': `${index}`, 'data-pen-object': element.getAttribute('data-object-id') ?? '', 'pointer-events': 'all', cursor: 'move' })
       })
+    }
+    if (stage.node.getAttribute('data-active-tool') === 'select') {
+      const gradientId = element.getAttribute('fill')?.match(/^url\(["']?#([^\s)'\"]+)["']?\)$/)?.[1]
+      const gradient = gradientId ? stage.node.querySelector<SVGLinearGradientElement>(`linearGradient[id="${CSS.escape(gradientId)}"]`) : null
+      if (gradient) {
+        const objectBox = gradient.getAttribute('gradientUnits') !== 'userSpaceOnUse'
+        const coordinate = (attribute: string, base: number, size: number, fallback: number) => {
+          const value = gradient.getAttribute(attribute)
+          if (value === null) return fallback
+          if (value.endsWith('%')) return objectBox ? base + size * Number.parseFloat(value) / 100 : size * Number.parseFloat(value) / 100
+          const number = Number(value)
+          return objectBox ? base + size * number : number
+        }
+        const start = {
+          x: coordinate('x1', box.x, box.width, box.x),
+          y: coordinate('y1', box.y, box.height, box.y),
+        }
+        const end = {
+          x: coordinate('x2', box.x, box.width, box.x + box.width),
+          y: coordinate('y2', box.y, box.height, box.y),
+        }
+        layer.line(start.x, start.y, end.x, end.y).stroke({ color: '#5369d2', width: 1.5, dasharray: '4 3' })
+        const stops = Array.from(gradient.querySelectorAll('stop'))
+        const middle = stops[1]
+        const offset = Number.parseFloat(middle?.getAttribute('offset') ?? '50') / (middle?.getAttribute('offset')?.endsWith('%') === false ? 1 : 100)
+        const stopPoint = { x: start.x + (end.x - start.x) * offset, y: start.y + (end.y - start.y) * offset }
+        for (const [index, point] of [[0, start], [2, end], [1, stopPoint]] as const) {
+          layer.circle(index === 1 ? 9 : 11).center(point.x, point.y).fill(index === 1 ? (middle?.getAttribute('stop-color') ?? '#fff') : '#fff')
+            .stroke({ color: '#5369d2', width: 2 }).attr({ 'data-gradient-handle': `${index}`, 'data-gradient-object': element.getAttribute('data-object-id') ?? '', 'pointer-events': 'all', cursor: 'move' })
+        }
+      }
     }
   }
   const selectionBounds = unionBoxes(elementsForIds(stage.node, ids).map(getBox))
@@ -917,6 +955,11 @@ function renderOverlay(stage: Drawing, ids: string[], options: OverlayOptions = 
   if (options.marquee) {
     const box = options.marquee
     layer.rect(box.width, box.height).move(box.x, box.y).fill('#7587e51c').stroke({ color: '#6378dd', width: 1.5, dasharray: '6 4' })
+  }
+  if (options.lasso?.length) {
+    const points = [...options.lasso, ...(options.lasso.length > 2 ? [options.lasso[0]] : [])]
+    layer.polyline(points.map(point => `${point.x},${point.y}`).join(' ')).fill('#7587e51c')
+      .stroke({ color: '#6378dd', width: 1.5, dasharray: '6 4', linejoin: 'round' })
   }
   if (options.dimensions) {
     const { x, y, width, height } = options.dimensions
@@ -1093,7 +1136,7 @@ export function VectorEditor({
   const viewBoxRef = useRef<ViewBox>({ x: 0, y: 0, width: WIDTH, height: HEIGHT })
   const documentSizeRef = useRef({ width: WIDTH, height: HEIGHT })
   const spacePanRef = useRef(false)
-  const viewOptionsRef = useRef<EditorViewOptions>({ grid: false, gridSize: 20, snap: false, rulers: false, guides: [] })
+  const viewOptionsRef = useRef<EditorViewOptions>({ grid: false, gridSize: 20, snap: false, snapGeometry: false, smartGuides: true, rulers: false, guides: [] })
   const autoRouteRef = useRef(false)
   const eyedropperRef = useRef(false)
   const fontFamilyRef = useRef('Inter, sans-serif')
@@ -1150,7 +1193,41 @@ export function VectorEditor({
   const shortcutKeyRef = useRef('p')
   const [guideLockAll, setGuideLockAll] = useState(false)
   const [selectedPenNodeIndex, setSelectedPenNodeIndex] = useState<number | null>(null)
+  const [selectedPenNodeIndices, setSelectedPenNodeIndices] = useState<number[]>([])
+  const selectedPenNodeIndicesRef = useRef<number[]>([])
+  const selectedPenPathIdRef = useRef<string | null>(null)
   const [penNodeMode, setPenNodeMode] = useState<'smooth' | 'corner' | 'symmetric'>('smooth')
+  const [cornerRadius, setCornerRadius] = useState(8)
+  const [fillRule, setFillRule] = useState<'nonzero' | 'evenodd'>('nonzero')
+  const [letterSpacing, setLetterSpacing] = useState('0')
+  const [lineHeight, setLineHeight] = useState('1.2')
+  const [baselineShift, setBaselineShift] = useState('0')
+  const [textPathOffset, setTextPathOffset] = useState(0)
+  const [textPathAnchor, setTextPathAnchor] = useState<'start' | 'middle' | 'end'>('start')
+  const [textPathSide, setTextPathSide] = useState<'left' | 'right'>('left')
+  const [textPathDistance, setTextPathDistance] = useState(0)
+  const [blendMode, setBlendMode] = useState('normal')
+  const [patternTileSize, setPatternTileSize] = useState(16)
+  const [patternStrokeWidth, setPatternStrokeWidth] = useState(2)
+  const [patternBackground, setPatternBackground] = useState('')
+  const [fontSwapSource, setFontSwapSource] = useState('')
+  const [fontSwapTarget, setFontSwapTarget] = useState('Inter, sans-serif')
+  const [colorNameDraft, setColorNameDraft] = useState('')
+  const [replaceColorSource, setReplaceColorSource] = useState('#ffffff')
+  const [namedColors, setNamedColors] = useState<{ name: string; color: string }[]>([])
+  const [imageBrightness, setImageBrightness] = useState(100)
+  const [imageContrast, setImageContrast] = useState(100)
+  const [imageSaturation, setImageSaturation] = useState(100)
+  const [linkedImageId, setLinkedImageId] = useState('')
+  const [compareCheckpointId, setCompareCheckpointId] = useState('')
+  const [shapeBuilderOperation, setShapeBuilderOperation] = useState<'union' | 'subtract' | 'intersect' | 'exclude'>('union')
+  const [assetLibrary, setAssetLibrary] = useState<{ id: string; name: string; markup: string }[]>(() => {
+    try {
+      const value = JSON.parse(localStorage.getItem('no-tie-svg-assets') ?? '[]')
+      return Array.isArray(value) ? value.filter(item => item && typeof item.id === 'string' && typeof item.name === 'string' && typeof item.markup === 'string') : []
+    } catch { return [] }
+  })
+  const [assetNameDraft, setAssetNameDraft] = useState('')
   const [gradientKind, setGradientKind] = useState<'linear' | 'radial'>('linear')
   const [gradientAngle, setGradientAngle] = useState(45)
   const [gradientMiddle, setGradientMiddle] = useState('#9daaf5')
@@ -1179,11 +1256,13 @@ export function VectorEditor({
   })
   const imageInput = useRef<HTMLInputElement>(null)
   const replaceImageInput = useRef<HTMLInputElement>(null)
+  const linkImageInput = useRef<HTMLInputElement>(null)
   const editorSessionId = useRef('')
   if (!editorSessionId.current) editorSessionId.current = crypto.randomUUID()
   const storageId = asset?.id ?? editorSessionId.current
   const [loadedCommentsKey, setLoadedCommentsKey] = useState('')
   const [loadedCheckpointsKey, setLoadedCheckpointsKey] = useState('')
+  const [loadedColorsKey, setLoadedColorsKey] = useState('')
 
   useEffect(() => { toolRef.current = tool }, [tool])
   useEffect(() => { shapeIdRef.current = shapeId }, [shapeId])
@@ -1211,6 +1290,7 @@ export function VectorEditor({
     if (!stage) return
     stage.setAttribute('data-editor-grid', `${viewOptions.grid}`)
     stage.setAttribute('data-editor-grid-size', `${viewOptions.gridSize}`)
+    stage.setAttribute('data-editor-smart-guides', `${viewOptions.smartGuides}`)
     stage.setAttribute('data-editor-rulers', `${viewOptions.rulers}`)
     stage.setAttribute('data-editor-guides', JSON.stringify(viewOptions.guides))
     renderOverlay(drawing.current!, selectedIdsRef.current)
@@ -1244,6 +1324,19 @@ export function VectorEditor({
     if (loadedCheckpointsKey !== key) return
     try { localStorage.setItem(key, JSON.stringify(checkpoints.slice(-20))) } catch { /* storage may be unavailable in private windows */ }
   }, [storageId, checkpoints, loadedCheckpointsKey])
+  useEffect(() => {
+    const key = `no-tie-svg-colors:${storageId}`
+    try { setNamedColors(JSON.parse(localStorage.getItem(key) ?? '[]') as { name: string; color: string }[]) } catch { setNamedColors([]) }
+    setLoadedColorsKey(key)
+  }, [storageId])
+  useEffect(() => {
+    const key = `no-tie-svg-colors:${storageId}`
+    if (loadedColorsKey !== key) return
+    try { localStorage.setItem(key, JSON.stringify(namedColors.slice(-24))) } catch { /* storage may be unavailable in private windows */ }
+  }, [storageId, namedColors, loadedColorsKey])
+  useEffect(() => {
+    try { localStorage.setItem('no-tie-svg-assets', JSON.stringify(assetLibrary.slice(-40))) } catch { /* the asset library stays available for this editor session */ }
+  }, [assetLibrary])
 
   const chooseTool = (nextTool: Tool) => {
     if (activePen.current && nextTool !== 'pen') finishPenAction.current()
@@ -1327,16 +1420,38 @@ export function VectorEditor({
     if (stage) {
       setHasSelectedGroup(elementsForIds(stage.node, unique).some(element => element.hasAttribute('data-group-id')))
       const selectedElements = elementsForIds(stage.node, unique)
-      if (!selectedElements.some(element => element.hasAttribute('data-editor-pen'))) {
+      const selectedPenPath = selectedElements.find(element => element.hasAttribute('data-editor-pen'))
+      const selectedPenPathId = selectedPenPath?.getAttribute('data-object-id') ?? null
+      if (!selectedPenPathId) {
+        selectedPenPathIdRef.current = null
         setSelectedPenNodeIndex(null)
+        selectedPenNodeIndicesRef.current = []
+        setSelectedPenNodeIndices([])
         stage.node.removeAttribute('data-selected-pen-node')
-      }
-      else if (selectedPenNodeIndex !== null) stage.node.setAttribute('data-selected-pen-node', `${selectedPenNodeIndex}`)
+        stage.node.removeAttribute('data-selected-pen-nodes')
+      } else if (selectedPenPathIdRef.current !== selectedPenPathId) {
+        selectedPenPathIdRef.current = selectedPenPathId
+        setSelectedPenNodeIndex(null)
+        selectedPenNodeIndicesRef.current = []
+        setSelectedPenNodeIndices([])
+        stage.node.removeAttribute('data-selected-pen-node')
+        stage.node.removeAttribute('data-selected-pen-nodes')
+      } else if (selectedPenNodeIndex !== null) stage.node.setAttribute('data-selected-pen-node', `${selectedPenNodeIndex}`)
       const bounds = unionBoxes(selectedElements.map(getBox))
       setSelectionBounds(bounds ?? null)
       setGeometryDraft(bounds ? boxDraft(bounds) : null)
       setRotationDraft(selectedElements[0]?.getAttribute('data-editor-rotation') ?? '0')
       const first = selectedElements[0]
+      setFillRule(first?.getAttribute('fill-rule') === 'evenodd' ? 'evenodd' : 'nonzero')
+      setBlendMode(first?.getAttribute('mix-blend-mode') || 'normal')
+      setLetterSpacing(`${Number.parseFloat(first?.getAttribute('letter-spacing') ?? '0') || 0}`)
+      setLineHeight(`${Number.parseFloat(first?.getAttribute('line-height') ?? '1.2') || 1.2}`)
+      setBaselineShift(`${Number.parseFloat(first?.getAttribute('baseline-shift') ?? '0') || 0}`)
+      const textPath = first?.querySelector('textPath')
+      setTextPathOffset(Math.max(0, Math.min(100, Number.parseFloat(textPath?.getAttribute('startOffset') ?? '0') || 0)))
+      setTextPathAnchor((first?.getAttribute('text-anchor') as 'start' | 'middle' | 'end') || 'start')
+      setTextPathSide(textPath?.getAttribute('side') === 'right' ? 'right' : 'left')
+      setTextPathDistance(Number.parseFloat(first?.getAttribute('dy') ?? '0') || 0)
       setOpacity(Math.round(Number(first?.getAttribute('opacity') ?? 1) * 100))
       if (first) setSelectedStyle({ fill: first.getAttribute('fill') ?? 'none', stroke: first.getAttribute('stroke') ?? 'none', strokeWidth: first.getAttribute('stroke-width') ?? '1', opacity: first.getAttribute('opacity') ?? '1', fontSize: first.getAttribute('font-size') ?? '', fontFamily: first.getAttribute('font-family') ?? '' })
       setGroupConstraint(selectedElements.some(element => element.getAttribute('data-layout-constraint') === 'aspect') ? 'aspect' : 'free')
@@ -1365,6 +1480,20 @@ export function VectorEditor({
         setFontItalic(italic); fontItalicRef.current = italic
         const size = Number(selectedText.getAttribute('font-size')) || 24
         setFontSize(size); fontSizeRef.current = size
+      }
+      const selectedRaster = selectedElements.find(element => element.tagName.toLowerCase() === 'image')
+      if (selectedRaster) {
+        const filterId = selectedRaster.getAttribute('data-image-filter')
+        const filter = filterId ? stage.node.querySelector<SVGFilterElement>(`filter[id="${CSS.escape(filterId)}"]`) : null
+        const transfer = filter?.querySelector('feComponentTransfer')
+        const slope = Number(transfer?.querySelector('feFuncR')?.getAttribute('slope'))
+        const intercept = Number(transfer?.querySelector('feFuncR')?.getAttribute('intercept'))
+        const saturation = Number(filter?.querySelector('feColorMatrix')?.getAttribute('values'))
+        if (Number.isFinite(slope) && slope >= 0 && Number.isFinite(intercept)) {
+          setImageContrast(Math.round(slope * 100))
+          setImageBrightness(Math.round((intercept - .5 * (1 - slope) + 1) * 100))
+        } else { setImageContrast(100); setImageBrightness(100) }
+        setImageSaturation(Number.isFinite(saturation) && saturation >= 0 ? Math.round(saturation * 100) : 100)
       }
       renderOverlay(stage, unique)
     } else {
@@ -1435,6 +1564,7 @@ export function VectorEditor({
     setExportSize({ width: Math.round(initialViewBox.width), height: Math.round(initialViewBox.height) })
     stage.node.setAttribute('data-editor-grid', `${viewOptionsRef.current.grid}`)
     stage.node.setAttribute('data-editor-grid-size', `${viewOptionsRef.current.gridSize}`)
+    stage.node.setAttribute('data-editor-smart-guides', `${viewOptionsRef.current.smartGuides}`)
     stage.node.setAttribute('data-editor-rulers', `${viewOptionsRef.current.rulers}`)
     stage.node.setAttribute('data-editor-guides', JSON.stringify(viewOptionsRef.current.guides))
     drawing.current = stage
@@ -1452,6 +1582,12 @@ export function VectorEditor({
       const location = {
         x: Number((visible.x + (event.clientX - bounds.left) * visible.width / bounds.width).toFixed(1)),
         y: Number((visible.y + (event.clientY - bounds.top) * visible.height / bounds.height).toFixed(1)),
+      }
+      if (snap && viewOptionsRef.current.snapGeometry) {
+        const threshold = Math.max(visible.width / Math.max(bounds.width, 1), visible.height / Math.max(bounds.height, 1)) * 9
+        const excludedIds = toolRef.current === 'select' ? selectedIdsRef.current : []
+        const target = findGeometrySnap(stage.node, location, excludedIds, threshold)
+        if (target) return { x: Number(target.x.toFixed(1)), y: Number(target.y.toFixed(1)) }
       }
       if (snap && viewOptionsRef.current.snap) {
         const size = Math.max(2, viewOptionsRef.current.gridSize)
@@ -1572,7 +1708,7 @@ export function VectorEditor({
         && clickedObject?.tagName.toLowerCase() === 'text'
       if (!allowTextDoubleClick) event.preventDefault()
       stage.node.focus({ preventScroll: true })
-      const location = point(event, !(event.button === 1 || spacePanRef.current))
+      const location = point(event, !(event.button === 1 || spacePanRef.current) && currentTool !== 'lasso')
       if (event.button === 1 || spacePanRef.current) {
         stage.node.setPointerCapture(event.pointerId)
         interaction.current = { type: 'pan', startClientX: event.clientX, startClientY: event.clientY, viewBox: { ...viewBoxRef.current } }
@@ -1642,6 +1778,18 @@ export function VectorEditor({
         return
       }
       stage.node.setPointerCapture(event.pointerId)
+      if (currentTool === 'lasso') {
+        interaction.current = { type: 'lasso', points: [location], additive: event.shiftKey, initialIds: event.shiftKey ? selectedIdsRef.current : [], moved: false }
+        renderOverlay(stage, selectedIdsRef.current, { lasso: [location] })
+        return
+      }
+      if (currentTool === 'shapeBuilder') {
+        const id = clickedObject?.getAttribute('data-object-id')
+        if (!id || clickedObject?.getAttribute('data-layer-locked') === 'true') { if (!event.shiftKey && !id) select([]); return }
+        const current = selectedIdsRef.current
+        select(event.shiftKey ? current.includes(id) ? current.filter(value => value !== id) : [...current, id] : [id])
+        return
+      }
       if (currentTool !== 'select') {
         const anchorCandidate = (currentTool === 'line' || currentTool === 'arrow') ? findAnchorHit(event.target) : undefined
         const anchorElement = anchorCandidate ? elementsForIds(stage.node, [anchorCandidate.id])[0] : undefined
@@ -1661,6 +1809,19 @@ export function VectorEditor({
         return
       }
 
+      const gradientHit = event.target instanceof Element ? event.target.closest('[data-gradient-handle][data-gradient-object]') : null
+      if (gradientHit) {
+        const id = gradientHit.getAttribute('data-gradient-object')
+        const element = id ? elementsForIds(stage.node, [id])[0] : undefined
+        const gradientId = element?.getAttribute('fill')?.match(/^url\(["']?#([^\s)'\"]+)["']?\)$/)?.[1]
+        const gradient = gradientId ? stage.node.querySelector<SVGLinearGradientElement>(`linearGradient[id="${CSS.escape(gradientId)}"]`) : null
+        const bounds = element ? getBox(element) : undefined
+        if (element && gradient && bounds) {
+          interaction.current = { type: 'gradient-handle', element, gradient, bounds, index: Number(gradientHit.getAttribute('data-gradient-handle')) as 0 | 1 | 2, moved: false }
+          return
+        }
+      }
+
       const penHandle = event.target instanceof Element ? event.target.closest('[data-pen-handle][data-pen-node-index][data-pen-object]') : null
       const penNode = penHandle ?? (event.target instanceof Element ? event.target.closest('[data-pen-node][data-pen-object]') : null)
       if (penNode) {
@@ -1670,10 +1831,20 @@ export function VectorEditor({
         const element = id ? elementsForIds(stage.node, [id])[0] as SVGPathElement | undefined : undefined
         const points = element ? readPenPoints(element) : []
         if (element && element.getAttribute('data-layer-locked') !== 'true' && points[index]) {
-          setSelectedPenNodeIndex(index); setPenNodeMode(points[index].mode ?? 'smooth')
-          stage.node.setAttribute('data-selected-pen-node', `${index}`)
+          const currentNodes = selectedPenPathIdRef.current === id ? selectedPenNodeIndicesRef.current : []
+          const nextNodes = event.shiftKey
+            ? currentNodes.includes(index) ? currentNodes.filter(value => value !== index) : [...currentNodes, index]
+            : [index]
+          selectedPenNodeIndicesRef.current = nextNodes
+          setSelectedPenNodeIndices(nextNodes)
+          setSelectedPenNodeIndex(nextNodes.at(-1) ?? null)
+          setPenNodeMode(points[index].mode ?? 'smooth')
           select([id!])
-          interaction.current = { type: 'pen-node', element, index, handle, points, moved: false }
+          stage.node.setAttribute('data-selected-pen-nodes', JSON.stringify(nextNodes))
+          if (nextNodes.length) stage.node.setAttribute('data-selected-pen-node', `${nextNodes.at(-1)}`)
+          else stage.node.removeAttribute('data-selected-pen-node')
+          if (!event.shiftKey || nextNodes.includes(index)) interaction.current = { type: 'pen-node', element, index, indices: nextNodes, handle, points, moved: false }
+          renderOverlay(stage, [id!])
           return
         }
       }
@@ -1741,14 +1912,14 @@ export function VectorEditor({
       const elements = elementsForIds(stage.node, ids)
       const bounds = unionBoxes(elements.map(getBox))
       if (!bounds) return
-      const others = directObjects(stage.node).filter(element => !ids.includes(element.getAttribute('data-object-id') ?? '')).map(getBox).filter((box): box is Box => Boolean(box))
+      const others = directObjects(stage.node).filter(element => !ids.includes(element.getAttribute('data-object-id') ?? '') && element.getAttribute('visibility') !== 'hidden').map(getBox).filter((box): box is Box => Boolean(box))
       interaction.current = { type: 'move', ids, elements, others, startX: location.x, startY: location.y, lastX: 0, lastY: 0, bounds, moved: false }
     }
 
     const move = (event: PointerEvent) => {
       const current = interaction.current
       if (!current) return
-      const location = point(event, current.type !== 'pan')
+      const location = point(event, current.type !== 'pan' && current.type !== 'lasso')
       if (current.type === 'pan') {
         const bounds = stage.node.getBoundingClientRect()
         const dx = (event.clientX - current.startClientX) * current.viewBox.width / Math.max(1, bounds.width)
@@ -1758,6 +1929,37 @@ export function VectorEditor({
         current.moved = true
         const value = current.axis === 'x' ? location.x : location.y
         setViewOptions(options => ({ ...options, guides: options.guides.map((guide, index) => index === current.index ? { ...guide, value } : guide) }))
+      } else if (current.type === 'lasso') {
+        const last = current.points.at(-1)!
+        if (Math.hypot(location.x - last.x, location.y - last.y) >= 2 && current.points.length < 1600) current.points.push(location)
+        current.moved = current.moved || current.points.length > 2
+        renderOverlay(stage, selectedIdsRef.current, { lasso: current.points })
+      } else if (current.type === 'gradient-handle') {
+        current.moved = true
+        if (current.index === 2) {
+          const x1 = Number.parseFloat(current.gradient.getAttribute('x1') ?? '0')
+          const y1 = Number.parseFloat(current.gradient.getAttribute('y1') ?? '0')
+          const x2 = Number.parseFloat(current.gradient.getAttribute('x2') ?? '1')
+          const y2 = Number.parseFloat(current.gradient.getAttribute('y2') ?? '0')
+          const startX = current.gradient.getAttribute('gradientUnits') === 'userSpaceOnUse' ? x1 : current.bounds.x + current.bounds.width * (current.gradient.getAttribute('x1')?.endsWith('%') ? x1 / 100 : x1)
+          const startY = current.gradient.getAttribute('gradientUnits') === 'userSpaceOnUse' ? y1 : current.bounds.y + current.bounds.height * (current.gradient.getAttribute('y1')?.endsWith('%') ? y1 / 100 : y1)
+          const endX = current.gradient.getAttribute('gradientUnits') === 'userSpaceOnUse' ? x2 : current.bounds.x + current.bounds.width * (current.gradient.getAttribute('x2')?.endsWith('%') ? x2 / 100 : x2)
+          const endY = current.gradient.getAttribute('gradientUnits') === 'userSpaceOnUse' ? y2 : current.bounds.y + current.bounds.height * (current.gradient.getAttribute('y2')?.endsWith('%') ? y2 / 100 : y2)
+          const dx = endX - startX; const dy = endY - startY
+          const ratio = Math.max(0, Math.min(1, ((location.x - startX) * dx + (location.y - startY) * dy) / Math.max(.001, dx * dx + dy * dy)))
+          const stop = current.gradient.querySelectorAll('stop')[1]
+          stop?.setAttribute('offset', `${Number((ratio * 100).toFixed(1))}%`)
+        } else {
+          const units = current.gradient.getAttribute('gradientUnits')
+          const x = units === 'userSpaceOnUse' ? location.x : (location.x - current.bounds.x) / Math.max(.1, current.bounds.width)
+          const y = units === 'userSpaceOnUse' ? location.y : (location.y - current.bounds.y) / Math.max(.1, current.bounds.height)
+          const suffix = units === 'userSpaceOnUse' ? '' : '%'
+          const valueX = units === 'userSpaceOnUse' ? x : x * 100
+          const valueY = units === 'userSpaceOnUse' ? y : y * 100
+          current.gradient.setAttribute(current.index === 0 ? 'x1' : 'x2', `${Number(valueX.toFixed(2))}${suffix}`)
+          current.gradient.setAttribute(current.index === 0 ? 'y1' : 'y2', `${Number(valueY.toFixed(2))}${suffix}`)
+        }
+        renderOverlay(stage, [current.element.getAttribute('data-object-id') ?? ''])
       } else if (current.type === 'freehand') {
         current.keepTool = current.keepTool || event.ctrlKey
         const samples = typeof event.getCoalescedEvents === 'function' ? event.getCoalescedEvents() : [event]
@@ -1772,11 +1974,14 @@ export function VectorEditor({
       } else if (current.type === 'pen-node') {
         current.moved = true
         const node = current.points[current.index]
-        if (current.handle === 'anchor') {
+        if (current.indices.length > 1 || current.handle === 'anchor') {
           const dx = location.x - node.x; const dy = location.y - node.y
-          node.x = location.x; node.y = location.y
-          if (node.incoming) node.incoming = { x: node.incoming.x + dx, y: node.incoming.y + dy }
-          if (node.outgoing) node.outgoing = { x: node.outgoing.x + dx, y: node.outgoing.y + dy }
+          current.indices.forEach(index => {
+            const selected = current.points[index]
+            selected.x += dx; selected.y += dy
+            if (selected.incoming) selected.incoming = { x: selected.incoming.x + dx, y: selected.incoming.y + dy }
+            if (selected.outgoing) selected.outgoing = { x: selected.outgoing.x + dx, y: selected.outgoing.y + dy }
+          })
         } else {
           node[current.handle] = location
           if (node.mode === 'symmetric' || node.mode === 'smooth') {
@@ -1866,8 +2071,9 @@ export function VectorEditor({
         const rawY = location.y - current.startY
         const xBounds = { ...current.bounds, x: current.bounds.x + rawX }
         const yBounds = { ...current.bounds, y: current.bounds.y + rawY }
-        const snapX = getSnap(xBounds, current.others, 'x')
-        const snapY = getSnap(yBounds, current.others, 'y')
+        const reference = { x: 0, y: 0, ...documentSizeRef.current }
+        const snapX = viewOptionsRef.current.smartGuides ? getSnap(xBounds, current.others, 'x', reference) : undefined
+        const snapY = viewOptionsRef.current.smartGuides ? getSnap(yBounds, current.others, 'y', reference) : undefined
         const totalX = Number((rawX + (snapX?.delta ?? 0)).toFixed(1))
         const totalY = Number((rawY + (snapY?.delta ?? 0)).toFixed(1))
         const deltaX = totalX - current.lastX
@@ -1904,6 +2110,23 @@ export function VectorEditor({
         stage.node.removeAttribute('data-panning')
       } else if (current.type === 'guide') {
         if (!current.moved && !current.created && current.index < viewOptionsRef.current.guides.length) setViewOptions(options => ({ ...options, guides: options.guides.filter((_guide, index) => index !== current.index) }))
+      } else if (current.type === 'lasso') {
+        const location = point(event, false)
+        const last = current.points.at(-1)!
+        if (Math.hypot(location.x - last.x, location.y - last.y) >= 1) current.points.push(location)
+        if (current.moved && current.points.length >= 3) {
+          const matches = directObjects(stage.node).filter(element => element.getAttribute('data-layer-locked') !== 'true' && element.getAttribute('visibility') !== 'hidden')
+            .filter(element => { const box = getBox(element); return box && lassoIntersectsBox(current.points, box) })
+            .map(element => element.getAttribute('data-object-id')).filter((id): id is string => Boolean(id))
+          select(current.additive ? [...current.initialIds, ...matches] : matches)
+        } else if (!current.additive) {
+          const target = findObjectTarget(stage.node, document.elementFromPoint(event.clientX, event.clientY))
+          select(target?.getAttribute('data-object-id') ? [target.getAttribute('data-object-id')!] : [])
+        }
+        renderOverlay(stage, selectedIdsRef.current)
+      } else if (current.type === 'gradient-handle') {
+        if (current.moved) recordHistory(stage)
+        select([current.element.getAttribute('data-object-id') ?? ''])
       } else if (current.type === 'freehand') {
         current.keepTool = current.keepTool || event.ctrlKey
         const location = point(event)
@@ -1992,7 +2215,8 @@ export function VectorEditor({
         moveSelectionAction.current(event.key === 'ArrowLeft' ? -step : event.key === 'ArrowRight' ? step : 0, event.key === 'ArrowUp' ? -step : event.key === 'ArrowDown' ? step : 0)
       } else if ((event.key === 'Delete' || event.key === 'Backspace') && selectedIdsRef.current.length) {
         event.preventDefault()
-        const ids = new Set(selectedIdsRef.current)
+        const ids = new Set(elementsForIds(stage.node, selectedIdsRef.current).filter(element => element.getAttribute('data-layer-locked') !== 'true').map(element => element.getAttribute('data-object-id') ?? ''))
+        if (!ids.size) return
         detachConnectors(stage.node, [...ids])
         elementsForIds(stage.node, [...ids]).forEach(element => {
           if (element.tagName.toLowerCase() === 'line') {
@@ -2231,9 +2455,11 @@ export function VectorEditor({
 
   function deleteSelected() {
     const stage = drawing.current
-    if (!stage || !selectedIdsRef.current.length) return
-    detachConnectors(stage.node, selectedIdsRef.current)
-    elementsForIds(stage.node, selectedIdsRef.current).forEach(element => {
+    const deletable = selectedElements().filter(element => element.getAttribute('data-layer-locked') !== 'true')
+    const ids = deletable.map(element => element.getAttribute('data-object-id') ?? '')
+    if (!stage || !ids.length) return
+    detachConnectors(stage.node, ids)
+    deletable.forEach(element => {
       if (element.tagName.toLowerCase() === 'line') {
         const id = element.getAttribute('data-object-id')
         if (id) {
@@ -2248,6 +2474,18 @@ export function VectorEditor({
     recordHistory(stage)
     renderOverlay(stage, [])
     stage.node.focus({ preventScroll: true })
+  }
+
+  function toggleSelectedLock() {
+    const stage = drawing.current
+    const elements = selectedElements()
+    if (!stage || !elements.length) return
+    const lock = elements.some(element => element.getAttribute('data-layer-locked') !== 'true')
+    elements.forEach(element => element.setAttribute('data-layer-locked', `${lock}`))
+    setLayerRevision(value => value + 1)
+    if (lock) select([])
+    recordHistory(stage)
+    renderOverlay(stage, selectedIdsRef.current)
   }
 
   function moveSelectionBy(deltaX: number, deltaY: number) {
@@ -2397,6 +2635,49 @@ export function VectorEditor({
     select(selectedIdsRef.current)
   }
 
+  function alignSelectionToKey(alignment: 'left' | 'centerX' | 'right' | 'top' | 'centerY' | 'bottom') {
+    const stage = drawing.current
+    const ids = selectedIdsRef.current
+    const keyElement = stage && ids.length > 1 ? elementsForIds(stage.node, [ids[0]])[0] : undefined
+    const keyBox = keyElement ? getBox(keyElement) : undefined
+    if (!stage || !keyBox) return
+    const horizontal = ['left', 'centerX', 'right'].includes(alignment)
+    const target = horizontal
+      ? alignment === 'left' ? keyBox.x : alignment === 'centerX' ? keyBox.x + keyBox.width / 2 : keyBox.x + keyBox.width
+      : alignment === 'top' ? keyBox.y : alignment === 'centerY' ? keyBox.y + keyBox.height / 2 : keyBox.y + keyBox.height
+    ids.slice(1).map(id => elementsForIds(stage.node, [id])[0]).filter((element): element is SVGElement => Boolean(element)).forEach(element => {
+      const box = getBox(element)
+      if (!box) return
+      const position = horizontal
+        ? alignment === 'left' ? keyBox.x : alignment === 'centerX' ? target - box.width / 2 : target - box.width
+        : alignment === 'top' ? keyBox.y : alignment === 'centerY' ? target - box.height / 2 : target - box.height
+      moveElementBy(element, horizontal ? position - box.x : 0, horizontal ? 0 : position - box.y)
+    })
+    updateConnectors(stage.node); recordHistory(stage); select(ids)
+  }
+
+  function alignSelectionToArtboard(alignment: 'left' | 'centerX' | 'right' | 'top' | 'centerY' | 'bottom') {
+    const stage = drawing.current
+    const ids = selectedIdsRef.current
+    if (!stage || !ids.length) return
+    const board = elementsForIds(stage.node, ids).find(element => element.hasAttribute('data-artboard'))
+    const bounds = board ? getBox(board) : { x: 0, y: 0, width: documentSizeRef.current.width, height: documentSizeRef.current.height }
+    if (!bounds) return
+    const horizontal = ['left', 'centerX', 'right'].includes(alignment)
+    const target = horizontal
+      ? alignment === 'left' ? bounds.x : alignment === 'centerX' ? bounds.x + bounds.width / 2 : bounds.x + bounds.width
+      : alignment === 'top' ? bounds.y : alignment === 'centerY' ? bounds.y + bounds.height / 2 : bounds.y + bounds.height
+    elementsForIds(stage.node, ids).filter(element => element !== board).forEach(element => {
+      const box = getBox(element)
+      if (!box) return
+      const position = horizontal
+        ? alignment === 'left' ? target : alignment === 'centerX' ? target - box.width / 2 : target - box.width
+        : alignment === 'top' ? target : alignment === 'centerY' ? target - box.height / 2 : target - box.height
+      moveElementBy(element, horizontal ? position - box.x : 0, horizontal ? 0 : position - box.y)
+    })
+    updateConnectors(stage.node); recordHistory(stage); select(ids)
+  }
+
   function alignSelection(axis: 'x' | 'y', alignment: 'start' | 'center' | 'end') {
     const stage = drawing.current
     if (!stage || selectedIdsRef.current.length < 2) return
@@ -2443,7 +2724,7 @@ export function VectorEditor({
 
   function applyBoolean(operation: 'union' | 'subtract' | 'intersect' | 'exclude') {
     const stage = drawing.current
-    const originals = stage ? elementsForIds(stage.node, selectedIdsRef.current) : []
+    const originals = stage ? selectedIdsRef.current.map(id => elementsForIds(stage.node, [id])[0]).filter((element): element is SVGElement => Boolean(element)) : []
     if (!stage || originals.length < 2 || (operation === 'exclude' && originals.length !== 2)) return
     const bounds = unionBoxes(originals.map(getBox))
     if (!bounds) return
@@ -2616,6 +2897,132 @@ export function VectorEditor({
     recordHistory(stage); select(selectedIdsRef.current)
   }
 
+  function reverseSelectedPaths() {
+    const stage = drawing.current
+    const paths = selectedElements().filter(element => element.tagName.toLowerCase() === 'path') as SVGPathElement[]
+    if (!stage || !paths.length) return
+    paths.forEach(path => {
+      if (path.hasAttribute('data-editor-pen')) {
+        const points = readPenPoints(path).reverse().map(point => ({ ...point, incoming: point.outgoing, outgoing: point.incoming }))
+        path.setAttribute('data-pen-points', JSON.stringify(points))
+        path.setAttribute('d', penPath(points) + (/z\s*$/i.test(path.getAttribute('d') ?? '') ? ' Z' : ''))
+      } else {
+        const reversed = reversePathData(path)
+        if (reversed) path.setAttribute('d', reversed)
+      }
+    })
+    recordHistory(stage); select(selectedIdsRef.current)
+  }
+
+  function convertStrokeToPath() {
+    const stage = drawing.current
+    const sources = selectedElements().filter(element => {
+      const tag = element.tagName.toLowerCase()
+      if (element.getAttribute('stroke') === 'none') return false
+      if (tag === 'path') return !/z\s*$/i.test(element.getAttribute('d') ?? '')
+      return tag === 'line' && !element.hasAttribute('data-start-target') && !element.hasAttribute('data-end-target') && !element.hasAttribute('data-auto-route')
+    })
+    if (!stage || !sources.length) return
+    let converted = 0
+    sources.forEach(source => {
+      const sourceTag = source.tagName.toLowerCase()
+      const path = sourceTag === 'path' ? source as SVGPathElement : document.createElementNS(SVG_NS, 'path')
+      if (sourceTag === 'line') {
+        path.setAttribute('d', `M ${source.getAttribute('x1') ?? 0} ${source.getAttribute('y1') ?? 0} L ${source.getAttribute('x2') ?? 0} ${source.getAttribute('y2') ?? 0}`)
+        const transform = source.getAttribute('transform')
+        if (transform) path.setAttribute('transform', transform)
+        path.setAttribute('stroke-width', source.getAttribute('stroke-width') ?? `${strokeWidthRef.current}`)
+        path.setAttribute('stroke', source.getAttribute('stroke') ?? strokeColorRef.current)
+        stage.node.append(path)
+      }
+      const outlined = outlineOpenStroke(path)
+      if (sourceTag === 'line') path.remove()
+      if (!outlined) return
+      const id = source.getAttribute('data-object-id') ?? crypto.randomUUID()
+      outlined.setAttribute('fill', source.getAttribute('stroke') ?? strokeColorRef.current)
+      outlined.setAttribute('stroke', 'none')
+      outlined.setAttribute('fill-rule', 'evenodd')
+      for (const attribute of ['transform', 'opacity', 'data-layer-name', 'data-group-id']) {
+        const value = source.getAttribute(attribute)
+        if (value !== null) outlined.setAttribute(attribute, value)
+      }
+      outlined.setAttribute('data-object-id', id)
+      outlined.setAttribute('data-layer-name', `${source.getAttribute('data-layer-name') || 'Ścieżka'} · kontur`)
+      source.replaceWith(outlined)
+      converted++
+    })
+    if (converted) { recordHistory(stage); select(selectedIdsRef.current); setWorkflowMessage(`Zamieniono obrysy na wypełnione ścieżki (${converted}).`) }
+    else setWorkflowMessage('Zamiana działa na otwartych ścieżkach i zwykłych liniach.')
+  }
+
+  function roundSelectedPenNodes() {
+    const stage = drawing.current
+    const path = selectedElements().find(element => element.hasAttribute('data-editor-pen')) as SVGPathElement | undefined
+    const selected = selectedPenNodeIndicesRef.current.length ? selectedPenNodeIndicesRef.current : selectedPenNodeIndex === null ? [] : [selectedPenNodeIndex]
+    if (!stage || !path || !selected.length) return
+    const points = readPenPoints(path)
+    const radius = Math.max(.1, cornerRadius)
+    selected.filter(index => index > 0 && index < points.length - 1).sort((a, b) => b - a).forEach(index => {
+      const previous = points[index - 1]
+      const node = points[index]
+      const next = points[index + 1]
+      const beforeLength = Math.hypot(previous.x - node.x, previous.y - node.y)
+      const afterLength = Math.hypot(next.x - node.x, next.y - node.y)
+      const trim = Math.min(radius, beforeLength * .42, afterLength * .42)
+      if (trim < .1) return
+      const beforeDirection = { x: (previous.x - node.x) / beforeLength, y: (previous.y - node.y) / beforeLength }
+      const afterDirection = { x: (next.x - node.x) / afterLength, y: (next.y - node.y) / afterLength }
+      const before: PenNode = {
+        x: node.x + beforeDirection.x * trim, y: node.y + beforeDirection.y * trim,
+        mode: 'smooth', outgoing: { x: node.x + beforeDirection.x * trim * .45, y: node.y + beforeDirection.y * trim * .45 },
+      }
+      const after: PenNode = {
+        x: node.x + afterDirection.x * trim, y: node.y + afterDirection.y * trim,
+        mode: 'smooth', incoming: { x: node.x + afterDirection.x * trim * .45, y: node.y + afterDirection.y * trim * .45 },
+      }
+      points.splice(index, 1, before, after)
+    })
+    const closed = /z\s*$/i.test(path.getAttribute('d') ?? '')
+    path.setAttribute('data-pen-points', JSON.stringify(points)); path.setAttribute('d', `${penPath(points)}${closed ? ' Z' : ''}`)
+    selectedPenNodeIndicesRef.current = []
+    setSelectedPenNodeIndices([]); setSelectedPenNodeIndex(null)
+    stage.node.removeAttribute('data-selected-pen-nodes'); stage.node.removeAttribute('data-selected-pen-node')
+    recordHistory(stage); renderOverlay(stage, selectedIdsRef.current)
+  }
+
+  function applyFillRule(value: 'nonzero' | 'evenodd') {
+    setFillRule(value)
+    updateSelected(element => { if (element.tagName.toLowerCase() === 'path' || element.tagName.toLowerCase() === 'polygon') element.setAttribute('fill-rule', value) })
+  }
+
+  function applyBlendMode(value: string) {
+    setBlendMode(value)
+    updateSelected(element => { if (value === 'normal') element.removeAttribute('mix-blend-mode'); else element.setAttribute('mix-blend-mode', value) })
+  }
+
+  function createSelectionMask() {
+    const stage = drawing.current
+    const ids = selectedIdsRef.current
+    if (!stage || ids.length < 2) return
+    const target = elementsForIds(stage.node, [ids[0]])[0]
+    const source = elementsForIds(stage.node, [ids.at(-1)!])[0]
+    if (!target || !source || target === source) return
+    const bounds = getBox(source)
+    if (!bounds) return
+    const defs = stage.node.querySelector('defs') ?? document.createElementNS(SVG_NS, 'defs')
+    if (!defs.parentNode) stage.node.prepend(defs)
+    const id = `editor-mask-${crypto.randomUUID()}`
+    const mask = document.createElementNS(SVG_NS, 'mask')
+    mask.setAttribute('id', id); mask.setAttribute('maskUnits', 'userSpaceOnUse'); mask.setAttribute('maskContentUnits', 'userSpaceOnUse')
+    mask.setAttribute('x', `${bounds.x}`); mask.setAttribute('y', `${bounds.y}`); mask.setAttribute('width', `${Math.max(1, bounds.width)}`); mask.setAttribute('height', `${Math.max(1, bounds.height)}`)
+    const shape = source.cloneNode(true) as SVGElement
+    ;[shape, ...Array.from(shape.querySelectorAll('*'))].forEach(node => { node.removeAttribute('data-object-id'); node.removeAttribute('data-layer-name'); node.setAttribute('fill', '#fff'); node.setAttribute('stroke', '#fff') })
+    mask.append(shape); defs.append(mask)
+    target.setAttribute('mask', `url(#${id})`)
+    source.setAttribute('visibility', 'hidden'); source.setAttribute('data-layer-name', `${source.getAttribute('data-layer-name') || 'Kształt'} · źródło maski`)
+    recordHistory(stage); select([target.getAttribute('data-object-id') ?? ''])
+  }
+
   function applyStrokeOffset() {
     const stage = drawing.current
     if (!stage) return
@@ -2689,13 +3096,15 @@ export function VectorEditor({
     if (!defs.parentNode) stage.node.prepend(defs)
     const pattern = document.createElementNS(SVG_NS, 'pattern')
     const id = `pattern-${crypto.randomUUID()}`
-    pattern.setAttribute('id', id); pattern.setAttribute('patternUnits', 'userSpaceOnUse'); pattern.setAttribute('width', '16'); pattern.setAttribute('height', '16')
+    const size = Math.max(4, patternTileSize)
+    pattern.setAttribute('id', id); pattern.setAttribute('patternUnits', 'userSpaceOnUse'); pattern.setAttribute('width', `${size}`); pattern.setAttribute('height', `${size}`)
+    if (patternBackground) { const background = document.createElementNS(SVG_NS, 'rect'); background.setAttribute('width', `${size}`); background.setAttribute('height', `${size}`); background.setAttribute('fill', patternBackground); pattern.append(background) }
     if (patternKind === 'dots') {
-      const dot = document.createElementNS(SVG_NS, 'circle'); dot.setAttribute('cx', '4'); dot.setAttribute('cy', '4'); dot.setAttribute('r', '2'); dot.setAttribute('fill', strokeColor); pattern.append(dot)
+      const dot = document.createElementNS(SVG_NS, 'circle'); dot.setAttribute('cx', `${size / 2}`); dot.setAttribute('cy', `${size / 2}`); dot.setAttribute('r', `${Math.max(1, patternStrokeWidth)}`); dot.setAttribute('fill', strokeColor); pattern.append(dot)
     } else {
       const line = document.createElementNS(SVG_NS, 'path')
-      line.setAttribute('d', patternKind === 'lines' ? 'M 0 3 H 16' : 'M -4 4 L 4 -4 M 0 16 L 16 0 M 12 20 L 20 12')
-      line.setAttribute('stroke', strokeColor); line.setAttribute('stroke-width', '2'); pattern.append(line)
+      line.setAttribute('d', patternKind === 'lines' ? `M 0 ${size / 2} H ${size}` : `M 0 ${size} L ${size} 0 M ${-size} ${size} L ${size} ${-size} M 0 ${size * 2} L ${size * 2} 0`)
+      line.setAttribute('stroke', strokeColor); line.setAttribute('stroke-width', `${Math.max(.5, patternStrokeWidth)}`); pattern.append(line)
     }
     defs.append(pattern); elements.forEach(element => element.setAttribute('fill', `url(#${id})`)); recordHistory(stage)
   }
@@ -2709,15 +3118,211 @@ export function VectorEditor({
     const pathId = path.id || `text-path-${crypto.randomUUID()}`
     path.setAttribute('id', pathId)
     const textPath = document.createElementNS(SVG_NS, 'textPath')
-    textPath.setAttribute('href', `#${pathId}`); textPath.setAttribute('startOffset', '0%'); textPath.textContent = text.textContent ?? ''
+    textPath.setAttribute('href', `#${pathId}`); textPath.setAttribute('startOffset', `${textPathOffset}%`); textPath.setAttribute('side', textPathSide); textPath.textContent = text.textContent ?? ''
     const result = document.createElementNS(SVG_NS, 'text')
     for (const attribute of ['fill', 'font-size', 'font-family', 'font-weight', 'font-style', 'text-anchor']) {
       const value = text.getAttribute(attribute)
       if (value !== null) result.setAttribute(attribute, value)
     }
     const id = crypto.randomUUID()
-    result.setAttribute('data-object-id', id); result.setAttribute('data-layer-name', 'Tekst na ścieżce'); result.append(textPath)
+    result.setAttribute('data-object-id', id); result.setAttribute('data-layer-name', 'Tekst na ścieżce'); result.setAttribute('text-anchor', textPathAnchor); result.setAttribute('dy', `${textPathDistance}px`); result.append(textPath)
     text.replaceWith(result); select([id]); recordHistory(stage)
+  }
+
+  function applyTextPathOptions(offset = textPathOffset, anchor = textPathAnchor, side = textPathSide, distance = textPathDistance) {
+    const stage = drawing.current
+    const text = selectedElements().find(element => element.querySelector('textPath'))
+    const textPath = text?.querySelector('textPath')
+    if (!stage || !text || !textPath) return
+    textPath.setAttribute('startOffset', `${offset}%`)
+    textPath.setAttribute('side', side)
+    text.setAttribute('text-anchor', anchor)
+    text.setAttribute('dy', `${distance}px`)
+    recordHistory(stage); select(selectedIdsRef.current)
+  }
+
+  function replaceDocumentFont(from: string, to: string) {
+    const stage = drawing.current
+    if (!stage || !from || !to) return
+    let changed = 0
+    stage.node.querySelectorAll<SVGTextElement>('text').forEach(text => {
+      if ((text.getAttribute('font-family') ?? '').trim() === from) { text.setAttribute('font-family', to); changed++ }
+    })
+    if (changed) { recordHistory(stage); select(selectedIdsRef.current); setWorkflowMessage(`Zamieniono krój pisma w ${changed} elementach tekstowych.`) }
+  }
+
+  function addNamedColor() {
+    const name = colorNameDraft.trim()
+    if (!name) return
+    setNamedColors(current => [...current.filter(item => item.name !== name), { name, color: fillColor }].slice(-24))
+    setColorNameDraft('')
+  }
+
+  function replaceDocumentColor(from: string, to: string) {
+    const stage = drawing.current
+    const source = toHexColor(from)
+    const target = toHexColor(to)
+    if (!stage || !source || !target) return
+    let changed = 0
+    const apply = (element: Element, attribute: string, styleKey?: string) => {
+      const value = attribute === 'style' ? (element as SVGElement).style.getPropertyValue(styleKey ?? '') : element.getAttribute(attribute)
+      if (!value || toHexColor(value)?.toLowerCase() !== source.toLowerCase()) return
+      if (attribute === 'style') (element as SVGElement).style.setProperty(styleKey ?? '', target)
+      else element.setAttribute(attribute, target)
+      changed++
+    }
+    stage.node.querySelectorAll<SVGElement>('[fill], [stroke], [stop-color], [style]').forEach(element => {
+      for (const attribute of ['fill', 'stroke', 'stop-color']) apply(element, attribute)
+      for (const key of ['fill', 'stroke', 'stop-color']) apply(element, 'style', key)
+    })
+    if (changed) { recordHistory(stage); select(selectedIdsRef.current); setWorkflowMessage(`Zamieniono kolor w ${changed} miejscach dokumentu.`) }
+  }
+
+  function applyImageAdjustments(overrides: { brightness?: number; contrast?: number; saturation?: number } = {}) {
+    const stage = drawing.current
+    const images = selectedElements().filter(element => element.tagName.toLowerCase() === 'image') as SVGImageElement[]
+    if (!stage || !images.length) return
+    const brightness = overrides.brightness ?? imageBrightness
+    const contrast = overrides.contrast ?? imageContrast
+    const saturationValue = overrides.saturation ?? imageSaturation
+    const defs = stage.node.querySelector('defs') ?? document.createElementNS(SVG_NS, 'defs')
+    if (!defs.parentNode) stage.node.prepend(defs)
+    images.forEach(image => {
+      const id = image.getAttribute('data-image-filter') ?? `image-filter-${crypto.randomUUID()}`
+      image.setAttribute('data-image-filter', id)
+      let filter = defs.querySelector<SVGFilterElement>(`filter[id="${CSS.escape(id)}"]`)
+      if (!filter) { filter = document.createElementNS(SVG_NS, 'filter'); filter.setAttribute('id', id); filter.setAttribute('color-interpolation-filters', 'sRGB'); defs.append(filter) }
+      filter.replaceChildren()
+      const saturation = document.createElementNS(SVG_NS, 'feColorMatrix')
+      saturation.setAttribute('type', 'saturate'); saturation.setAttribute('values', `${saturationValue / 100}`)
+      const transfer = document.createElementNS(SVG_NS, 'feComponentTransfer')
+      const intercept = (brightness - 100) / 100 + .5 * (1 - contrast / 100)
+      for (const channel of ['R', 'G', 'B']) {
+        const functionNode = document.createElementNS(SVG_NS, `feFunc${channel}`)
+        functionNode.setAttribute('type', 'linear'); functionNode.setAttribute('slope', `${contrast / 100}`); functionNode.setAttribute('intercept', `${intercept}`)
+        transfer.append(functionNode)
+      }
+      const alpha = document.createElementNS(SVG_NS, 'feFuncA'); alpha.setAttribute('type', 'identity'); transfer.append(alpha)
+      filter.append(saturation, transfer); image.setAttribute('filter', `url(#${id})`)
+    })
+    recordHistory(stage)
+  }
+
+  function resetImageAdjustments() {
+    setImageBrightness(100); setImageContrast(100); setImageSaturation(100)
+    const stage = drawing.current
+    const images = selectedElements().filter(image => image.tagName.toLowerCase() === 'image')
+    if (!stage || !images.length) return
+    images.forEach(image => {
+      const filterId = image.getAttribute('data-image-filter')
+      if (filterId) stage.node.querySelector(`filter[id="${CSS.escape(filterId)}"]`)?.remove()
+      image.removeAttribute('filter'); image.removeAttribute('data-image-filter')
+    })
+    recordHistory(stage)
+  }
+
+  async function relinkImage(file?: File) {
+    const stage = drawing.current
+    const image = stage ? elementsForIds(stage.node, [linkedImageId])[0] as SVGImageElement | undefined : undefined
+    if (!stage || !image || !file || !/^image\/(png|jpeg|gif|webp)$/i.test(file.type)) return
+    try {
+      const data = await new Promise<string>((resolve, reject) => { const reader = new FileReader(); reader.onload = () => typeof reader.result === 'string' ? resolve(reader.result) : reject(); reader.onerror = () => reject(reader.error); reader.readAsDataURL(file) })
+      image.setAttribute('href', data); image.setAttribute('data-layer-name', file.name)
+      recordHistory(stage); setWorkflowMessage(`Osadzono obraz ${file.name} w dokumencie SVG.`)
+    } catch { setWorkflowMessage('Nie udało się podpiąć wybranego pliku obrazu.') }
+  }
+
+  function saveSelectionAsAsset() {
+    const stage = drawing.current
+    const selected = selectedElements()
+    if (!stage || !selected.length) return
+    const root = document.createElementNS(SVG_NS, 'svg')
+    root.setAttribute('xmlns', SVG_NS); root.setAttribute('viewBox', `0 0 ${documentSize.width} ${documentSize.height}`)
+    const defs = stage.node.querySelector('defs')
+    if (defs) root.append(defs.cloneNode(true))
+    selected.forEach(element => root.append(element.cloneNode(true)))
+    const name = assetNameDraft.trim() || selected[0].getAttribute('data-layer-name') || 'Zasób SVG'
+    const markup = sanitizeSvg(new XMLSerializer().serializeToString(root))
+    setAssetLibrary(current => [...current, { id: crypto.randomUUID(), name, markup }].slice(-40))
+    setAssetNameDraft('')
+    setWorkflowMessage(`Dodano „${name}” do biblioteki zasobów.`)
+  }
+
+  function insertLibraryAsset(id: string) {
+    const stage = drawing.current
+    const assetItem = assetLibrary.find(item => item.id === id)
+    if (!stage || !assetItem) return
+    try {
+      const parsed = new DOMParser().parseFromString(sanitizeSvg(assetItem.markup), 'image/svg+xml')
+      const defsSource = parsed.documentElement.querySelector('defs')
+      const rootDefs = stage.node.querySelector('defs') ?? document.createElementNS(SVG_NS, 'defs')
+      if (!rootDefs.parentNode) stage.node.prepend(rootDefs)
+      const definitionCopies = defsSource ? Array.from(defsSource.children).map(element => element.cloneNode(true) as Element) : []
+      const objectCopies = Array.from(parsed.documentElement.children).filter(element => element.tagName.toLowerCase() !== 'defs').map(element => element.cloneNode(true) as Element)
+      const copies = [...definitionCopies, ...objectCopies]
+      const idMap = new Map<string, string>()
+      copies.forEach(copy => [copy, ...Array.from(copy.querySelectorAll('*'))].forEach(element => {
+        const old = element.getAttribute('id')
+        if (old) { const next = `asset-${crypto.randomUUID()}`; idMap.set(old, next); element.setAttribute('id', next) }
+      }))
+      copies.forEach(copy => [copy, ...Array.from(copy.querySelectorAll('*'))].forEach(element => Array.from(element.attributes).forEach(attribute => {
+        let value = attribute.value
+        idMap.forEach((next, old) => { value = value.replaceAll(`url(#${old})`, `url(#${next})`).replaceAll(`#${old}`, `#${next}`) })
+        element.setAttribute(attribute.name, value)
+        element.removeAttribute('data-object-id'); element.removeAttribute('data-group-id')
+      })))
+      const group = document.createElementNS(SVG_NS, 'g')
+      group.setAttribute('data-object-id', crypto.randomUUID()); group.setAttribute('data-layer-name', assetItem.name)
+      definitionCopies.forEach(copy => rootDefs.append(copy))
+      objectCopies.forEach(copy => group.append(copy))
+      stage.node.append(group); recordHistory(stage); select([group.getAttribute('data-object-id') ?? ''])
+    } catch { setWorkflowMessage('Nie udało się wstawić zapisanego zasobu SVG.') }
+  }
+
+  function flowTextIntoShape() {
+    const stage = drawing.current
+    const elements = selectedElements()
+    const text = elements.find(element => element.tagName.toLowerCase() === 'text') as SVGTextElement | undefined
+    const shape = elements.find(element => !['text', 'line'].includes(element.tagName.toLowerCase()))
+    const bounds = shape ? getBox(shape) : undefined
+    if (!stage || !text || !shape || !bounds) return
+    const fontSize = Number(text.getAttribute('font-size')) || fontSizeRef.current
+    const lineHeight = fontSize * Math.max(.5, Number.parseFloat(text.getAttribute('line-height') ?? '1.2') || 1.2)
+    const maxWidth = Math.max(10, bounds.width - fontSize * .4)
+    const maxLines = Math.max(1, Math.floor((bounds.height - fontSize * .25) / lineHeight))
+    const canvas = document.createElement('canvas')
+    const context = canvas.getContext('2d')
+    if (context) context.font = `${text.getAttribute('font-weight') ?? '400'} ${fontSize}px ${text.getAttribute('font-family') ?? 'sans-serif'}`
+    const words = (text.textContent ?? '').trim().split(/\s+/).filter(Boolean)
+    const lines: string[] = []
+    let line = ''
+    words.forEach(word => {
+      const candidate = line ? `${line} ${word}` : word
+      const width = context?.measureText(candidate).width ?? candidate.length * fontSize * .55
+      if (line && width > maxWidth) { lines.push(line); line = word }
+      else line = candidate
+    })
+    if (line) lines.push(line)
+    const visibleLines = lines.slice(0, maxLines)
+    text.replaceChildren()
+    visibleLines.forEach((content, index) => {
+      const span = document.createElementNS(SVG_NS, 'tspan')
+      span.setAttribute('x', `${bounds.x + fontSize * .2}`)
+      span.setAttribute('dy', index === 0 ? `${fontSize}` : `${lineHeight}`)
+      span.textContent = content
+      text.append(span)
+    })
+    text.setAttribute('x', `${bounds.x + fontSize * .2}`); text.setAttribute('y', `${bounds.y}`)
+    const defs = stage.node.querySelector('defs') ?? document.createElementNS(SVG_NS, 'defs')
+    if (!defs.parentNode) stage.node.prepend(defs)
+    const id = `text-flow-${crypto.randomUUID()}`
+    const clip = document.createElementNS(SVG_NS, 'clipPath')
+    clip.setAttribute('id', id); clip.setAttribute('clipPathUnits', 'userSpaceOnUse')
+    const source = shape.cloneNode(true) as SVGElement
+    ;[source, ...Array.from(source.querySelectorAll('*'))].forEach(element => { element.removeAttribute('data-object-id'); element.removeAttribute('data-layer-name') })
+    clip.append(source); defs.append(clip); text.setAttribute('clip-path', `url(#${id})`)
+    recordHistory(stage); select([text.getAttribute('data-object-id') ?? ''])
+    setWorkflowMessage(lines.length > visibleLines.length ? `Tekst dopasowano do kształtu; pominięto ${lines.length - visibleLines.length} wierszy.` : `Tekst ułożono w ${visibleLines.length} wierszach wewnątrz kształtu.`)
   }
 
   function applyImageTransform(axis: 'x' | 'y') {
@@ -3161,7 +3766,7 @@ export function VectorEditor({
     recordHistory(stage)
   }
 
-  function applyTypography(change: { family?: string; weight?: string; align?: string; italic?: boolean }) {
+  function applyTypography(change: { family?: string; weight?: string; align?: string; italic?: boolean; letterSpacing?: string; lineHeight?: string; baselineShift?: string }) {
     const stage = drawing.current
     if (!stage) return
     const texts = elementsForIds(stage.node, selectedIdsRef.current).filter(element => element.tagName.toLowerCase() === 'text')
@@ -3170,6 +3775,9 @@ export function VectorEditor({
       if (change.weight) element.setAttribute('font-weight', change.weight)
       if (change.align) element.setAttribute('text-anchor', change.align)
       if (change.italic !== undefined) element.setAttribute('font-style', change.italic ? 'italic' : 'normal')
+      if (change.letterSpacing !== undefined) element.setAttribute('letter-spacing', `${change.letterSpacing}px`)
+      if (change.lineHeight !== undefined) element.setAttribute('line-height', change.lineHeight)
+      if (change.baselineShift !== undefined) element.setAttribute('baseline-shift', `${change.baselineShift}px`)
     })
     if (change.italic !== undefined) { setFontItalic(change.italic); fontItalicRef.current = change.italic }
     recordHistory(stage)
@@ -3179,19 +3787,20 @@ export function VectorEditor({
     const stage = drawing.current
     const path = selectedElements().find(element => element.hasAttribute('data-editor-pen')) as SVGPathElement | undefined
     const points = path ? readPenPoints(path) : []
-    const index = selectedPenNodeIndex
-    const node = index === null ? undefined : points[index]
-    if (!stage || !path || index === null || !node) return
-    node.mode = mode
+    const indices = selectedPenNodeIndicesRef.current.length ? selectedPenNodeIndicesRef.current : selectedPenNodeIndex === null ? [] : [selectedPenNodeIndex]
+    if (!stage || !path || !indices.length) return
     setPenNodeMode(mode)
-    if (mode === 'corner') { delete node.incoming; delete node.outgoing }
-    else {
+    indices.forEach(index => {
+      const node = points[index]
+      if (!node) return
+      node.mode = mode
+      if (mode === 'corner') { delete node.incoming; delete node.outgoing; return }
       const previous = points[index - 1]
       const next = points[index + 1]
       const tangentX = previous && next ? (next.x - previous.x) / 6 : next ? (next.x - node.x) / 6 : previous ? (node.x - previous.x) / 6 : 10
       const tangentY = previous && next ? (next.y - previous.y) / 6 : next ? (next.y - node.y) / 6 : previous ? (node.y - previous.y) / 6 : 0
-      let dx = node.outgoing ? node.outgoing.x - node.x : tangentX
-      let dy = node.outgoing ? node.outgoing.y - node.y : tangentY
+      const dx = node.outgoing ? node.outgoing.x - node.x : tangentX
+      const dy = node.outgoing ? node.outgoing.y - node.y : tangentY
       const magnitude = mode === 'symmetric'
         ? Math.max(1, Math.hypot(dx, dy))
         : Math.max(1, Math.hypot(node.incoming ? node.incoming.x - node.x : 0, node.incoming ? node.incoming.y - node.y : 0), Math.hypot(dx, dy))
@@ -3200,8 +3809,9 @@ export function VectorEditor({
       const angle = Math.atan2(dy, dx)
       node.outgoing = { x: node.x + Math.cos(angle) * lengthOut, y: node.y + Math.sin(angle) * lengthOut }
       node.incoming = { x: node.x - Math.cos(angle) * lengthIn, y: node.y - Math.sin(angle) * lengthIn }
-    }
-    path.setAttribute('data-pen-points', JSON.stringify(points)); path.setAttribute('d', penPath(points))
+    })
+    const closed = /z\s*$/i.test(path.getAttribute('d') ?? '')
+    path.setAttribute('data-pen-points', JSON.stringify(points)); path.setAttribute('d', `${penPath(points)}${closed ? ' Z' : ''}`)
     recordHistory(stage); renderOverlay(stage, selectedIdsRef.current)
   }
 
@@ -3268,6 +3878,8 @@ export function VectorEditor({
 
   const tools: { id: Tool; label: string; icon: typeof RectangleHorizontal }[] = [
     { id: 'select', label: 'Zaznacz i przesuń', icon: MousePointer2 },
+    { id: 'lasso', label: 'Zaznacz lasso', icon: Lasso },
+    { id: 'shapeBuilder', label: 'Buduj kształt przez wybór obszarów', icon: Combine },
     { id: 'rect', label: 'Prostokąt', icon: RectangleHorizontal },
     { id: 'roundRect', label: 'Zaokrąglony prostokąt', icon: RectangleVertical },
     { id: 'ellipse', label: 'Elipsa', icon: Circle },
@@ -3284,6 +3896,11 @@ export function VectorEditor({
   const selectedImage = drawing.current ? elementsForIds(drawing.current.node, selectedIds).find(element => element.tagName.toLowerCase() === 'image') : undefined
   const artboards = drawing.current ? directObjects(drawing.current.node).filter(element => element.hasAttribute('data-artboard')) : []
   const selectedPaths = selectedElements().filter(element => element.tagName.toLowerCase() === 'path')
+  const documentFonts = drawing.current ? [...new Set(Array.from(drawing.current.node.querySelectorAll<SVGTextElement>('text')).map(text => text.getAttribute('font-family')).filter((family): family is string => Boolean(family?.trim())))] : []
+  const unavailableFonts = documentFonts.filter(family => !document.fonts.check(`14px ${family}`))
+  const linkedImages = drawing.current ? directObjects(drawing.current.node).filter(element => element.tagName.toLowerCase() === 'image' && !/^data:/i.test(element.getAttribute('href') ?? element.getAttribute('xlink:href') ?? '')) : []
+  const compareCheckpoint = checkpoints.find(checkpoint => checkpoint.id === compareCheckpointId)
+  const checkpointSvgPreview = (content: string) => sanitizeSvg(`<svg xmlns="${SVG_NS}" width="800" height="500" viewBox="0 0 ${documentSize.width} ${documentSize.height}">${content}</svg>`)
   const zoomPercent = Math.round(documentSize.width / Math.max(viewBox.width, 1) * 100)
   const palette = ['#596fd8', '#e76c75', '#2b9a83', '#f0a84b', '#222c42', '#8a5bc2', '#3e8cc9', '#ffffff', '#111827']
   const paletteCommands = [
@@ -3311,6 +3928,7 @@ export function VectorEditor({
             <span className="toolbar-divider" />
             <div className="drawing-selection-actions" role="group" aria-label="Operacje na zaznaczeniu">
               <span className="selection-count">{selectedIds.length ? `${selectedIds.length} zazn.` : 'Brak zaznaczenia'}</span>
+              <button className="tool-button" onClick={toggleSelectedLock} disabled={!selectedIds.length} title="Zablokuj lub odblokuj zaznaczenie" aria-label="Zablokuj lub odblokuj zaznaczenie">{selectedElements().length && selectedElements().every(element => element.getAttribute('data-layer-locked') === 'true') ? <Unlock size={16} /> : <Lock size={16} />}</button>
               <button className="tool-button" onClick={groupSelected} disabled={selectedIds.length < 2} title="Grupuj (Ctrl+G)" aria-label="Grupuj figury"><Group size={16} /></button>
               <button className="tool-button" onClick={ungroupSelected} disabled={!hasSelectedGroup} title="Rozgrupuj (Ctrl+Shift+G)" aria-label="Rozgrupuj figury"><Ungroup size={16} /></button>
               <button className="tool-button" onClick={copySelected} disabled={!selectedIds.length} title="Kopiuj zaznaczenie (Ctrl+C)" aria-label="Kopiuj zaznaczenie"><ClipboardCopy size={16} /></button>
@@ -3322,6 +3940,12 @@ export function VectorEditor({
             </div>
           </div>
           <div className="drawing-toolbar-row drawing-toolbar-properties">
+            {tool === 'lasso' && <span className="feature-help toolbar-tool-hint">Obrysuj obiekty, aby je zaznaczyć · Shift dodaje do zaznaczenia</span>}
+            {tool === 'shapeBuilder' && <div className="drawing-shape-builder-actions" role="group" aria-label="Operacje budowania kształtu">
+              <span className="feature-help">Klikaj obszary, Shift dodaje je do wyboru.</span>
+              <label className="drawing-select-control"><span>Operacja</span><select value={shapeBuilderOperation} onChange={event => setShapeBuilderOperation(event.target.value as typeof shapeBuilderOperation)}><option value="union">Scal</option><option value="subtract">Odejmij</option><option value="intersect">Część wspólna</option><option value="exclude">Wyklucz</option></select></label>
+              <button className="button secondary compact-feature-button" onClick={() => applyBoolean(shapeBuilderOperation)} disabled={selectedIds.length < 2 || (shapeBuilderOperation === 'exclude' && selectedIds.length !== 2)}>Zbuduj kształt</button>
+            </div>}
             {tool === 'shape' && <label className="drawing-select-control shape-picker"><span>Kształt</span><select value={shapeId} onChange={event => setShapeId(event.target.value)} aria-label="Wybierz kształt z biblioteki">{shapeCategories.map(category => <optgroup key={category} label={category}>{shapeLibrary.filter(shape => shape.category === category).map(shape => <option key={shape.id} value={shape.id}>{shape.label}</option>)}</optgroup>)}</select></label>}
             {tool === 'freehand' && <>
               <label className="fill-toggle smart-drawing-toggle"><input type="checkbox" checked={smartDrawing} onChange={event => setSmartDrawing(event.target.checked)} aria-label="Włącz inteligentną korektę rysunku" />Inteligentny rysunek</label>
@@ -3353,102 +3977,192 @@ export function VectorEditor({
           ] as const).map(([id, label, Icon]) => <button key={id} className={activePanel === id ? 'selected' : ''} onClick={() => setActivePanel(id)} aria-pressed={activePanel === id}><Icon size={15} />{label}</button>)}
         </nav>
         <div className="drawing-feature-panel" role="tabpanel" data-revision={layerRevision}>
-          {activePanel === 'canvas' && <div className="drawing-feature-row">
-            <button className="button secondary compact-feature-button" onClick={() => zoomAtCenter(1.2)} title="Powiększ"><Plus size={13} /></button>
-            <output className="feature-help" aria-label="Powiększenie">{zoomPercent}%</output>
-            <button className="button secondary compact-feature-button" onClick={() => zoomAtCenter(1 / 1.2)} title="Pomniejsz"><Minus size={13} /></button>
-            <button className="button secondary compact-feature-button" onClick={() => fitViewToContent(false)}>Dopasuj wszystko</button>
-            <button className="button secondary compact-feature-button" onClick={() => fitViewToContent(true)} disabled={!selectedIds.length}>Dopasuj zaznaczenie</button>
-            <label className="geometry-control"><span>Szerokość</span><input type="number" min="1" value={displayedDimension(documentSize.width)} onChange={event => changeDocumentDimension('width', Number(event.target.value) || 1)} /></label>
-            <label className="geometry-control"><span>Wysokość</span><input type="number" min="1" value={displayedDimension(documentSize.height)} onChange={event => changeDocumentDimension('height', Number(event.target.value) || 1)} /></label>
-            <label className="drawing-select-control"><span>Jednostka</span><select value={documentUnit} onChange={event => setDocumentUnit(event.target.value as DocumentUnit)}><option value="px">px</option><option value="mm">mm</option><option value="in">in</option></select></label>
-            <label className="fill-toggle"><input type="checkbox" checked={lockDocumentRatio} onChange={event => { setLockDocumentRatio(event.target.checked); documentRatio.current = documentSize.width / Math.max(documentSize.height, 1) }} />Zachowaj proporcje</label>
-            <span className="feature-help">Spacja + przeciągnięcie przesuwa płótno. Ctrl/Cmd + kółko zmienia powiększenie.</span>
-            <label className="fill-toggle"><input type="checkbox" checked={viewOptions.grid} onChange={event => setViewOptions(current => ({ ...current, grid: event.target.checked }))} />Siatka</label>
-            <label className="drawing-select-control"><span>Odstęp</span><select value={viewOptions.gridSize} onChange={event => setViewOptions(current => ({ ...current, gridSize: Number(event.target.value) }))}>{[8, 10, 16, 20, 25, 32, 40, 50].map(size => <option key={size} value={size}>{size} px</option>)}</select></label>
-            <label className="fill-toggle"><input type="checkbox" checked={viewOptions.snap} onChange={event => setViewOptions(current => ({ ...current, snap: event.target.checked }))} />Przyciągaj</label>
-            <label className="fill-toggle"><input type="checkbox" checked={viewOptions.rulers} onChange={event => setViewOptions(current => ({ ...current, rulers: event.target.checked }))} /><Ruler size={14} />Linijki</label>
-            <label className="fill-toggle"><input type="checkbox" checked={guideLockAll} onChange={event => { setGuideLockAll(event.target.checked); setViewOptions(current => ({ ...current, guides: current.guides.map(guide => ({ ...guide, locked: event.target.checked })) })) }} />Zablokuj prowadnice</label>
-            <label className="fill-toggle"><input type="checkbox" checked={showMinimap} onChange={event => setShowMinimap(event.target.checked)} />Mini mapa</label>
-            <button className="button secondary compact-feature-button" onClick={() => addGuide('x')}><Plus size={13} />Pionowa prowadnica</button>
-            <button className="button secondary compact-feature-button" onClick={() => addGuide('y')}><Plus size={13} />Pozioma prowadnica</button>
-            <button className="button secondary compact-feature-button" onClick={() => setViewOptions(current => ({ ...current, guides: [] }))} disabled={!viewOptions.guides.length}>Usuń prowadnice ({viewOptions.guides.length})</button>
-            {viewOptions.guides.map((guide, index) => <div className="geometry-control guide-position-control" key={`${guide.axis}-${index}`}><span>{guide.axis === 'x' ? 'Pionowa X' : 'Pozioma Y'}</span><input type="number" min="0" max={guide.axis === 'x' ? documentSize.width : documentSize.height} value={guide.value} disabled={guide.locked || guideLockAll} onChange={event => setViewOptions(current => ({ ...current, guides: current.guides.map((item, currentIndex) => currentIndex === index ? { ...item, value: Number(event.target.value) } : item) }))} /><label className="fill-toggle" title="Zablokuj prowadnicę"><input type="checkbox" checked={Boolean(guide.locked)} onChange={event => setViewOptions(current => ({ ...current, guides: current.guides.map((item, currentIndex) => currentIndex === index ? { ...item, locked: event.target.checked } : item) }))} /><Lock size={12} /></label><button className="tool-button" onClick={() => setViewOptions(current => ({ ...current, guides: current.guides.filter((_item, currentIndex) => currentIndex !== index) }))} aria-label="Usuń prowadnicę"><X size={12} /></button></div>)}
-            <label className="drawing-select-control"><span>Plansza</span><select value={artboardPreset} onChange={event => setArtboardPreset(event.target.value)}><option value="360x220">Pozioma 360 × 220</option><option value="220x360">Pionowa 220 × 360</option><option value="220x220">Kwadrat 220 × 220</option></select></label>
-            <button className="button secondary compact-feature-button" onClick={addArtboard}><Plus size={13} />Dodaj planszę</button>
-            {artboards.map((board, index) => {
-              const id = board.getAttribute('data-object-id') ?? ''
-              const label = board.getAttribute('data-layer-name') || `Plansza ${index + 1}`
-              return <div className={`drawing-artboard-row ${selectedIds.includes(id) ? 'selected' : ''}`} key={id}>
-                <button className="button secondary compact-feature-button" onClick={() => { select([id]); chooseArtboardExport(id) }}>Zaznacz {index + 1}</button>
-                <input aria-label={`Nazwa planszy ${index + 1}`} defaultValue={label} onBlur={event => changeLayer(id, element => element.setAttribute('data-layer-name', event.target.value.trim() || label))} onKeyDown={event => { if (event.key === 'Enter') event.currentTarget.blur() }} />
-                <button className="button secondary compact-feature-button" onClick={() => duplicateArtboard(id)}>Duplikuj</button>
-                <button className="button secondary compact-feature-button" onClick={() => chooseArtboardExport(id)}>Eksport</button>
-              </div>
-            })}
-            <span className="feature-help">Siatka i prowadnice są pomocnicze; nie trafiają do zapisanego SVG.</span>
+          {activePanel === 'canvas' && <div className="drawing-feature-groups">
+            <section className="drawing-feature-group"><h3>Widok i nawigacja</h3><div className="drawing-feature-group-controls">
+              <button className="button secondary compact-feature-button" onClick={() => zoomAtCenter(1.2)} title="Powiększ"><Plus size={13} /></button>
+              <output className="feature-help" aria-label="Powiększenie">{zoomPercent}%</output>
+              <button className="button secondary compact-feature-button" onClick={() => zoomAtCenter(1 / 1.2)} title="Pomniejsz"><Minus size={13} /></button>
+              <button className="button secondary compact-feature-button" onClick={() => fitViewToContent(false)}>Dopasuj wszystko</button>
+              <button className="button secondary compact-feature-button" onClick={() => fitViewToContent(true)} disabled={!selectedIds.length}>Dopasuj zaznaczenie</button>
+              <span className="feature-help">Spacja + przeciągnięcie przesuwa płótno. Ctrl/Cmd + kółko zmienia powiększenie.</span>
+            </div></section>
+            <section className="drawing-feature-group"><h3>Wymiary dokumentu</h3><div className="drawing-feature-group-controls">
+              <label className="geometry-control"><span>Szerokość</span><input type="number" min="1" value={displayedDimension(documentSize.width)} onChange={event => changeDocumentDimension('width', Number(event.target.value) || 1)} /></label>
+              <label className="geometry-control"><span>Wysokość</span><input type="number" min="1" value={displayedDimension(documentSize.height)} onChange={event => changeDocumentDimension('height', Number(event.target.value) || 1)} /></label>
+              <label className="drawing-select-control"><span>Jednostka</span><select value={documentUnit} onChange={event => setDocumentUnit(event.target.value as DocumentUnit)}><option value="px">px</option><option value="mm">mm</option><option value="in">in</option></select></label>
+              <label className="fill-toggle"><input type="checkbox" checked={lockDocumentRatio} onChange={event => { setLockDocumentRatio(event.target.checked); documentRatio.current = documentSize.width / Math.max(documentSize.height, 1) }} />Zachowaj proporcje</label>
+            </div></section>
+            <section className="drawing-feature-group"><h3>Siatka i pomocnicze widoki</h3><div className="drawing-feature-group-controls">
+              <label className="fill-toggle"><input type="checkbox" checked={viewOptions.grid} onChange={event => setViewOptions(current => ({ ...current, grid: event.target.checked }))} />Siatka</label>
+              <label className="drawing-select-control"><span>Odstęp</span><select value={viewOptions.gridSize} onChange={event => setViewOptions(current => ({ ...current, gridSize: Number(event.target.value) }))}>{[8, 10, 16, 20, 25, 32, 40, 50].map(size => <option key={size} value={size}>{size} px</option>)}</select></label>
+              <label className="fill-toggle"><input type="checkbox" checked={viewOptions.snap} onChange={event => setViewOptions(current => ({ ...current, snap: event.target.checked }))} />Przyciągaj</label>
+              <label className="fill-toggle"><input type="checkbox" checked={viewOptions.smartGuides} onChange={event => setViewOptions(current => ({ ...current, smartGuides: event.target.checked }))} />Inteligentne prowadnice</label>
+              <label className="fill-toggle"><input type="checkbox" checked={viewOptions.snapGeometry} onChange={event => setViewOptions(current => ({ ...current, snapGeometry: event.target.checked }))} />Przyciągaj do punktów i przecięć</label>
+              <label className="fill-toggle"><input type="checkbox" checked={viewOptions.rulers} onChange={event => setViewOptions(current => ({ ...current, rulers: event.target.checked }))} /><Ruler size={14} />Linijki</label>
+              <label className="fill-toggle"><input type="checkbox" checked={showMinimap} onChange={event => setShowMinimap(event.target.checked)} />Mini mapa</label>
+              <span className="feature-help">Siatka i prowadnice są pomocnicze; nie trafiają do zapisanego SVG.</span>
+            </div></section>
+            <section className="drawing-feature-group drawing-feature-group-wide"><h3>Prowadnice</h3><div className="drawing-feature-group-controls">
+              <label className="fill-toggle"><input type="checkbox" checked={guideLockAll} onChange={event => { setGuideLockAll(event.target.checked); setViewOptions(current => ({ ...current, guides: current.guides.map(guide => ({ ...guide, locked: event.target.checked })) })) }} />Zablokuj prowadnice</label>
+              <button className="button secondary compact-feature-button" onClick={() => addGuide('x')}><Plus size={13} />Pionowa prowadnica</button>
+              <button className="button secondary compact-feature-button" onClick={() => addGuide('y')}><Plus size={13} />Pozioma prowadnica</button>
+              <button className="button secondary compact-feature-button" onClick={() => setViewOptions(current => ({ ...current, guides: [] }))} disabled={!viewOptions.guides.length}>Usuń prowadnice ({viewOptions.guides.length})</button>
+              {viewOptions.guides.map((guide, index) => <div className="geometry-control guide-position-control" key={`${guide.axis}-${index}`}><span>{guide.axis === 'x' ? 'Pionowa X' : 'Pozioma Y'}</span><input type="number" min="0" max={guide.axis === 'x' ? documentSize.width : documentSize.height} value={guide.value} disabled={guide.locked || guideLockAll} onChange={event => setViewOptions(current => ({ ...current, guides: current.guides.map((item, currentIndex) => currentIndex === index ? { ...item, value: Number(event.target.value) } : item) }))} /><label className="fill-toggle" title="Zablokuj prowadnicę"><input type="checkbox" checked={Boolean(guide.locked)} onChange={event => setViewOptions(current => ({ ...current, guides: current.guides.map((item, currentIndex) => currentIndex === index ? { ...item, locked: event.target.checked } : item) }))} /><Lock size={12} /></label><button className="tool-button" onClick={() => setViewOptions(current => ({ ...current, guides: current.guides.filter((_item, currentIndex) => currentIndex !== index) }))} aria-label="Usuń prowadnicę"><X size={12} /></button></div>)}
+            </div></section>
+            <section className="drawing-feature-group drawing-feature-group-wide"><h3>Plansze</h3><div className="drawing-feature-group-controls">
+              <label className="drawing-select-control"><span>Format planszy</span><select value={artboardPreset} onChange={event => setArtboardPreset(event.target.value)}><option value="360x220">Pozioma 360 × 220</option><option value="220x360">Pionowa 220 × 360</option><option value="220x220">Kwadrat 220 × 220</option></select></label>
+              <button className="button secondary compact-feature-button" onClick={addArtboard}><Plus size={13} />Dodaj planszę</button>
+              {artboards.map((board, index) => {
+                const id = board.getAttribute('data-object-id') ?? ''
+                const label = board.getAttribute('data-layer-name') || `Plansza ${index + 1}`
+                return <div className={`drawing-artboard-row ${selectedIds.includes(id) ? 'selected' : ''}`} key={id}>
+                  <button className="button secondary compact-feature-button" onClick={() => { select([id]); chooseArtboardExport(id) }}>Zaznacz {index + 1}</button>
+                  <input aria-label={`Nazwa planszy ${index + 1}`} defaultValue={label} onBlur={event => changeLayer(id, element => element.setAttribute('data-layer-name', event.target.value.trim() || label))} onKeyDown={event => { if (event.key === 'Enter') event.currentTarget.blur() }} />
+                  <button className="button secondary compact-feature-button" onClick={() => duplicateArtboard(id)}>Duplikuj</button>
+                  <button className="button secondary compact-feature-button" onClick={() => chooseArtboardExport(id)}>Eksport</button>
+                </div>
+              })}
+            </div></section>
           </div>}
 
-          {activePanel === 'style' && <div className="drawing-feature-row drawing-style-feature-row">
-            <div className="drawing-palette" aria-label="Paleta kolorów">{palette.map(color => <button key={color} className="palette-swatch" style={{ backgroundColor: color }} onClick={() => { applyStrokeColor(color); applyFillColor(color) }} title={`Ustaw kolor ${color}`} aria-label={`Ustaw kolor ${color}`} />)}</div>
-            <button className={`button secondary compact-feature-button ${eyedropper ? 'feature-active' : ''}`} onClick={() => setEyedropper(value => !value)} title="Kliknij figurę, aby pobrać jej kolor"><Pipette size={14} />Pipeta</button>
-            <button className="button secondary compact-feature-button" onClick={applyGradient} disabled={!selectedIds.length} title="Utwórz gradient trójstopniowy">Gradient</button>
-            <label className="drawing-select-control"><span>Typ gradientu</span><select value={gradientKind} onChange={event => setGradientKind(event.target.value as 'linear' | 'radial')}><option value="linear">Liniowy</option><option value="radial">Promieniowy</option></select></label>
-            {gradientKind === 'linear' && <label className="geometry-control"><span>Kąt °</span><input type="number" min="0" max="360" value={gradientAngle} onChange={event => setGradientAngle(Number(event.target.value))} /></label>}
-            <label className="color-control" title="Kolor środkowego punktu gradientu"><input type="color" value={gradientMiddle} onChange={event => setGradientMiddle(event.target.value)} aria-label="Kolor środkowego punktu gradientu" /><span>Środek</span></label>
-            <label className="drawing-select-control"><span>Wzorek</span><select value={patternKind} onChange={event => setPatternKind(event.target.value as 'dots' | 'lines' | 'diagonal')}><option value="dots">Kropki</option><option value="lines">Linie</option><option value="diagonal">Ukośny</option></select></label>
-            <button className="button secondary compact-feature-button" onClick={applyPattern} disabled={!selectedIds.length}>Wypełnij wzorkiem</button>
-            <button className="button secondary compact-feature-button" onClick={copyStyle} disabled={!selectedIds.length}>Kopiuj styl</button>
-            <button className="button secondary compact-feature-button" onClick={pasteStyle} disabled={!selectedIds.length || !selectedStyle}>Wklej styl</button>
-            <button className="button secondary compact-feature-button" onClick={saveStylePreset} disabled={!selectedIds.length}>Zapisz preset stylu</button>
-            {stylePresets.map(preset => <button key={preset.name} className="button secondary compact-feature-button" onClick={() => applyStylePreset(preset)} disabled={!selectedIds.length} title={`Zastosuj zapisany styl ${preset.name}`}>{preset.name}</button>)}
-            <button className="button secondary compact-feature-button" onClick={applyTextToPath} disabled={!selectedPaths.length || !selectedElements().some(element => element.tagName.toLowerCase() === 'text')}>Umieść tekst na ścieżce</button>
-            {selectedImage && <>
-              <button className="button secondary compact-feature-button" onClick={() => applyImageTransform('x')}>Odbij obraz ↔</button>
-              <button className="button secondary compact-feature-button" onClick={() => applyImageTransform('y')}>Odbij obraz ↕</button>
-              <input ref={replaceImageInput} hidden type="file" accept="image/png,image/jpeg,image/gif,image/webp" onChange={event => { void replaceSelectedImage(event.target.files?.[0]); event.currentTarget.value = '' }} />
-              <button className="button secondary compact-feature-button" onClick={() => replaceImageInput.current?.click()}>Zastąp obraz</button>
-            </>}
-            <label className="line-width-control"><span>Przezroczystość</span><input type="range" min="0" max="100" step="1" value={opacity} onChange={event => applyObjectOpacity(Number(event.target.value))} /><output>{opacity}%</output></label>
-            <label className="geometry-control"><span>Obrót °</span><input type="number" min="-360" max="360" step="1" value={rotationDraft} disabled={!selectedIds.length} onChange={event => setRotationDraft(event.target.value)} onKeyDown={event => { if (event.key === 'Enter') applyRotation() }} /></label>
-            <button className="button secondary compact-feature-button" onClick={applyRotation} disabled={!selectedIds.length}><RotateCw size={13} />Obróć</button>
-            <label className="drawing-select-control"><span>Krój pisma</span><select value={fontFamily} onChange={event => { setFontFamily(event.target.value); applyTypography({ family: event.target.value }) }}><option value="Inter, sans-serif">Inter</option><option value="Arial, sans-serif">Arial</option><option value="Georgia, serif">Georgia</option><option value="monospace">Monospace</option><option value="serif">Szeryfowy</option></select></label>
-            <label className="drawing-select-control"><span>Grubość</span><select value={fontWeight} onChange={event => { setFontWeight(event.target.value); applyTypography({ weight: event.target.value }) }}><option value="400">Zwykła</option><option value="600">Półgruba</option><option value="700">Pogrubiona</option></select></label>
-            <label className="drawing-select-control"><span>Wyrównanie</span><select value={textAlign} onChange={event => { setTextAlign(event.target.value); applyTypography({ align: event.target.value }) }}><option value="start">Do lewej</option><option value="middle">Do środka</option><option value="end">Do prawej</option></select></label>
-            <label className="fill-toggle"><input type="checkbox" checked={fontItalic} onChange={event => applyTypography({ italic: event.target.checked })} disabled={!selectedIds.length} />Kursywa</label>
-            <label className="geometry-control"><span>Odsunięcie konturu</span><input type="number" min="0" max="60" value={offsetDistance} onChange={event => setOffsetDistance(Math.max(0, Number(event.target.value) || 0))} /></label>
-            <button className="button secondary compact-feature-button" onClick={applyStrokeOffset} disabled={!selectedIds.length}>Dodaj odsunięty kontur</button>
-            {selectedPenNodeIndex !== null && selectedPaths.some(path => path.hasAttribute('data-editor-pen')) && <label className="drawing-select-control"><span>Węzeł Béziera</span><select value={penNodeMode} onChange={event => applyPenNodeMode(event.target.value as 'smooth' | 'corner' | 'symmetric')}><option value="corner">Narożny</option><option value="smooth">Gładki</option><option value="symmetric">Symetryczny</option></select></label>}
-            <span className="feature-help">Typografia działa na zaznaczonych elementach tekstowych. Przezroczystość stosuje się do całej figury.</span>
+          {activePanel === 'style' && <div className="drawing-feature-groups">
+            <section className="drawing-feature-group"><h3>Kolor i przezroczystość</h3><div className="drawing-feature-group-controls">
+              <div className="drawing-palette" aria-label="Paleta kolorów">{palette.map(color => <button key={color} className="palette-swatch" style={{ backgroundColor: color }} onClick={() => { applyStrokeColor(color); applyFillColor(color) }} title={`Ustaw kolor ${color}`} aria-label={`Ustaw kolor ${color}`} />)}</div>
+              <button className={`button secondary compact-feature-button ${eyedropper ? 'feature-active' : ''}`} onClick={() => setEyedropper(value => !value)} title="Kliknij figurę, aby pobrać jej kolor"><Pipette size={14} />Pipeta</button>
+              <label className="line-width-control"><span>Przezroczystość</span><input type="range" min="0" max="100" step="1" value={opacity} onChange={event => applyObjectOpacity(Number(event.target.value))} /><output>{opacity}%</output></label>
+              <details className="drawing-feature-details"><summary>Kolory nazwane</summary><div className="drawing-advanced-controls">
+                <div className="drawing-feature-row"><input className="drawing-inline-input" value={colorNameDraft} onChange={event => setColorNameDraft(event.target.value)} placeholder="Nazwa koloru" aria-label="Nazwa koloru dokumentu" /><button className="button secondary compact-feature-button" onClick={addNamedColor} disabled={!colorNameDraft.trim()}>Zapisz kolor wypełnienia</button></div>
+                <label className="color-control"><input type="color" value={replaceColorSource} onChange={event => setReplaceColorSource(event.target.value)} /><span>Kolor do zamiany</span></label>
+                {namedColors.map(item => <div className="drawing-named-color" key={item.name}><button className="palette-swatch" style={{ backgroundColor: item.color }} onClick={() => { setFillColor(item.color); fillColorRef.current = item.color; applyFillColor(item.color) }} title={`Użyj ${item.name}`} /><span>{item.name}</span><button className="button secondary compact-feature-button" onClick={() => replaceDocumentColor(replaceColorSource, item.color)}>Zamień globalnie</button><button className="tool-button" onClick={() => setNamedColors(current => current.filter(color => color.name !== item.name))} aria-label={`Usuń kolor ${item.name}`}><X size={12} /></button></div>)}
+              </div></details>
+            </div></section>
+            <section className="drawing-feature-group"><h3>Gradienty i wzory</h3><div className="drawing-feature-group-controls">
+              <button className="button secondary compact-feature-button" onClick={applyGradient} disabled={!selectedIds.length} title="Utwórz gradient trójstopniowy">Gradient</button>
+              <label className="drawing-select-control"><span>Typ gradientu</span><select value={gradientKind} onChange={event => setGradientKind(event.target.value as 'linear' | 'radial')}><option value="linear">Liniowy</option><option value="radial">Promieniowy</option></select></label>
+              {gradientKind === 'linear' && <label className="geometry-control"><span>Kąt °</span><input type="number" min="0" max="360" value={gradientAngle} onChange={event => setGradientAngle(Number(event.target.value))} /></label>}
+              <label className="color-control" title="Kolor środkowego punktu gradientu"><input type="color" value={gradientMiddle} onChange={event => setGradientMiddle(event.target.value)} aria-label="Kolor środkowego punktu gradientu" /><span>Środek</span></label>
+              <label className="drawing-select-control"><span>Wzorek</span><select value={patternKind} onChange={event => setPatternKind(event.target.value as 'dots' | 'lines' | 'diagonal')}><option value="dots">Kropki</option><option value="lines">Linie</option><option value="diagonal">Ukośny</option></select></label>
+              <button className="button secondary compact-feature-button" onClick={applyPattern} disabled={!selectedIds.length}>Wypełnij wzorkiem</button>
+              <details className="drawing-feature-details"><summary>Edytor kafelka wzoru</summary><div className="drawing-advanced-controls">
+                <label className="geometry-control"><span>Rozmiar kafelka</span><input type="number" min="4" max="120" value={patternTileSize} onChange={event => setPatternTileSize(Math.max(4, Number(event.target.value) || 4))} /></label>
+                <label className="geometry-control"><span>Grubość elementu</span><input type="number" min="0.5" max="20" step="0.5" value={patternStrokeWidth} onChange={event => setPatternStrokeWidth(Math.max(.5, Number(event.target.value) || .5))} /></label>
+                <label className="color-control"><input type="color" value={patternBackground || '#ffffff'} onChange={event => setPatternBackground(event.target.value)} /><span>Tło kafelka</span></label>
+                <button className="button secondary compact-feature-button" onClick={() => setPatternBackground('')}>Bez tła</button>
+                <span className="drawing-pattern-preview" aria-label="Podgląd kafelka"><svg viewBox={`0 0 ${patternTileSize} ${patternTileSize}`}><rect width={patternTileSize} height={patternTileSize} fill={patternBackground || '#fff'} />{patternKind === 'dots' ? <circle cx={patternTileSize / 2} cy={patternTileSize / 2} r={patternStrokeWidth} fill={strokeColor} /> : <path d={patternKind === 'lines' ? `M 0 ${patternTileSize / 2} H ${patternTileSize}` : `M 0 ${patternTileSize} L ${patternTileSize} 0`} fill="none" stroke={strokeColor} strokeWidth={patternStrokeWidth} />}</svg></span>
+              </div></details>
+              <details className="drawing-feature-details"><summary>Gradient na planszy</summary><span className="feature-help">Zaznacz obiekt z gradientem liniowym i przeciągnij uchwyty początku, końca lub środkowego koloru bezpośrednio na płótnie.</span></details>
+            </div></section>
+            <section className="drawing-feature-group"><h3>Zapisane style</h3><div className="drawing-feature-group-controls">
+              <button className="button secondary compact-feature-button" onClick={copyStyle} disabled={!selectedIds.length}>Kopiuj styl</button>
+              <button className="button secondary compact-feature-button" onClick={pasteStyle} disabled={!selectedIds.length || !selectedStyle}>Wklej styl</button>
+              <button className="button secondary compact-feature-button" onClick={saveStylePreset} disabled={!selectedIds.length}>Zapisz preset stylu</button>
+              {stylePresets.map(preset => <button key={preset.name} className="button secondary compact-feature-button" onClick={() => applyStylePreset(preset)} disabled={!selectedIds.length} title={`Zastosuj zapisany styl ${preset.name}`}>{preset.name}</button>)}
+            </div></section>
+            <section className="drawing-feature-group"><h3>Typografia</h3><div className="drawing-feature-group-controls">
+              <label className="drawing-select-control"><span>Krój pisma</span><select value={fontFamily} onChange={event => { setFontFamily(event.target.value); applyTypography({ family: event.target.value }) }}><option value="Inter, sans-serif">Inter</option><option value="Arial, sans-serif">Arial</option><option value="Georgia, serif">Georgia</option><option value="monospace">Monospace</option><option value="serif">Szeryfowy</option></select></label>
+              <label className="drawing-select-control"><span>Grubość</span><select value={fontWeight} onChange={event => { setFontWeight(event.target.value); applyTypography({ weight: event.target.value }) }}><option value="400">Zwykła</option><option value="600">Półgruba</option><option value="700">Pogrubiona</option></select></label>
+              <label className="drawing-select-control"><span>Wyrównanie</span><select value={textAlign} onChange={event => { setTextAlign(event.target.value); applyTypography({ align: event.target.value }) }}><option value="start">Do lewej</option><option value="middle">Do środka</option><option value="end">Do prawej</option></select></label>
+              <label className="fill-toggle"><input type="checkbox" checked={fontItalic} onChange={event => applyTypography({ italic: event.target.checked })} disabled={!selectedIds.length} />Kursywa</label>
+              <button className="button secondary compact-feature-button" onClick={applyTextToPath} disabled={!selectedPaths.length || !selectedElements().some(element => element.tagName.toLowerCase() === 'text')}>Umieść tekst na ścieżce</button>
+              <span className="feature-help">Ustawienia działają na zaznaczonych elementach tekstowych.</span>
+              <details className="drawing-feature-details"><summary>Tekst zaawansowany</summary><div className="drawing-advanced-controls">
+                <label className="geometry-control"><span>Odstęp liter</span><input type="number" min="-10" max="50" step="0.1" value={letterSpacing} onChange={event => { setLetterSpacing(event.target.value); applyTypography({ letterSpacing: event.target.value }) }} disabled={!selectedIds.some(id => selectedElements().some(element => element.getAttribute('data-object-id') === id && element.tagName.toLowerCase() === 'text'))} /></label>
+                <label className="geometry-control"><span>Interlinia</span><input type="number" min="0.5" max="4" step="0.1" value={lineHeight} onChange={event => { setLineHeight(event.target.value); applyTypography({ lineHeight: event.target.value }) }} /></label>
+                <label className="geometry-control"><span>Przesunięcie linii bazowej</span><input type="number" min="-100" max="100" step="1" value={baselineShift} onChange={event => { setBaselineShift(event.target.value); applyTypography({ baselineShift: event.target.value }) }} /></label>
+                <button className="button secondary compact-feature-button" onClick={flowTextIntoShape} disabled={!selectedElements().some(element => element.tagName.toLowerCase() === 'text') || !selectedElements().some(element => !['text', 'line'].includes(element.tagName.toLowerCase()))}>Ułóż tekst wewnątrz kształtu</button>
+                <label className="line-width-control"><span>Początek na ścieżce</span><input type="range" min="0" max="100" value={textPathOffset} onChange={event => { const value = Number(event.target.value); setTextPathOffset(value); applyTextPathOptions(value) }} /><output>{textPathOffset}%</output></label>
+                <label className="drawing-select-control"><span>Zakotwiczenie</span><select value={textPathAnchor} onChange={event => { const value = event.target.value as typeof textPathAnchor; setTextPathAnchor(value); applyTextPathOptions(textPathOffset, value) }}><option value="start">Początek</option><option value="middle">Środek</option><option value="end">Koniec</option></select></label>
+                <label className="drawing-select-control"><span>Strona ścieżki</span><select value={textPathSide} onChange={event => { const value = event.target.value as typeof textPathSide; setTextPathSide(value); applyTextPathOptions(textPathOffset, textPathAnchor, value) }}><option value="left">Lewa</option><option value="right">Prawa</option></select></label>
+                <label className="geometry-control"><span>Odsunięcie tekstu</span><input type="number" min="-120" max="120" step="1" value={textPathDistance} onChange={event => { const value = Number(event.target.value); setTextPathDistance(value); applyTextPathOptions(textPathOffset, textPathAnchor, textPathSide, value) }} /></label>
+              </div></details>
+              <details className="drawing-feature-details"><summary>Czcionki dokumentu</summary><div className="drawing-advanced-controls">
+                {!documentFonts.length && <span className="feature-help">W dokumencie nie ma tekstu z własnym krojem pisma.</span>}
+                {documentFonts.map(family => <div className="drawing-font-row" key={family}><span>{family}</span><small className={unavailableFonts.includes(family) ? 'drawing-font-missing' : ''}>{unavailableFonts.includes(family) ? 'Brak lokalnej czcionki' : 'Dostępna'}</small></div>)}
+                <div className="drawing-feature-row"><label className="drawing-select-control"><span>Zamień</span><select value={fontSwapSource} onChange={event => setFontSwapSource(event.target.value)}><option value="">Wybierz krój</option>{documentFonts.map(family => <option key={family} value={family}>{family}</option>)}</select></label><label className="drawing-select-control"><span>Na</span><select value={fontSwapTarget} onChange={event => setFontSwapTarget(event.target.value)}><option value="Inter, sans-serif">Inter</option><option value="Arial, sans-serif">Arial</option><option value="Georgia, serif">Georgia</option><option value="monospace">Monospace</option><option value="serif">Szeryfowy</option></select></label><button className="button secondary compact-feature-button" onClick={() => replaceDocumentFont(fontSwapSource, fontSwapTarget)} disabled={!fontSwapSource}>Zamień w dokumencie</button></div>
+              </div></details>
+              {selectedPenNodeIndex !== null && selectedPaths.some(path => path.hasAttribute('data-editor-pen')) && <details className="drawing-feature-details" open><summary>Węzły Béziera · {selectedPenNodeIndices.length || 1}</summary><div className="drawing-advanced-controls">
+                <span className="feature-help">Shift + klikaj kolejne węzły, aby zaznaczyć je razem.</span>
+                <label className="drawing-select-control"><span>Typ węzła</span><select value={penNodeMode} onChange={event => applyPenNodeMode(event.target.value as 'smooth' | 'corner' | 'symmetric')}><option value="corner">Narożny</option><option value="smooth">Gładki</option><option value="symmetric">Symetryczny</option></select></label>
+                <label className="geometry-control"><span>Promień narożnika</span><input type="number" min="1" max="80" value={cornerRadius} onChange={event => setCornerRadius(Math.max(1, Number(event.target.value) || 1))} /></label>
+                <button className="button secondary compact-feature-button" onClick={roundSelectedPenNodes}>Zaokrąglij węzły</button>
+              </div></details>}
+            </div></section>
+            <section className="drawing-feature-group"><h3>Transformacje i kontur</h3><div className="drawing-feature-group-controls">
+              <label className="geometry-control"><span>Obrót °</span><input type="number" min="-360" max="360" step="1" value={rotationDraft} disabled={!selectedIds.length} onChange={event => setRotationDraft(event.target.value)} onKeyDown={event => { if (event.key === 'Enter') applyRotation() }} /></label>
+              <button className="button secondary compact-feature-button" onClick={applyRotation} disabled={!selectedIds.length}><RotateCw size={13} />Obróć</button>
+              <label className="geometry-control"><span>Odsunięcie konturu</span><input type="number" min="0" max="60" value={offsetDistance} onChange={event => setOffsetDistance(Math.max(0, Number(event.target.value) || 0))} /></label>
+              <button className="button secondary compact-feature-button" onClick={applyStrokeOffset} disabled={!selectedIds.length}>Dodaj odsunięty kontur</button>
+              <details className="drawing-feature-details"><summary>Mieszanie i przezroczystość</summary><div className="drawing-advanced-controls">
+                <label className="drawing-select-control"><span>Tryb mieszania</span><select value={blendMode} onChange={event => applyBlendMode(event.target.value)}><option value="normal">Zwykły</option><option value="multiply">Mnożenie</option><option value="screen">Ekran</option><option value="overlay">Nakładka</option><option value="darken">Przyciemnij</option><option value="lighten">Rozjaśnij</option><option value="color-dodge">Rozjaśnianie kolorów</option><option value="color-burn">Wypalanie kolorów</option><option value="difference">Różnica</option></select></label>
+              </div></details>
+            </div></section>
+            {(selectedImage || (selectedPenNodeIndex !== null && selectedPaths.some(path => path.hasAttribute('data-editor-pen')))) && <section className="drawing-feature-group"><h3>Obrazy i ścieżki</h3><div className="drawing-feature-group-controls">
+              {selectedImage && <>
+                <button className="button secondary compact-feature-button" onClick={() => applyImageTransform('x')}>Odbij obraz ↔</button>
+                <button className="button secondary compact-feature-button" onClick={() => applyImageTransform('y')}>Odbij obraz ↕</button>
+                <input ref={replaceImageInput} hidden type="file" accept="image/png,image/jpeg,image/gif,image/webp" onChange={event => { void replaceSelectedImage(event.target.files?.[0]); event.currentTarget.value = '' }} />
+                <button className="button secondary compact-feature-button" onClick={() => replaceImageInput.current?.click()}>Zastąp obraz</button>
+              </>}
+              {selectedPenNodeIndex !== null && selectedPaths.some(path => path.hasAttribute('data-editor-pen')) && <label className="drawing-select-control"><span>Węzeł Béziera</span><select value={penNodeMode} onChange={event => applyPenNodeMode(event.target.value as 'smooth' | 'corner' | 'symmetric')}><option value="corner">Narożny</option><option value="smooth">Gładki</option><option value="symmetric">Symetryczny</option></select></label>}
+            </div></section>}
           </div>}
 
           {activePanel === 'layers' && <div className="drawing-layer-workspace">
-            <div className="drawing-feature-row">
-              <button className="button secondary compact-feature-button" onClick={() => alignSelection('x', 'start')} disabled={selectedIds.length < 2}><AlignStartHorizontal size={14} />Wyrównaj do lewej</button>
-              <button className="button secondary compact-feature-button" onClick={() => alignSelection('x', 'center')} disabled={selectedIds.length < 2}><AlignCenterHorizontal size={14} />Wyśrodkuj w poziomie</button>
-              <button className="button secondary compact-feature-button" onClick={() => alignSelection('x', 'end')} disabled={selectedIds.length < 2}><AlignEndHorizontal size={14} />Wyrównaj do prawej</button>
-              <button className="button secondary compact-feature-button" onClick={() => distributeSelection('x')} disabled={selectedIds.length < 3}><ArrowDownWideNarrow size={14} />Rozłóż poziomo</button>
-              <button className="button secondary compact-feature-button" onClick={() => alignSelection('y', 'start')} disabled={selectedIds.length < 2}>Wyrównaj do góry</button>
-              <button className="button secondary compact-feature-button" onClick={() => alignSelection('y', 'center')} disabled={selectedIds.length < 2}>Wyśrodkuj w pionie</button>
-              <button className="button secondary compact-feature-button" onClick={() => alignSelection('y', 'end')} disabled={selectedIds.length < 2}>Wyrównaj do dołu</button>
-              <button className="button secondary compact-feature-button" onClick={() => distributeSelection('y')} disabled={selectedIds.length < 3}>Rozłóż pionowo</button>
-              <span className="toolbar-divider" />
-              <button className="button secondary compact-feature-button" onClick={groupSelected} disabled={selectedIds.length < 2} title="Grupuje figury i zachowuje je do osobnej edycji">Połącz w grupę</button>
-              <button className="button secondary compact-feature-button" onClick={() => applyBoolean('union')} disabled={selectedIds.length < 2} title="Tworzy jedną wypełnioną sylwetkę z sumy figur">Suma kształtów</button>
-              <button className="button secondary compact-feature-button" onClick={() => applyBoolean('subtract')} disabled={selectedIds.length < 2}>Odejmij ostatnią</button>
-              <button className="button secondary compact-feature-button" onClick={() => applyBoolean('intersect')} disabled={selectedIds.length < 2}>Część wspólna</button>
-              <button className="button secondary compact-feature-button" onClick={() => applyBoolean('exclude')} disabled={selectedIds.length !== 2}>Wyklucz wspólną część</button>
-              <span className="toolbar-divider" />
-              <button className="button secondary compact-feature-button" onClick={() => applyPathOperation('close')} disabled={!selectedPaths.length}>Zamknij ścieżkę</button>
-              <button className="button secondary compact-feature-button" onClick={() => applyPathOperation('simplify')} disabled={!selectedPaths.length}>Uprość ścieżkę</button>
-              <button className="button secondary compact-feature-button" onClick={() => applyPathOperation('split')} disabled={selectedPaths.length !== 1}>Podziel na pół</button>
-              <button className="button secondary compact-feature-button" onClick={() => applyPathOperation('join')} disabled={selectedPaths.length < 2}>Połącz ścieżki</button>
-              <button className="button secondary compact-feature-button" onClick={clipSelectedImage} disabled={!selectedImage || selectedElements().length < 2}>Przytnij obraz kształtem</button>
-              <label className="drawing-select-control"><span>Skalowanie grupy</span><select value={groupConstraint} onChange={event => applyGroupConstraint(event.target.value as 'free' | 'aspect')} disabled={!selectedIds.length}><option value="free">Dowolne</option><option value="aspect">Zachowaj proporcje</option></select></label>
-              <button className="button secondary compact-feature-button" onClick={createSymbolFromSelection} disabled={!selectedIds.length}>Zapisz zaznaczenie jako symbol</button>
-              {reusableSymbols.map((symbol, index) => <button key={symbol.id} className="button secondary compact-feature-button" onClick={() => insertSymbol(symbol.id ?? '')} title="Wstaw ponownie edytowalny symbol"><Plus size={12} />Symbol {index + 1}</button>)}
+            <div className="drawing-feature-groups">
+              <section className="drawing-feature-group"><h3>Wyrównywanie i rozkład</h3><div className="drawing-feature-group-controls">
+                <button className="button secondary compact-feature-button" onClick={() => alignSelection('x', 'start')} disabled={selectedIds.length < 2}><AlignStartHorizontal size={14} />Wyrównaj do lewej</button>
+                <button className="button secondary compact-feature-button" onClick={() => alignSelection('x', 'center')} disabled={selectedIds.length < 2}><AlignCenterHorizontal size={14} />Wyśrodkuj w poziomie</button>
+                <button className="button secondary compact-feature-button" onClick={() => alignSelection('x', 'end')} disabled={selectedIds.length < 2}><AlignEndHorizontal size={14} />Wyrównaj do prawej</button>
+                <button className="button secondary compact-feature-button" onClick={() => distributeSelection('x')} disabled={selectedIds.length < 3} title="Rozłóż obiekty z równymi odstępami"><ArrowDownWideNarrow size={14} />Równe odstępy poziomo</button>
+                <button className="button secondary compact-feature-button" onClick={() => alignSelection('y', 'start')} disabled={selectedIds.length < 2}>Wyrównaj do góry</button>
+                <button className="button secondary compact-feature-button" onClick={() => alignSelection('y', 'center')} disabled={selectedIds.length < 2}>Wyśrodkuj w pionie</button>
+                <button className="button secondary compact-feature-button" onClick={() => alignSelection('y', 'end')} disabled={selectedIds.length < 2}>Wyrównaj do dołu</button>
+                <button className="button secondary compact-feature-button" onClick={() => distributeSelection('y')} disabled={selectedIds.length < 3} title="Rozłóż obiekty z równymi odstępami">Równe odstępy pionowo</button>
+                <details className="drawing-feature-details"><summary>Wyrównaj względem pierwszego</summary><div className="drawing-feature-group-controls">
+                  <button className="button secondary compact-feature-button" onClick={() => alignSelectionToKey('left')} disabled={selectedIds.length < 2}>Lewa krawędź</button>
+                  <button className="button secondary compact-feature-button" onClick={() => alignSelectionToKey('centerX')} disabled={selectedIds.length < 2}>Środek poziomo</button>
+                  <button className="button secondary compact-feature-button" onClick={() => alignSelectionToKey('right')} disabled={selectedIds.length < 2}>Prawa krawędź</button>
+                  <button className="button secondary compact-feature-button" onClick={() => alignSelectionToKey('top')} disabled={selectedIds.length < 2}>Górna krawędź</button>
+                  <button className="button secondary compact-feature-button" onClick={() => alignSelectionToKey('centerY')} disabled={selectedIds.length < 2}>Środek pionowo</button>
+                  <button className="button secondary compact-feature-button" onClick={() => alignSelectionToKey('bottom')} disabled={selectedIds.length < 2}>Dolna krawędź</button>
+                </div></details>
+                <details className="drawing-feature-details"><summary>Wyrównaj do planszy</summary><div className="drawing-feature-group-controls">
+                  <button className="button secondary compact-feature-button" onClick={() => alignSelectionToArtboard('left')} disabled={!selectedIds.length}>Do lewej</button>
+                  <button className="button secondary compact-feature-button" onClick={() => alignSelectionToArtboard('centerX')} disabled={!selectedIds.length}>Wyśrodkuj poziomo</button>
+                  <button className="button secondary compact-feature-button" onClick={() => alignSelectionToArtboard('right')} disabled={!selectedIds.length}>Do prawej</button>
+                  <button className="button secondary compact-feature-button" onClick={() => alignSelectionToArtboard('top')} disabled={!selectedIds.length}>Do góry</button>
+                  <button className="button secondary compact-feature-button" onClick={() => alignSelectionToArtboard('centerY')} disabled={!selectedIds.length}>Wyśrodkuj pionowo</button>
+                  <button className="button secondary compact-feature-button" onClick={() => alignSelectionToArtboard('bottom')} disabled={!selectedIds.length}>Do dołu</button>
+                </div></details>
+              </div></section>
+              <section className="drawing-feature-group"><h3>Grupy i kształty</h3><div className="drawing-feature-group-controls">
+                <button className="button secondary compact-feature-button" onClick={groupSelected} disabled={selectedIds.length < 2} title="Grupuje figury i zachowuje je do osobnej edycji">Połącz w grupę</button>
+                <button className="button secondary compact-feature-button" onClick={() => applyBoolean('union')} disabled={selectedIds.length < 2} title="Tworzy jedną wypełnioną sylwetkę z sumy figur">Suma kształtów</button>
+                <button className="button secondary compact-feature-button" onClick={() => applyBoolean('subtract')} disabled={selectedIds.length < 2}>Odejmij ostatnią</button>
+                <button className="button secondary compact-feature-button" onClick={() => applyBoolean('intersect')} disabled={selectedIds.length < 2}>Część wspólna</button>
+                <button className="button secondary compact-feature-button" onClick={() => applyBoolean('exclude')} disabled={selectedIds.length !== 2}>Wyklucz wspólną część</button>
+              </div></section>
+              <section className="drawing-feature-group"><h3>Ścieżki i przycinanie</h3><div className="drawing-feature-group-controls">
+                <button className="button secondary compact-feature-button" onClick={() => applyPathOperation('close')} disabled={!selectedPaths.length}>Zamknij ścieżkę</button>
+                <button className="button secondary compact-feature-button" onClick={() => applyPathOperation('simplify')} disabled={!selectedPaths.length}>Uprość ścieżkę</button>
+                <button className="button secondary compact-feature-button" onClick={() => applyPathOperation('split')} disabled={selectedPaths.length !== 1}>Podziel na pół</button>
+                <button className="button secondary compact-feature-button" onClick={() => applyPathOperation('join')} disabled={selectedPaths.length < 2}>Połącz ścieżki</button>
+                <button className="button secondary compact-feature-button" onClick={clipSelectedImage} disabled={!selectedImage || selectedElements().length < 2}>Przytnij obraz kształtem</button>
+                <details className="drawing-feature-details"><summary>Więcej operacji ścieżek</summary><div className="drawing-advanced-controls">
+                  <button className="button secondary compact-feature-button" onClick={reverseSelectedPaths} disabled={!selectedPaths.length}>Odwróć kierunek</button>
+                  <button className="button secondary compact-feature-button" onClick={convertStrokeToPath} disabled={!selectedElements().some(element => element.tagName.toLowerCase() === 'path' ? element.getAttribute('stroke') !== 'none' && !/z\s*$/i.test(element.getAttribute('d') ?? '') : element.tagName.toLowerCase() === 'line' && element.getAttribute('stroke') !== 'none' && !element.hasAttribute('data-start-target') && !element.hasAttribute('data-end-target') && !element.hasAttribute('data-auto-route'))}>Zamień obrys w kształt</button>
+                  <label className="drawing-select-control"><span>Reguła wypełnienia</span><select value={fillRule} onChange={event => applyFillRule(event.target.value as 'nonzero' | 'evenodd')}><option value="nonzero">Nonzero</option><option value="evenodd">Even-odd</option></select></label>
+                  <button className="button secondary compact-feature-button" onClick={createSelectionMask} disabled={selectedIds.length < 2}>Utwórz maskę z kształtu</button>
+                  <span className="feature-help">Zaznacz ścieżkę z obrysem, aby zamienić ją na wypełniony kontur. Maska użyje ostatniego zaznaczonego obiektu.</span>
+                </div></details>
+              </div></section>
+              <section className="drawing-feature-group"><h3>Symbole i skalowanie</h3><div className="drawing-feature-group-controls">
+                <label className="drawing-select-control"><span>Skalowanie grupy</span><select value={groupConstraint} onChange={event => applyGroupConstraint(event.target.value as 'free' | 'aspect')} disabled={!selectedIds.length}><option value="free">Dowolne</option><option value="aspect">Zachowaj proporcje</option></select></label>
+                <button className="button secondary compact-feature-button" onClick={createSymbolFromSelection} disabled={!selectedIds.length}>Zapisz zaznaczenie jako symbol</button>
+                {reusableSymbols.map((symbol, index) => <button key={symbol.id} className="button secondary compact-feature-button" onClick={() => insertSymbol(symbol.id ?? '')} title="Wstaw ponownie edytowalny symbol"><Plus size={12} />Symbol {index + 1}</button>)}
+              </div></section>
             </div>
-            <div className="drawing-layer-list" aria-label="Warstwy SVG">
+            <section className="drawing-layer-list-group" aria-label="Warstwy SVG"><h3>Warstwy dokumentu</h3><div className="drawing-layer-list">
               {!layerItems.length && <span className="feature-help">Dodane figury pojawią się tu jako warstwy.</span>}
               {layerItems.map((element, index) => {
                 const id = element.getAttribute('data-object-id') ?? ''
@@ -3456,36 +4170,58 @@ export function VectorEditor({
                 const locked = element.getAttribute('data-layer-locked') === 'true'
                 const label = element.getAttribute('data-layer-name') ?? `${element.tagName.toLowerCase()} ${layerItems.length - index}`
                 return <div key={id} className={`drawing-layer-row ${selectedIds.includes(id) ? 'selected' : ''}`}>
-                  <button className="tool-button" onClick={() => select([id])} title="Zaznacz warstwę"><span className="drawing-layer-color" style={{ background: element.getAttribute('fill') ?? element.getAttribute('stroke') ?? '#8490af' }} /></button>
+                  <button className="tool-button" onClick={() => { if (!locked) select([id]) }} disabled={locked} title={locked ? 'Odblokuj warstwę, aby ją zaznaczyć' : 'Zaznacz warstwę'}><span className="drawing-layer-color" style={{ background: element.getAttribute('fill') ?? element.getAttribute('stroke') ?? '#8490af' }} /></button>
                   <input aria-label={`Nazwa warstwy ${label}`} defaultValue={label} onBlur={event => changeLayer(id, item => item.setAttribute('data-layer-name', event.target.value.trim() || label))} onKeyDown={event => { if (event.key === 'Enter') event.currentTarget.blur() }} />
                   <button className="tool-button" onClick={() => changeLayer(id, item => item.setAttribute('visibility', hidden ? 'visible' : 'hidden'))} title={hidden ? 'Pokaż warstwę' : 'Ukryj warstwę'}>{hidden ? <EyeOff size={14} /> : <Eye size={14} />}</button>
-                  <button className="tool-button" onClick={() => changeLayer(id, item => item.setAttribute('data-layer-locked', locked ? 'false' : 'true'))} title={locked ? 'Odblokuj warstwę' : 'Zablokuj warstwę'}>{locked ? <Lock size={14} /> : <Unlock size={14} />}</button>
+                  <button className="tool-button" onClick={() => { changeLayer(id, item => item.setAttribute('data-layer-locked', locked ? 'false' : 'true')); if (!locked && selectedIdsRef.current.includes(id)) select(selectedIdsRef.current.filter(selectedId => selectedId !== id)) }} title={locked ? 'Odblokuj warstwę' : 'Zablokuj warstwę'}>{locked ? <Lock size={14} /> : <Unlock size={14} />}</button>
                   <button className="tool-button" onClick={() => reorderLayer(id, 'front')} title="Przenieś na wierzch">↑</button>
                   <button className="tool-button" onClick={() => reorderLayer(id, 'back')} title="Przenieś na spód">↓</button>
                 </div>
               })}
-            </div>
+            </div></section>
           </div>}
 
           {activePanel === 'workflow' && <div className="drawing-workflow-grid">
             <section className="drawing-workflow-card"><h3><Waypoints size={15} />Połączenia i komentarze</h3>
-              <label className="fill-toggle"><input type="checkbox" checked={autoRoute} onChange={event => applyRouteSetting(event.target.checked)} />Automatycznie omijaj figury dla strzałek</label>
-              <label className="drawing-select-control"><span>Prowadzenie</span><select value={connectorStyle} disabled={!selectedElements().some(element => element.tagName.toLowerCase() === 'line')} onChange={event => applyConnectorStyle(event.target.value as 'straight' | 'orthogonal' | 'rounded')}><option value="straight">Proste</option><option value="orthogonal">Łamane</option><option value="rounded">Zaokrąglone</option></select></label>
-              <label className="drawing-select-control"><span>Port zaznaczonej figury</span><select value={connectorPortType} disabled={!selectedIds.length || selectedElements().every(element => ['line', 'text'].includes(element.tagName.toLowerCase()))} onChange={event => applyConnectorPortType(event.target.value as 'free' | 'input' | 'output' | 'both')}><option value="free">Dowolny</option><option value="input">Wejście</option><option value="output">Wyjście</option><option value="both">Dwukierunkowy</option></select></label>
-              <div className="drawing-feature-row"><input className="drawing-connector-label-input" value={connectorLabel} onChange={event => setConnectorLabel(event.target.value)} placeholder="Etykieta strzałki" aria-label="Etykieta zaznaczonego połączenia" /><button className="button secondary compact-feature-button" onClick={saveConnectorLabel} disabled={!selectedElements().some(element => element.tagName.toLowerCase() === 'line')}>Ustaw etykietę</button></div>
+              <div className="drawing-workflow-subgroup"><h4>Połączenia</h4>
+                <label className="fill-toggle"><input type="checkbox" checked={autoRoute} onChange={event => applyRouteSetting(event.target.checked)} />Automatycznie omijaj figury dla strzałek</label>
+                <label className="drawing-select-control"><span>Prowadzenie</span><select value={connectorStyle} disabled={!selectedElements().some(element => element.tagName.toLowerCase() === 'line')} onChange={event => applyConnectorStyle(event.target.value as 'straight' | 'orthogonal' | 'rounded')}><option value="straight">Proste</option><option value="orthogonal">Łamane</option><option value="rounded">Zaokrąglone</option></select></label>
+                <label className="drawing-select-control"><span>Port zaznaczonej figury</span><select value={connectorPortType} disabled={!selectedIds.length || selectedElements().every(element => ['line', 'text'].includes(element.tagName.toLowerCase()))} onChange={event => applyConnectorPortType(event.target.value as 'free' | 'input' | 'output' | 'both')}><option value="free">Dowolny</option><option value="input">Wejście</option><option value="output">Wyjście</option><option value="both">Dwukierunkowy</option></select></label>
+                <div className="drawing-feature-row"><input className="drawing-connector-label-input" value={connectorLabel} onChange={event => setConnectorLabel(event.target.value)} placeholder="Etykieta strzałki" aria-label="Etykieta zaznaczonego połączenia" /><button className="button secondary compact-feature-button" onClick={saveConnectorLabel} disabled={!selectedElements().some(element => element.tagName.toLowerCase() === 'line')}>Ustaw etykietę</button></div>
+              </div>
+              <div className="drawing-workflow-subgroup"><h4>Komentarze</h4>
               <button className="button secondary compact-feature-button" onClick={addComment}><MessageSquare size={14} />Dodaj komentarz do planszy</button>
               <p className="feature-help">Komentarze są zapisywane lokalnie na planszy i nie trafiają do wyeksportowanego SVG.</p>
               <div className="drawing-comment-list">{comments.map(comment => <div key={comment.id}><span>{comment.text}</span><button onClick={() => setComments(current => current.filter(item => item.id !== comment.id))} aria-label="Usuń komentarz"><X size={12} /></button></div>)}</div>
+              </div>
             </section>
             <section className="drawing-workflow-card"><h3><ImagePlus size={15} />Import i wektoryzacja</h3>
               <input ref={imageInput} hidden type="file" accept="image/png,image/jpeg,image/gif,image/webp" onChange={event => { void importRaster(event.target.files?.[0]); event.currentTarget.value = '' }} />
+              <input ref={linkImageInput} hidden type="file" accept="image/png,image/jpeg,image/gif,image/webp" onChange={event => { void relinkImage(event.target.files?.[0]); event.currentTarget.value = '' }} />
               <button className="button secondary compact-feature-button" onClick={() => imageInput.current?.click()}><ImagePlus size={14} />Importuj obraz rastrowy</button>
               <label className="drawing-select-control"><span>Dokładność wektoryzacji</span><input type="range" min="8" max="80" step="4" value={vectorizeDetail} onChange={event => setVectorizeDetail(Number(event.target.value))} /><output>{vectorizeDetail}</output></label>
               <button className="button secondary compact-feature-button" onClick={() => { void vectorizeSelection() }} disabled={!selectedImage}>Zamień obraz na edytowalne kształty</button>
+              <details className="drawing-feature-details"><summary>Obrazy i filtry</summary><div className="drawing-advanced-controls">
+                {selectedImage && <>
+                  <label className="line-width-control"><span>Jasność</span><input type="range" min="0" max="200" value={imageBrightness} onChange={event => { const value = Number(event.target.value); setImageBrightness(value); applyImageAdjustments({ brightness: value }) }} /><output>{imageBrightness}%</output></label>
+                  <label className="line-width-control"><span>Kontrast</span><input type="range" min="0" max="200" value={imageContrast} onChange={event => { const value = Number(event.target.value); setImageContrast(value); applyImageAdjustments({ contrast: value }) }} /><output>{imageContrast}%</output></label>
+                  <label className="line-width-control"><span>Nasycenie</span><input type="range" min="0" max="200" value={imageSaturation} onChange={event => { const value = Number(event.target.value); setImageSaturation(value); applyImageAdjustments({ saturation: value }) }} /><output>{imageSaturation}%</output></label>
+                  <button className="button secondary compact-feature-button" onClick={resetImageAdjustments}>Resetuj korektę obrazu</button>
+                </>}
+                <h4>Linki do obrazów</h4>
+                {!linkedImages.length && <span className="feature-help">Wszystkie obrazy są osadzone w dokumencie.</span>}
+                {linkedImages.map(image => <div className="drawing-linked-image" key={image.getAttribute('data-object-id')}><span>{image.getAttribute('href') ?? image.getAttribute('xlink:href')}</span><button className="button secondary compact-feature-button" onClick={() => { setLinkedImageId(image.getAttribute('data-object-id') ?? ''); linkImageInput.current?.click() }}>Osadź lub podmień</button></div>)}
+              </div></details>
+              <details className="drawing-feature-details"><summary>Biblioteka zasobów</summary><div className="drawing-advanced-controls">
+                <div className="drawing-feature-row"><input className="drawing-inline-input" value={assetNameDraft} onChange={event => setAssetNameDraft(event.target.value)} placeholder="Nazwa zaznaczenia" aria-label="Nazwa zapisywanego zasobu" /><button className="button secondary compact-feature-button" onClick={saveSelectionAsAsset} disabled={!selectedIds.length}>Zapisz zaznaczenie</button></div>
+                {!assetLibrary.length && <span className="feature-help">Zapisane symbole można wstawiać w kolejnych dokumentach.</span>}
+                {assetLibrary.map(item => <div className="drawing-library-asset" key={item.id}><span>{item.name}</span><button className="button secondary compact-feature-button" onClick={() => insertLibraryAsset(item.id)}>Wstaw</button><button className="tool-button" onClick={() => setAssetLibrary(current => current.filter(assetItem => assetItem.id !== item.id))} aria-label={`Usuń zasób ${item.name}`}><X size={12} /></button></div>)}
+              </div></details>
             </section>
             <section className="drawing-workflow-card"><h3><History size={15} />Historia i punkty kontrolne</h3>
               <button className="button secondary compact-feature-button" onClick={createCheckpoint}><Plus size={14} />Zapisz punkt kontrolny</button>
-              <div className="drawing-checkpoint-list">{checkpoints.map(checkpoint => <div key={checkpoint.id}><button onClick={() => restoreCheckpoint(checkpoint)} title={checkpoint.label}>{checkpoint.label}</button><button onClick={() => setCheckpoints(current => current.filter(item => item.id !== checkpoint.id))} aria-label="Usuń punkt kontrolny"><X size={12} /></button></div>)}</div>
+              <div className="drawing-checkpoint-list">{checkpoints.map(checkpoint => <div key={checkpoint.id}><button onClick={() => restoreCheckpoint(checkpoint)} title={checkpoint.label}>{checkpoint.label}</button><button className={compareCheckpointId === checkpoint.id ? 'selected' : ''} onClick={() => setCompareCheckpointId(current => current === checkpoint.id ? '' : checkpoint.id)} title="Porównaj zapis z bieżącym rysunkiem">Porównaj</button><button onClick={() => { setCheckpoints(current => current.filter(item => item.id !== checkpoint.id)); if (compareCheckpointId === checkpoint.id) setCompareCheckpointId('') }} aria-label="Usuń punkt kontrolny"><X size={12} /></button></div>)}</div>
+              {compareCheckpoint && <div className="drawing-checkpoint-compare"><figure><figcaption>Obecny rysunek</figcaption><div dangerouslySetInnerHTML={{ __html: checkpointSvgPreview(drawing.current ? snapshotContent(drawing.current) : '') }} /></figure><figure><figcaption>{new Date(compareCheckpoint.createdAt).toLocaleDateString('pl-PL')}</figcaption><div dangerouslySetInnerHTML={{ __html: checkpointSvgPreview(compareCheckpoint.content) }} /></figure></div>}
             </section>
             <section className="drawing-workflow-card"><h3><Check size={15} />Dostępność</h3>
               <button className="button secondary compact-feature-button" onClick={inspectAccessibility}>Sprawdź opisy i kontrast</button>
@@ -3493,20 +4229,26 @@ export function VectorEditor({
               {accessibilityOpen && <div className="drawing-a11y-report" role="status">{accessibilityReport.length ? accessibilityReport.map((issue, index) => <p key={index}>{issue}</p>) : <p>Nie znaleziono brakujących opisów ani niskiego kontrastu tekstu.</p>}</div>}
             </section>
             <section className="drawing-workflow-card"><h3><History size={15} />Skróty i optymalizacja</h3>
-              <label className="geometry-control"><span>Otwórz paletę: Ctrl/Cmd + Shift +</span><input value={shortcutKey} maxLength={1} aria-label="Klawisz skrótu palety poleceń" onChange={event => { const key = event.target.value.slice(-1).toLowerCase() || 'p'; setShortcutKey(key); try { localStorage.setItem('no-tie-svg-command-shortcut', key) } catch { /* The shortcut still applies until the editor closes. */ } }} /></label>
-              <button className="button secondary compact-feature-button" onClick={() => setCommandPaletteOpen(true)}>Otwórz paletę poleceń</button>
-              <label className="fill-toggle"><input type="checkbox" checked={optimizationEnabled} onChange={event => setOptimizationEnabled(event.target.checked)} />Optymalizuj podczas eksportu SVG</label>
-              <button className="button secondary compact-feature-button" onClick={optimizeCurrentSvg}>Optymalizuj bieżący rysunek</button>
-              {optimizationReport && <p className="feature-help">{optimizationReport}</p>}
+              <div className="drawing-workflow-subgroup"><h4>Skróty</h4>
+                <label className="geometry-control"><span>Otwórz paletę: Ctrl/Cmd + Shift +</span><input value={shortcutKey} maxLength={1} aria-label="Klawisz skrótu palety poleceń" onChange={event => { const key = event.target.value.slice(-1).toLowerCase() || 'p'; setShortcutKey(key); try { localStorage.setItem('no-tie-svg-command-shortcut', key) } catch { /* The shortcut still applies until the editor closes. */ } }} /></label>
+                <button className="button secondary compact-feature-button" onClick={() => setCommandPaletteOpen(true)}>Otwórz paletę poleceń</button>
+              </div>
+              <div className="drawing-workflow-subgroup"><h4>Optymalizacja SVG</h4>
+                <label className="fill-toggle"><input type="checkbox" checked={optimizationEnabled} onChange={event => setOptimizationEnabled(event.target.checked)} />Optymalizuj podczas eksportu SVG</label>
+                <button className="button secondary compact-feature-button" onClick={optimizeCurrentSvg}>Optymalizuj bieżący rysunek</button>
+                {optimizationReport && <p className="feature-help">{optimizationReport}</p>}
+              </div>
             </section>
             <section className="drawing-workflow-card"><h3><Download size={15} />Eksport</h3>
-              <div className="drawing-feature-row"><label className="drawing-select-control"><span>Format</span><select value={exportFormat} onChange={event => setExportFormat(event.target.value as 'svg' | 'png' | 'sprite')}><option value="svg">SVG</option><option value="sprite">Arkusz sprite SVG</option><option value="png">PNG</option></select></label>
+              <div className="drawing-workflow-subgroup"><h4>Format i zakres</h4><div className="drawing-feature-row"><label className="drawing-select-control"><span>Format</span><select value={exportFormat} onChange={event => setExportFormat(event.target.value as 'svg' | 'png' | 'sprite')}><option value="svg">SVG</option><option value="sprite">Arkusz sprite SVG</option><option value="png">PNG</option></select></label>
                 <label className="drawing-select-control"><span>Obszar</span><select value={artboardExportId} onChange={event => chooseArtboardExport(event.target.value)}><option value="">Cały dokument</option>{artboards.map((board, index) => <option key={board.getAttribute('data-object-id')} value={board.getAttribute('data-object-id') ?? ''}>{board.getAttribute('data-layer-name') || `Plansza ${index + 1}`}</option>)}</select></label>
+              </div></div>
+              <div className="drawing-workflow-subgroup"><h4>Rozmiar i pobieranie</h4><div className="drawing-feature-row">
                 <label className="geometry-control"><span>Szerokość</span><input type="number" min="1" max="4096" value={exportSize.width} onChange={event => setExportSize(current => ({ ...current, width: Math.max(1, Number(event.target.value) || 1) }))} /></label>
                 <label className="geometry-control"><span>Wysokość</span><input type="number" min="1" max="4096" value={exportSize.height} onChange={event => setExportSize(current => ({ ...current, height: Math.max(1, Number(event.target.value) || 1) }))} /></label>
                 {exportFormat === 'png' && <label className="fill-toggle"><input type="checkbox" checked={exportTransparent} onChange={event => setExportTransparent(event.target.checked)} />Przezroczyste tło</label>}
                 <button className="button secondary compact-feature-button" onClick={() => { void downloadExport() }}><Download size={14} />Pobierz {exportFormat.toUpperCase()}</button>
-              </div>
+              </div></div>
               {workflowMessage && <p className="feature-help" role="status">{workflowMessage}</p>}
             </section>
           </div>}
