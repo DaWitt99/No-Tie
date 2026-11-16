@@ -34,6 +34,7 @@ import { NoteReminderDialog } from './NoteReminderDialog'
 import { ProjectDashboardPage } from './ProjectDashboardDialog'
 import { AiNoteToolsDialog, type AiNoteTool } from './AiNoteToolsDialog'
 import { NotePropertiesEditor } from './NotePropertiesEditor'
+import { NoteGridView } from './NoteGridView'
 import { MarkdownSourceEditor } from './MarkdownSourceEditor'
 import { searchNotes } from './noteSearch'
 import { nextTaskDate, parseTasks, updateTaskLine, type ParsedTask, type TaskPatch } from './knowledge'
@@ -84,6 +85,7 @@ const TASKS_PAGE_ID = '__no_tie_tasks_page__'
 const PROJECTS_PAGE_ID = '__no_tie_projects_page__'
 const ATTACHMENTS_PAGE_ID = '__no_tie_attachments_page__'
 const NOTE_BOARD_PAGE_ID = '__no_tie_note_board_page__'
+const MAX_NOTE_GRID_SIZE = 4
 
 function folderParents(path: string): string[] {
   const parts = path.split('/').map(part => part.trim()).filter(Boolean)
@@ -334,6 +336,8 @@ function App() {
   const [hasLockPin, setHasLockPin] = useState(() => Boolean(localStorage.getItem('no-tie-app-lock-hash')))
   const [appLocked, setAppLocked] = useState(() => Boolean(localStorage.getItem('no-tie-app-lock-hash') && localStorage.getItem('no-tie-app-locked') === 'true'))
   const [selectedId, setSelectedId] = useState('')
+  const [noteGridEnabled, setNoteGridEnabled] = useState(false)
+  const [noteGridIds, setNoteGridIds] = useState<string[]>([])
   const [activeFilter, setActiveFilter] = useState<Filter>('all')
   const [allNotesPreset, setAllNotesPreset] = useState<AllNotesPreset>('all')
   const [allNotesPresetRevision, setAllNotesPresetRevision] = useState(0)
@@ -354,6 +358,8 @@ function App() {
   const [quickSearchActiveIndex, setQuickSearchActiveIndex] = useState(0)
   const [showNoteLinkDialog, setShowNoteLinkDialog] = useState(false)
   const [showNoteEmbedDialog, setShowNoteEmbedDialog] = useState(false)
+  const [noteActionTargetId, setNoteActionTargetId] = useState('')
+  const [aiEditTarget, setAiEditTarget] = useState<{ noteId: string; text: string } | null>(null)
   const [showNoteHistory, setShowNoteHistory] = useState(false)
   const [noteVersions, setNoteVersions] = useState<NoteVersion[]>([])
   const [noteVersionsLoading, setNoteVersionsLoading] = useState(false)
@@ -673,6 +679,19 @@ function App() {
     }
   }, [])
   const selectedNote = notes.find(note => note.id === selectedId)
+  useEffect(() => {
+    const validIds = new Set(notes.map(note => note.id))
+    setNoteGridIds(current => {
+      const next = current.filter(id => validIds.has(id))
+      return next.length === current.length ? current : next
+    })
+  }, [notes])
+  useEffect(() => {
+    if (!noteGridEnabled) return
+    const visibleIds = noteGridIds.filter(id => notes.some(note => note.id === id))
+    if (!visibleIds.length) setNoteGridEnabled(false)
+    else if (!visibleIds.includes(selectedId)) setSelectedId(visibleIds[0]!)
+  }, [noteGridEnabled, noteGridIds, notes, selectedId])
   const activeReviewSession = reviewSessions.find(session => session.id === activeReviewSessionId)
   const showingReviewSessionsOverview = activeReviewSessionId === REVIEW_SESSIONS_OVERVIEW_ID
   const showingSavedSearchesPage = activeReviewSessionId === SAVED_SEARCHES_PAGE_ID
@@ -688,6 +707,8 @@ function App() {
   const activeSmartFolder = featureFlags.smartFolders && activeFilter.startsWith('smart:') ? savedSearches.find(search => search.id === activeFilter.slice('smart:'.length)) : undefined
   const breadcrumbFolderPath = showingAllNotesPage
     ? allNotesFolderPreset
+    : noteGridEnabled
+      ? selectedNote?.folder || '__root__'
     : activeFilter === 'root'
       ? '__root__'
       : activeFilter !== 'all' && activeFilter !== 'favorites' && !activeFilter.startsWith('smart:')
@@ -842,25 +863,47 @@ function App() {
   const documentCounts = selectedNote ? countMarkdownDocument(selectedNote.content) : { words: 0, characters: 0 }
   const selectionText = selectedNote && editorSelection.noteId === selectedNote.id && editorSelection.mode === editorMode ? editorSelection.text : ''
   const selectionCounts = countEditorText(selectionText)
-  const aiDialogNote = flashcardGenerationScope ? notes.find(note => note.id === flashcardGenerationScope.noteId) : selectedNote
-  const markdownNoteActions = [
-    { id: 'link', label: 'Połącz notatkę' },
-    { id: 'embed', label: 'Osadź notatkę' },
-    { id: 'edit-ai', label: 'Edytuj zaznaczenie z AI', disabled: !selectionText || !ollamaModel },
-    ...(selectionText.trim() ? [{ id: 'create-flashcard-selection', label: 'Utwórz fiszkę z zaznaczenia' }] : []),
-    ...(selectionText.trim() && featureFlags.aiFlashcards ? [{ id: 'generate-flashcards-selection', label: 'Generuj fiszki z zaznaczenia', disabled: !ollamaModel }] : []),
-    ...(featureFlags.aiSummaries ? [{ id: 'summary', label: 'Podsumuj i stwórz konspekt' }] : []),
-    ...(featureFlags.aiTaskExtraction ? [{ id: 'tasks', label: 'Wydobądź zadania' }] : []),
-    ...(featureFlags.aiFlashcards ? [{ id: 'flashcards', label: 'Stwórz fiszki' }, { id: 'quiz', label: 'Stwórz quiz' }] : []),
-  ]
+  const aiDialogNote = flashcardGenerationScope
+    ? notes.find(note => note.id === flashcardGenerationScope.noteId)
+    : notes.find(note => note.id === (noteActionTargetId || selectedId))
 
-  function handleMarkdownNoteAction(action: string) {
+  function selectionForNote(noteId: string, mode: 'rendered' | 'source') {
+    return editorSelection.noteId === noteId && editorSelection.mode === mode ? editorSelection.text : ''
+  }
+
+  function markdownActionsFor(noteId: string, mode: 'rendered' | 'source') {
+    const noteSelection = selectionForNote(noteId, mode)
+    return [
+      { id: 'link', label: 'Połącz notatkę' },
+      { id: 'embed', label: 'Osadź notatkę' },
+      { id: 'edit-ai', label: 'Edytuj zaznaczenie z AI', disabled: !noteSelection || !ollamaModel },
+      ...(noteSelection.trim() ? [{ id: 'create-flashcard-selection', label: 'Utwórz fiszkę z zaznaczenia' }] : []),
+      ...(noteSelection.trim() && featureFlags.aiFlashcards ? [{ id: 'generate-flashcards-selection', label: 'Generuj fiszki z zaznaczenia', disabled: !ollamaModel }] : []),
+      ...(featureFlags.aiSummaries ? [{ id: 'summary', label: 'Podsumuj i stwórz konspekt' }] : []),
+      ...(featureFlags.aiTaskExtraction ? [{ id: 'tasks', label: 'Wydobądź zadania' }] : []),
+      ...(featureFlags.aiFlashcards ? [{ id: 'flashcards', label: 'Stwórz fiszki' }, { id: 'quiz', label: 'Stwórz quiz' }] : []),
+    ]
+  }
+
+  const markdownNoteActions = markdownActionsFor(selectedId, editorMode)
+
+  function handleMarkdownNoteAction(action: string, noteId = selectedId, mode = editorMode) {
+    const note = notes.find(item => item.id === noteId)
+    if (!note) return
+    const noteSelection = selectionForNote(noteId, mode).trim()
+    setNoteActionTargetId(noteId)
     if (action === 'link') setShowNoteLinkDialog(true)
     else if (action === 'embed') setShowNoteEmbedDialog(true)
-    else if (action === 'edit-ai') setShowAiEdit(true)
-    else if (action === 'create-flashcard-selection' && selectedNote && selectionText.trim()) setSelectedTextFlashcard({ noteId: selectedNote.id, text: selectionText.trim() })
-    else if (action === 'generate-flashcards-selection' && selectedNote && selectionText.trim()) {
-      setFlashcardGenerationScope({ kind: 'selection', noteId: selectedNote.id, text: selectionText.trim(), label: 'Zaznaczony fragment notatki' })
+    else if (action === 'edit-ai') {
+      if (noteSelection) {
+        setAiEditTarget({ noteId, text: noteSelection })
+        setShowAiEdit(true)
+      }
+    } else if (action === 'create-flashcard-selection') {
+      if (noteSelection) setSelectedTextFlashcard({ noteId, text: noteSelection })
+    } else if (action === 'generate-flashcards-selection') {
+      if (!noteSelection) return
+      setFlashcardGenerationScope({ kind: 'selection', noteId, text: noteSelection, label: 'Zaznaczony fragment notatki' })
       setAiNoteTool('flashcards')
     } else {
       setFlashcardGenerationScope(null)
@@ -978,7 +1021,51 @@ function App() {
   function selectNote(id: string) {
     setShowCreateNotePage(false)
     setEditorSelection({ noteId: id, mode: editorMode, text: '' })
+    if (noteGridEnabled && id && !noteGridIds.includes(id)) {
+      setNoteGridIds(current => {
+        if (current.includes(id)) return current
+        const focusedIndex = current.indexOf(selectedId)
+        if (current.length < MAX_NOTE_GRID_SIZE) return [...current, id]
+        const next = [...current]
+        next[focusedIndex >= 0 ? focusedIndex : 0] = id
+        return next
+      })
+    }
     setSelectedId(id)
+  }
+
+  function focusGridNote(id: string) {
+    if (!notes.some(note => note.id === id)) return
+    setShowCreateNotePage(false)
+    setSelectedId(id)
+  }
+
+  function toggleNoteGrid() {
+    if (noteGridEnabled) {
+      setNoteGridEnabled(false)
+      return
+    }
+    const initialId = notes.some(note => note.id === selectedId) ? selectedId : notes[0]?.id ?? ''
+    setNoteGridIds(initialId ? [initialId] : [])
+    setNoteGridEnabled(true)
+  }
+
+  function addNoteToGrid(id: string) {
+    if (noteGridIds.includes(id)) return focusGridNote(id)
+    if (noteGridIds.length >= MAX_NOTE_GRID_SIZE) {
+      setToast('Siatka mieści najwyżej 4 notatki. Usuń jedną kartę, aby dodać kolejną.')
+      window.setTimeout(() => setToast(''), 3000)
+      return
+    }
+    setNoteGridIds(current => current.includes(id) || current.length >= MAX_NOTE_GRID_SIZE ? current : [...current, id])
+    focusGridNote(id)
+  }
+
+  function removeNoteFromGrid(id: string) {
+    const next = noteGridIds.filter(noteId => noteId !== id)
+    setNoteGridIds(next)
+    if (selectedId === id) setSelectedId(next.at(-1) ?? id)
+    if (!next.length) setNoteGridEnabled(false)
   }
 
   function openAllNotesFolder(folder: string) {
@@ -1178,12 +1265,13 @@ function App() {
     }
   }
 
-  function appendAiTextToNote(value: string, kind: AiNoteTool) {
-    if (!selectedNote) return
+  function appendAiTextToNote(value: string, kind: AiNoteTool, noteId = selectedId) {
+    const note = notes.find(item => item.id === noteId)
+    if (!note) return
     const heading = kind === 'summary' ? 'Podsumowanie AI' : kind === 'tasks' ? 'Zadania z AI' : 'Quiz AI'
-    const separator = selectedNote.content.trimEnd() ? '\n\n' : ''
-    const content = `${selectedNote.content.trimEnd()}${separator}## ${heading}\n\n${value.trim()}\n`
-    patchNote(selectedNote.id, { content })
+    const separator = note.content.trimEnd() ? '\n\n' : ''
+    const content = `${note.content.trimEnd()}${separator}## ${heading}\n\n${value.trim()}\n`
+    patchNote(note.id, { content })
     setEditorRevision(revision => revision + 1)
     setToast(kind === 'summary' ? 'Dodano podsumowanie do notatki.' : kind === 'tasks' ? 'Dodano zadania do notatki.' : 'Dodano quiz do notatki.')
     window.setTimeout(() => setToast(''), 3000)
@@ -1193,8 +1281,8 @@ function App() {
     insertTextIntoNote(`[${attachment.fileName}](./assets/${encodeURIComponent(attachment.fileName)})`)
   }
 
-  function openAttachment(fileName: string) {
-    const attachment = attachments.find(item => item.noteId === selectedId && item.fileName === fileName)
+  function openAttachment(fileName: string, noteId = selectedId) {
+    const attachment = attachments.find(item => item.noteId === noteId && item.fileName === fileName)
     if (attachment && (!attachment.mimeType.startsWith('audio/') || featureFlags.audioNotes)) setPreviewAttachmentId(attachment.id)
   }
 
@@ -2620,6 +2708,7 @@ function App() {
           </nav>
           <div className="topbar-actions">
             <span className={`save-indicator ${saved ? 'is-saved' : ''}`}><span className="save-dot" />{saved ? 'Zapisano' : 'Zapisywanie…'}</span>
+            {!showingWorkspacePage && notes.length > 0 && <button type="button" className={`split-view-toggle ${noteGridEnabled ? 'active' : ''}`} onClick={toggleNoteGrid} aria-pressed={noteGridEnabled} title={noteGridEnabled ? 'Wróć do pojedynczej notatki' : 'Otwórz siatkę notatek'}><Columns3 size={15} /><span>{noteGridEnabled ? 'Pojedynczy widok' : 'Siatka notatek'}</span></button>}
             {!showingWorkspacePage && selectedNote && featureFlags.noteReminders && <button type="button" className="icon-button note-history-button" onClick={() => setShowNoteReminder(true)} title="Ustaw przypomnienie o notatce" aria-label="Ustaw przypomnienie o notatce"><Bell size={16} /></button>}
             {!showingWorkspacePage && selectedNote && <button className="icon-button note-history-button" onClick={() => void openNoteHistory()} title="Historia wersji notatki" aria-label="Historia wersji notatki"><History size={17} /></button>}
             <details className="topbar-dropdown topbar-dropdown-right" onBlur={event => { if (!event.currentTarget.contains(event.relatedTarget as Node | null)) event.currentTarget.removeAttribute('open') }}>
@@ -2636,7 +2725,25 @@ function App() {
           </div>
         </header>
 
-        {showingSavedSearchesPage ? (
+        {!showingWorkspacePage && noteGridEnabled ? (
+          <NoteGridView
+            notes={noteGridIds.map(id => notes.find(note => note.id === id)).filter((note): note is Note => Boolean(note))}
+            allNotes={notes}
+            assets={assets}
+            attachments={attachments.filter(attachment => featureFlags.audioNotes || !attachment.mimeType.startsWith('audio/')).map(attachment => featureFlags.attachmentIndex ? attachment : { ...attachment, extractedText: undefined })}
+            activeNoteId={selectedId}
+            revision={editorRevision}
+            getNoteActions={markdownActionsFor}
+            onFocus={focusGridNote}
+            onRemove={removeNoteFromGrid}
+            onAdd={addNoteToGrid}
+            onPatch={(noteId, patch) => patchNote(noteId, patch)}
+            onSelectionChange={(noteId, mode, text) => setEditorSelection({ noteId, mode, text })}
+            onNoteAction={handleMarkdownNoteAction}
+            onOpenNote={(target, sourceNoteId) => { focusGridNote(sourceNoteId); openLinkedNote(target) }}
+            onOpenAttachment={(fileName, sourceNoteId) => { focusGridNote(sourceNoteId); openAttachment(fileName, sourceNoteId) }}
+          />
+        ) : showingSavedSearchesPage ? (
           <SavedSearchDialog
             searches={savedSearches}
             current={{ query, tag: searchTag, folder: searchFolder || (activeFilter !== 'all' && activeFilter !== 'favorites' && activeFilter !== 'root' ? activeFilter : '') }}
@@ -2745,18 +2852,18 @@ function App() {
         onSelect={openSearchResult}
         onClose={() => setShowQuickSearch(false)}
       />}
-      {showNoteLinkDialog && selectedNote && <NoteLinkDialog
+      {showNoteLinkDialog && notes.find(note => note.id === noteActionTargetId) && <NoteLinkDialog
         notes={notes}
-        currentNoteId={selectedNote.id}
+        currentNoteId={noteActionTargetId}
         onSelect={note => {
-          dispatchWikiLinkInsert({ noteId: selectedNote.id, target: note.title || note.id })
+          dispatchWikiLinkInsert({ noteId: noteActionTargetId, target: note.title || note.id })
           setShowNoteLinkDialog(false)
         }}
         onClose={() => setShowNoteLinkDialog(false)}
       />}
-      {showNoteEmbedDialog && selectedNote && <NoteLinkDialog notes={notes} currentNoteId={selectedNote.id} purpose="embed" onSelect={note => { dispatchWikiEmbedInsert({ noteId: selectedNote.id, target: note.title || note.id }); setShowNoteEmbedDialog(false) }} onClose={() => setShowNoteEmbedDialog(false)} />}
-      {showAiEdit && selectedNote && <AiSelectionEditDialog selectedText={selectionText} model={ollamaModel} baseUrl={ollamaBaseUrl} onApply={replacement => dispatchAiReplaceSelection({ noteId: selectedNote.id, replacement })} onClose={() => setShowAiEdit(false)} />}
-      {aiNoteTool && aiDialogNote && <AiNoteToolsDialog kind={aiNoteTool} note={aiDialogNote} attachments={attachments.filter(attachment => featureFlags.audioNotes || !attachment.mimeType.startsWith('audio/'))} existingQuestions={flashcards.filter(card => card.noteId === aiDialogNote.id).map(card => card.question)} sourceText={flashcardGenerationScope?.kind === 'selection' ? flashcardGenerationScope.text : undefined} sourcePage={flashcardGenerationScope?.kind === 'pdf-page' ? { attachmentId: flashcardGenerationScope.attachmentId, page: flashcardGenerationScope.page } : undefined} sourceLabel={flashcardGenerationScope?.label} baseUrl={ollamaBaseUrl} model={ollamaModel} onApply={value => appendAiTextToNote(value, aiNoteTool)} onCreateFlashcard={(noteId, question, answer, metadata) => createFlashcard(noteId, question, answer, 'basic', [], undefined, metadata)} onTranscribeAudio={featureFlags.audioNotes ? transcribeAudioAttachment : undefined} onMinimizedChange={setAiNoteGeneratorMinimized} onClose={() => { setAiNoteTool(null); setAiNoteGeneratorMinimized(false); setFlashcardGenerationScope(null) }} />}
+      {showNoteEmbedDialog && notes.find(note => note.id === noteActionTargetId) && <NoteLinkDialog notes={notes} currentNoteId={noteActionTargetId} purpose="embed" onSelect={note => { dispatchWikiEmbedInsert({ noteId: noteActionTargetId, target: note.title || note.id }); setShowNoteEmbedDialog(false) }} onClose={() => setShowNoteEmbedDialog(false)} />}
+      {showAiEdit && aiEditTarget && <AiSelectionEditDialog selectedText={aiEditTarget.text} model={ollamaModel} baseUrl={ollamaBaseUrl} onApply={replacement => dispatchAiReplaceSelection({ noteId: aiEditTarget.noteId, replacement })} onClose={() => { setShowAiEdit(false); setAiEditTarget(null) }} />}
+      {aiNoteTool && aiDialogNote && <AiNoteToolsDialog kind={aiNoteTool} note={aiDialogNote} attachments={attachments.filter(attachment => featureFlags.audioNotes || !attachment.mimeType.startsWith('audio/'))} existingQuestions={flashcards.filter(card => card.noteId === aiDialogNote.id).map(card => card.question)} sourceText={flashcardGenerationScope?.kind === 'selection' ? flashcardGenerationScope.text : undefined} sourcePage={flashcardGenerationScope?.kind === 'pdf-page' ? { attachmentId: flashcardGenerationScope.attachmentId, page: flashcardGenerationScope.page } : undefined} sourceLabel={flashcardGenerationScope?.label} baseUrl={ollamaBaseUrl} model={ollamaModel} onApply={value => appendAiTextToNote(value, aiNoteTool, aiDialogNote.id)} onCreateFlashcard={(noteId, question, answer, metadata) => createFlashcard(noteId, question, answer, 'basic', [], undefined, metadata)} onTranscribeAudio={featureFlags.audioNotes ? transcribeAudioAttachment : undefined} onMinimizedChange={setAiNoteGeneratorMinimized} onClose={() => { setAiNoteTool(null); setAiNoteGeneratorMinimized(false); setFlashcardGenerationScope(null); setNoteActionTargetId('') }} />}
       {selectedTextFlashcard && notes.find(note => note.id === selectedTextFlashcard.noteId) && <SelectedTextFlashcardDialog noteTitle={notes.find(note => note.id === selectedTextFlashcard.noteId)?.title ?? ''} selectedText={selectedTextFlashcard.text} onSave={(question, answer) => { createFlashcard(selectedTextFlashcard.noteId, question, answer); setSelectedTextFlashcard(null) }} onClose={() => setSelectedTextFlashcard(null)} />}
       {showNoteHistory && selectedNote && historyDialogNoteId === selectedNote.id && <NoteHistoryDialog note={selectedNote} attachments={currentAttachments} versions={noteVersions} loading={noteVersionsLoading} onRestore={restoreNoteVersion} onClose={closeNoteHistory} />}
       {showFeatureManager && <FeatureManagerDialog features={featureFlags} onToggle={toggleFeature} onConfigureLock={() => setShowLockSetup(true)} onClose={() => setShowFeatureManager(false)} />}

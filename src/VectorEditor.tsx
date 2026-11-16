@@ -3978,21 +3978,21 @@ export function VectorEditor({
         </nav>
         <div className="drawing-feature-panel" role="tabpanel" data-revision={layerRevision}>
           {activePanel === 'canvas' && <div className="drawing-feature-groups">
-            <section className="drawing-feature-group"><h3>Widok i nawigacja</h3><div className="drawing-feature-group-controls">
+            <details className="drawing-feature-group drawing-feature-dropdown"><summary>Widok i nawigacja</summary><div className="drawing-feature-group-controls">
               <button className="button secondary compact-feature-button" onClick={() => zoomAtCenter(1.2)} title="Powiększ"><Plus size={13} /></button>
               <output className="feature-help" aria-label="Powiększenie">{zoomPercent}%</output>
               <button className="button secondary compact-feature-button" onClick={() => zoomAtCenter(1 / 1.2)} title="Pomniejsz"><Minus size={13} /></button>
               <button className="button secondary compact-feature-button" onClick={() => fitViewToContent(false)}>Dopasuj wszystko</button>
               <button className="button secondary compact-feature-button" onClick={() => fitViewToContent(true)} disabled={!selectedIds.length}>Dopasuj zaznaczenie</button>
               <span className="feature-help">Spacja + przeciągnięcie przesuwa płótno. Ctrl/Cmd + kółko zmienia powiększenie.</span>
-            </div></section>
-            <section className="drawing-feature-group"><h3>Wymiary dokumentu</h3><div className="drawing-feature-group-controls">
+            </div></details>
+            <details className="drawing-feature-group drawing-feature-dropdown"><summary>Wymiary dokumentu</summary><div className="drawing-feature-group-controls">
               <label className="geometry-control"><span>Szerokość</span><input type="number" min="1" value={displayedDimension(documentSize.width)} onChange={event => changeDocumentDimension('width', Number(event.target.value) || 1)} /></label>
               <label className="geometry-control"><span>Wysokość</span><input type="number" min="1" value={displayedDimension(documentSize.height)} onChange={event => changeDocumentDimension('height', Number(event.target.value) || 1)} /></label>
               <label className="drawing-select-control"><span>Jednostka</span><select value={documentUnit} onChange={event => setDocumentUnit(event.target.value as DocumentUnit)}><option value="px">px</option><option value="mm">mm</option><option value="in">in</option></select></label>
               <label className="fill-toggle"><input type="checkbox" checked={lockDocumentRatio} onChange={event => { setLockDocumentRatio(event.target.checked); documentRatio.current = documentSize.width / Math.max(documentSize.height, 1) }} />Zachowaj proporcje</label>
-            </div></section>
-            <section className="drawing-feature-group"><h3>Siatka i pomocnicze widoki</h3><div className="drawing-feature-group-controls">
+            </div></details>
+            <details className="drawing-feature-group drawing-feature-dropdown"><summary>Siatka i pomocnicze widoki</summary><div className="drawing-feature-group-controls">
               <label className="fill-toggle"><input type="checkbox" checked={viewOptions.grid} onChange={event => setViewOptions(current => ({ ...current, grid: event.target.checked }))} />Siatka</label>
               <label className="drawing-select-control"><span>Odstęp</span><select value={viewOptions.gridSize} onChange={event => setViewOptions(current => ({ ...current, gridSize: Number(event.target.value) }))}>{[8, 10, 16, 20, 25, 32, 40, 50].map(size => <option key={size} value={size}>{size} px</option>)}</select></label>
               <label className="fill-toggle"><input type="checkbox" checked={viewOptions.snap} onChange={event => setViewOptions(current => ({ ...current, snap: event.target.checked }))} />Przyciągaj</label>
@@ -4001,15 +4001,15 @@ export function VectorEditor({
               <label className="fill-toggle"><input type="checkbox" checked={viewOptions.rulers} onChange={event => setViewOptions(current => ({ ...current, rulers: event.target.checked }))} /><Ruler size={14} />Linijki</label>
               <label className="fill-toggle"><input type="checkbox" checked={showMinimap} onChange={event => setShowMinimap(event.target.checked)} />Mini mapa</label>
               <span className="feature-help">Siatka i prowadnice są pomocnicze; nie trafiają do zapisanego SVG.</span>
-            </div></section>
-            <section className="drawing-feature-group drawing-feature-group-wide"><h3>Prowadnice</h3><div className="drawing-feature-group-controls">
+            </div></details>
+            <details className="drawing-feature-group drawing-feature-group-wide drawing-feature-dropdown"><summary>Prowadnice · {viewOptions.guides.length}</summary><div className="drawing-feature-group-controls">
               <label className="fill-toggle"><input type="checkbox" checked={guideLockAll} onChange={event => { setGuideLockAll(event.target.checked); setViewOptions(current => ({ ...current, guides: current.guides.map(guide => ({ ...guide, locked: event.target.checked })) })) }} />Zablokuj prowadnice</label>
               <button className="button secondary compact-feature-button" onClick={() => addGuide('x')}><Plus size={13} />Pionowa prowadnica</button>
               <button className="button secondary compact-feature-button" onClick={() => addGuide('y')}><Plus size={13} />Pozioma prowadnica</button>
               <button className="button secondary compact-feature-button" onClick={() => setViewOptions(current => ({ ...current, guides: [] }))} disabled={!viewOptions.guides.length}>Usuń prowadnice ({viewOptions.guides.length})</button>
               {viewOptions.guides.map((guide, index) => <div className="geometry-control guide-position-control" key={`${guide.axis}-${index}`}><span>{guide.axis === 'x' ? 'Pionowa X' : 'Pozioma Y'}</span><input type="number" min="0" max={guide.axis === 'x' ? documentSize.width : documentSize.height} value={guide.value} disabled={guide.locked || guideLockAll} onChange={event => setViewOptions(current => ({ ...current, guides: current.guides.map((item, currentIndex) => currentIndex === index ? { ...item, value: Number(event.target.value) } : item) }))} /><label className="fill-toggle" title="Zablokuj prowadnicę"><input type="checkbox" checked={Boolean(guide.locked)} onChange={event => setViewOptions(current => ({ ...current, guides: current.guides.map((item, currentIndex) => currentIndex === index ? { ...item, locked: event.target.checked } : item) }))} /><Lock size={12} /></label><button className="tool-button" onClick={() => setViewOptions(current => ({ ...current, guides: current.guides.filter((_item, currentIndex) => currentIndex !== index) }))} aria-label="Usuń prowadnicę"><X size={12} /></button></div>)}
-            </div></section>
-            <section className="drawing-feature-group drawing-feature-group-wide"><h3>Plansze</h3><div className="drawing-feature-group-controls">
+            </div></details>
+            <details className="drawing-feature-group drawing-feature-group-wide drawing-feature-dropdown"><summary>Plansze · {artboards.length}</summary><div className="drawing-feature-group-controls">
               <label className="drawing-select-control"><span>Format planszy</span><select value={artboardPreset} onChange={event => setArtboardPreset(event.target.value)}><option value="360x220">Pozioma 360 × 220</option><option value="220x360">Pionowa 220 × 360</option><option value="220x220">Kwadrat 220 × 220</option></select></label>
               <button className="button secondary compact-feature-button" onClick={addArtboard}><Plus size={13} />Dodaj planszę</button>
               {artboards.map((board, index) => {
@@ -4022,11 +4022,11 @@ export function VectorEditor({
                   <button className="button secondary compact-feature-button" onClick={() => chooseArtboardExport(id)}>Eksport</button>
                 </div>
               })}
-            </div></section>
+            </div></details>
           </div>}
 
           {activePanel === 'style' && <div className="drawing-feature-groups">
-            <section className="drawing-feature-group"><h3>Kolor i przezroczystość</h3><div className="drawing-feature-group-controls">
+            <details className="drawing-feature-group drawing-feature-dropdown"><summary>Kolor i przezroczystość</summary><div className="drawing-feature-group-controls">
               <div className="drawing-palette" aria-label="Paleta kolorów">{palette.map(color => <button key={color} className="palette-swatch" style={{ backgroundColor: color }} onClick={() => { applyStrokeColor(color); applyFillColor(color) }} title={`Ustaw kolor ${color}`} aria-label={`Ustaw kolor ${color}`} />)}</div>
               <button className={`button secondary compact-feature-button ${eyedropper ? 'feature-active' : ''}`} onClick={() => setEyedropper(value => !value)} title="Kliknij figurę, aby pobrać jej kolor"><Pipette size={14} />Pipeta</button>
               <label className="line-width-control"><span>Przezroczystość</span><input type="range" min="0" max="100" step="1" value={opacity} onChange={event => applyObjectOpacity(Number(event.target.value))} /><output>{opacity}%</output></label>
@@ -4035,8 +4035,8 @@ export function VectorEditor({
                 <label className="color-control"><input type="color" value={replaceColorSource} onChange={event => setReplaceColorSource(event.target.value)} /><span>Kolor do zamiany</span></label>
                 {namedColors.map(item => <div className="drawing-named-color" key={item.name}><button className="palette-swatch" style={{ backgroundColor: item.color }} onClick={() => { setFillColor(item.color); fillColorRef.current = item.color; applyFillColor(item.color) }} title={`Użyj ${item.name}`} /><span>{item.name}</span><button className="button secondary compact-feature-button" onClick={() => replaceDocumentColor(replaceColorSource, item.color)}>Zamień globalnie</button><button className="tool-button" onClick={() => setNamedColors(current => current.filter(color => color.name !== item.name))} aria-label={`Usuń kolor ${item.name}`}><X size={12} /></button></div>)}
               </div></details>
-            </div></section>
-            <section className="drawing-feature-group"><h3>Gradienty i wzory</h3><div className="drawing-feature-group-controls">
+            </div></details>
+            <details className="drawing-feature-group drawing-feature-dropdown"><summary>Gradienty i wzory</summary><div className="drawing-feature-group-controls">
               <button className="button secondary compact-feature-button" onClick={applyGradient} disabled={!selectedIds.length} title="Utwórz gradient trójstopniowy">Gradient</button>
               <label className="drawing-select-control"><span>Typ gradientu</span><select value={gradientKind} onChange={event => setGradientKind(event.target.value as 'linear' | 'radial')}><option value="linear">Liniowy</option><option value="radial">Promieniowy</option></select></label>
               {gradientKind === 'linear' && <label className="geometry-control"><span>Kąt °</span><input type="number" min="0" max="360" value={gradientAngle} onChange={event => setGradientAngle(Number(event.target.value))} /></label>}
@@ -4051,14 +4051,14 @@ export function VectorEditor({
                 <span className="drawing-pattern-preview" aria-label="Podgląd kafelka"><svg viewBox={`0 0 ${patternTileSize} ${patternTileSize}`}><rect width={patternTileSize} height={patternTileSize} fill={patternBackground || '#fff'} />{patternKind === 'dots' ? <circle cx={patternTileSize / 2} cy={patternTileSize / 2} r={patternStrokeWidth} fill={strokeColor} /> : <path d={patternKind === 'lines' ? `M 0 ${patternTileSize / 2} H ${patternTileSize}` : `M 0 ${patternTileSize} L ${patternTileSize} 0`} fill="none" stroke={strokeColor} strokeWidth={patternStrokeWidth} />}</svg></span>
               </div></details>
               <details className="drawing-feature-details"><summary>Gradient na planszy</summary><span className="feature-help">Zaznacz obiekt z gradientem liniowym i przeciągnij uchwyty początku, końca lub środkowego koloru bezpośrednio na płótnie.</span></details>
-            </div></section>
-            <section className="drawing-feature-group"><h3>Zapisane style</h3><div className="drawing-feature-group-controls">
+            </div></details>
+            <details className="drawing-feature-group drawing-feature-dropdown"><summary>Zapisane style · {stylePresets.length}</summary><div className="drawing-feature-group-controls">
               <button className="button secondary compact-feature-button" onClick={copyStyle} disabled={!selectedIds.length}>Kopiuj styl</button>
               <button className="button secondary compact-feature-button" onClick={pasteStyle} disabled={!selectedIds.length || !selectedStyle}>Wklej styl</button>
               <button className="button secondary compact-feature-button" onClick={saveStylePreset} disabled={!selectedIds.length}>Zapisz preset stylu</button>
               {stylePresets.map(preset => <button key={preset.name} className="button secondary compact-feature-button" onClick={() => applyStylePreset(preset)} disabled={!selectedIds.length} title={`Zastosuj zapisany styl ${preset.name}`}>{preset.name}</button>)}
-            </div></section>
-            <section className="drawing-feature-group"><h3>Typografia</h3><div className="drawing-feature-group-controls">
+            </div></details>
+            <details className="drawing-feature-group drawing-feature-dropdown"><summary>Typografia</summary><div className="drawing-feature-group-controls">
               <label className="drawing-select-control"><span>Krój pisma</span><select value={fontFamily} onChange={event => { setFontFamily(event.target.value); applyTypography({ family: event.target.value }) }}><option value="Inter, sans-serif">Inter</option><option value="Arial, sans-serif">Arial</option><option value="Georgia, serif">Georgia</option><option value="monospace">Monospace</option><option value="serif">Szeryfowy</option></select></label>
               <label className="drawing-select-control"><span>Grubość</span><select value={fontWeight} onChange={event => { setFontWeight(event.target.value); applyTypography({ weight: event.target.value }) }}><option value="400">Zwykła</option><option value="600">Półgruba</option><option value="700">Pogrubiona</option></select></label>
               <label className="drawing-select-control"><span>Wyrównanie</span><select value={textAlign} onChange={event => { setTextAlign(event.target.value); applyTypography({ align: event.target.value }) }}><option value="start">Do lewej</option><option value="middle">Do środka</option><option value="end">Do prawej</option></select></label>
@@ -4086,8 +4086,8 @@ export function VectorEditor({
                 <label className="geometry-control"><span>Promień narożnika</span><input type="number" min="1" max="80" value={cornerRadius} onChange={event => setCornerRadius(Math.max(1, Number(event.target.value) || 1))} /></label>
                 <button className="button secondary compact-feature-button" onClick={roundSelectedPenNodes}>Zaokrąglij węzły</button>
               </div></details>}
-            </div></section>
-            <section className="drawing-feature-group"><h3>Transformacje i kontur</h3><div className="drawing-feature-group-controls">
+            </div></details>
+            <details className="drawing-feature-group drawing-feature-dropdown"><summary>Transformacje i kontur</summary><div className="drawing-feature-group-controls">
               <label className="geometry-control"><span>Obrót °</span><input type="number" min="-360" max="360" step="1" value={rotationDraft} disabled={!selectedIds.length} onChange={event => setRotationDraft(event.target.value)} onKeyDown={event => { if (event.key === 'Enter') applyRotation() }} /></label>
               <button className="button secondary compact-feature-button" onClick={applyRotation} disabled={!selectedIds.length}><RotateCw size={13} />Obróć</button>
               <label className="geometry-control"><span>Odsunięcie konturu</span><input type="number" min="0" max="60" value={offsetDistance} onChange={event => setOffsetDistance(Math.max(0, Number(event.target.value) || 0))} /></label>
@@ -4095,8 +4095,8 @@ export function VectorEditor({
               <details className="drawing-feature-details"><summary>Mieszanie i przezroczystość</summary><div className="drawing-advanced-controls">
                 <label className="drawing-select-control"><span>Tryb mieszania</span><select value={blendMode} onChange={event => applyBlendMode(event.target.value)}><option value="normal">Zwykły</option><option value="multiply">Mnożenie</option><option value="screen">Ekran</option><option value="overlay">Nakładka</option><option value="darken">Przyciemnij</option><option value="lighten">Rozjaśnij</option><option value="color-dodge">Rozjaśnianie kolorów</option><option value="color-burn">Wypalanie kolorów</option><option value="difference">Różnica</option></select></label>
               </div></details>
-            </div></section>
-            {(selectedImage || (selectedPenNodeIndex !== null && selectedPaths.some(path => path.hasAttribute('data-editor-pen')))) && <section className="drawing-feature-group"><h3>Obrazy i ścieżki</h3><div className="drawing-feature-group-controls">
+            </div></details>
+            {(selectedImage || (selectedPenNodeIndex !== null && selectedPaths.some(path => path.hasAttribute('data-editor-pen')))) && <details className="drawing-feature-group drawing-feature-dropdown"><summary>Obrazy i ścieżki</summary><div className="drawing-feature-group-controls">
               {selectedImage && <>
                 <button className="button secondary compact-feature-button" onClick={() => applyImageTransform('x')}>Odbij obraz ↔</button>
                 <button className="button secondary compact-feature-button" onClick={() => applyImageTransform('y')}>Odbij obraz ↕</button>
@@ -4104,12 +4104,12 @@ export function VectorEditor({
                 <button className="button secondary compact-feature-button" onClick={() => replaceImageInput.current?.click()}>Zastąp obraz</button>
               </>}
               {selectedPenNodeIndex !== null && selectedPaths.some(path => path.hasAttribute('data-editor-pen')) && <label className="drawing-select-control"><span>Węzeł Béziera</span><select value={penNodeMode} onChange={event => applyPenNodeMode(event.target.value as 'smooth' | 'corner' | 'symmetric')}><option value="corner">Narożny</option><option value="smooth">Gładki</option><option value="symmetric">Symetryczny</option></select></label>}
-            </div></section>}
+            </div></details>}
           </div>}
 
           {activePanel === 'layers' && <div className="drawing-layer-workspace">
             <div className="drawing-feature-groups">
-              <section className="drawing-feature-group"><h3>Wyrównywanie i rozkład</h3><div className="drawing-feature-group-controls">
+              <details className="drawing-feature-group drawing-feature-dropdown"><summary>Wyrównywanie i rozkład</summary><div className="drawing-feature-group-controls">
                 <button className="button secondary compact-feature-button" onClick={() => alignSelection('x', 'start')} disabled={selectedIds.length < 2}><AlignStartHorizontal size={14} />Wyrównaj do lewej</button>
                 <button className="button secondary compact-feature-button" onClick={() => alignSelection('x', 'center')} disabled={selectedIds.length < 2}><AlignCenterHorizontal size={14} />Wyśrodkuj w poziomie</button>
                 <button className="button secondary compact-feature-button" onClick={() => alignSelection('x', 'end')} disabled={selectedIds.length < 2}><AlignEndHorizontal size={14} />Wyrównaj do prawej</button>
@@ -4134,15 +4134,15 @@ export function VectorEditor({
                   <button className="button secondary compact-feature-button" onClick={() => alignSelectionToArtboard('centerY')} disabled={!selectedIds.length}>Wyśrodkuj pionowo</button>
                   <button className="button secondary compact-feature-button" onClick={() => alignSelectionToArtboard('bottom')} disabled={!selectedIds.length}>Do dołu</button>
                 </div></details>
-              </div></section>
-              <section className="drawing-feature-group"><h3>Grupy i kształty</h3><div className="drawing-feature-group-controls">
+              </div></details>
+              <details className="drawing-feature-group drawing-feature-dropdown"><summary>Grupy i kształty</summary><div className="drawing-feature-group-controls">
                 <button className="button secondary compact-feature-button" onClick={groupSelected} disabled={selectedIds.length < 2} title="Grupuje figury i zachowuje je do osobnej edycji">Połącz w grupę</button>
                 <button className="button secondary compact-feature-button" onClick={() => applyBoolean('union')} disabled={selectedIds.length < 2} title="Tworzy jedną wypełnioną sylwetkę z sumy figur">Suma kształtów</button>
                 <button className="button secondary compact-feature-button" onClick={() => applyBoolean('subtract')} disabled={selectedIds.length < 2}>Odejmij ostatnią</button>
                 <button className="button secondary compact-feature-button" onClick={() => applyBoolean('intersect')} disabled={selectedIds.length < 2}>Część wspólna</button>
                 <button className="button secondary compact-feature-button" onClick={() => applyBoolean('exclude')} disabled={selectedIds.length !== 2}>Wyklucz wspólną część</button>
-              </div></section>
-              <section className="drawing-feature-group"><h3>Ścieżki i przycinanie</h3><div className="drawing-feature-group-controls">
+              </div></details>
+              <details className="drawing-feature-group drawing-feature-dropdown"><summary>Ścieżki i przycinanie</summary><div className="drawing-feature-group-controls">
                 <button className="button secondary compact-feature-button" onClick={() => applyPathOperation('close')} disabled={!selectedPaths.length}>Zamknij ścieżkę</button>
                 <button className="button secondary compact-feature-button" onClick={() => applyPathOperation('simplify')} disabled={!selectedPaths.length}>Uprość ścieżkę</button>
                 <button className="button secondary compact-feature-button" onClick={() => applyPathOperation('split')} disabled={selectedPaths.length !== 1}>Podziel na pół</button>
@@ -4155,14 +4155,14 @@ export function VectorEditor({
                   <button className="button secondary compact-feature-button" onClick={createSelectionMask} disabled={selectedIds.length < 2}>Utwórz maskę z kształtu</button>
                   <span className="feature-help">Zaznacz ścieżkę z obrysem, aby zamienić ją na wypełniony kontur. Maska użyje ostatniego zaznaczonego obiektu.</span>
                 </div></details>
-              </div></section>
-              <section className="drawing-feature-group"><h3>Symbole i skalowanie</h3><div className="drawing-feature-group-controls">
+              </div></details>
+              <details className="drawing-feature-group drawing-feature-dropdown"><summary>Symbole i skalowanie · {reusableSymbols.length}</summary><div className="drawing-feature-group-controls">
                 <label className="drawing-select-control"><span>Skalowanie grupy</span><select value={groupConstraint} onChange={event => applyGroupConstraint(event.target.value as 'free' | 'aspect')} disabled={!selectedIds.length}><option value="free">Dowolne</option><option value="aspect">Zachowaj proporcje</option></select></label>
                 <button className="button secondary compact-feature-button" onClick={createSymbolFromSelection} disabled={!selectedIds.length}>Zapisz zaznaczenie jako symbol</button>
                 {reusableSymbols.map((symbol, index) => <button key={symbol.id} className="button secondary compact-feature-button" onClick={() => insertSymbol(symbol.id ?? '')} title="Wstaw ponownie edytowalny symbol"><Plus size={12} />Symbol {index + 1}</button>)}
-              </div></section>
+              </div></details>
             </div>
-            <section className="drawing-layer-list-group" aria-label="Warstwy SVG"><h3>Warstwy dokumentu</h3><div className="drawing-layer-list">
+            <details className="drawing-layer-list-group drawing-feature-dropdown"><summary>Warstwy dokumentu · {layerItems.length}</summary><div className="drawing-layer-list">
               {!layerItems.length && <span className="feature-help">Dodane figury pojawią się tu jako warstwy.</span>}
               {layerItems.map((element, index) => {
                 const id = element.getAttribute('data-object-id') ?? ''
@@ -4178,7 +4178,7 @@ export function VectorEditor({
                   <button className="tool-button" onClick={() => reorderLayer(id, 'back')} title="Przenieś na spód">↓</button>
                 </div>
               })}
-            </div></section>
+            </div></details>
           </div>}
 
           {activePanel === 'workflow' && <div className="drawing-workflow-grid">
