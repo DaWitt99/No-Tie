@@ -5,15 +5,18 @@ import type { NoteAsset, NoteAttachment } from './types'
 
 const sizeLabel = (bytes: number) => bytes < 1024 * 1024 ? `${Math.max(1, Math.round(bytes / 1024))} KB` : `${(bytes / (1024 * 1024)).toFixed(1)} MB`
 const itemCountLabel = (count: number) => `${count} ${count === 1 ? 'element' : count % 10 >= 2 && count % 10 <= 4 && (count % 100 < 12 || count % 100 > 14) ? 'elementy' : 'elementów'}`
+const attachmentMetadataSummary = (attachment: NoteAttachment) => [attachment.author, attachment.documentDate, attachment.description].filter(Boolean).join(' · ')
 type SpeechRecognitionLike = { continuous: boolean; interimResults: boolean; lang: string; start: () => void; stop: () => void; onresult: ((event: { results: ArrayLike<{ isFinal: boolean; 0: { transcript: string } }> }) => void) | null; onerror: ((event: { error: string }) => void) | null; onend: (() => void) | null }
 type SpeechRecognitionConstructor = new () => SpeechRecognitionLike
+type LiveTranscriptSegment = NonNullable<NoteAttachment['transcriptSegments']>[number]
 
-export function NoteAttachmentsPanel({ attachments, assets = [], onAdd, onAddAsset, onEditAsset, onRemove, onOcr, onTranscribe, onInsertText, onSaveTranscript, onInsertAttachmentLink, onPreview, audioEnabled = true }: { attachments: NoteAttachment[]; assets?: NoteAsset[]; onAdd: (files: File[]) => Promise<NoteAttachment[]>; onAddAsset: () => void; onEditAsset: (asset: NoteAsset) => void; onRemove: (attachment: NoteAttachment) => void; onOcr?: (attachment: NoteAttachment) => Promise<string>; onTranscribe?: (attachment: NoteAttachment) => Promise<string>; onInsertText: (text: string) => void; onSaveTranscript: (attachment: NoteAttachment, transcript: string) => void; onInsertAttachmentLink: (attachment: NoteAttachment) => void; onPreview: (attachment: NoteAttachment) => void; audioEnabled?: boolean }) {
+export function NoteAttachmentsPanel({ attachments, assets = [], onAdd, onAddAsset, onEditAsset, onRemove, onOcr, onSaveExtractedText, onTranscribe, onInsertText, onSaveTranscript, onInsertAttachmentLink, onPreview, audioEnabled = true }: { attachments: NoteAttachment[]; assets?: NoteAsset[]; onAdd: (files: File[]) => Promise<NoteAttachment[]>; onAddAsset: () => void; onEditAsset: (asset: NoteAsset) => void; onRemove: (attachment: NoteAttachment) => void; onOcr?: (attachment: NoteAttachment) => Promise<string>; onSaveExtractedText?: (attachment: NoteAttachment, text: string) => void | Promise<void>; onTranscribe?: (attachment: NoteAttachment) => Promise<string>; onInsertText: (text: string) => void; onSaveTranscript: (attachment: NoteAttachment, transcript: string, segments?: NoteAttachment['transcriptSegments']) => void; onInsertAttachmentLink: (attachment: NoteAttachment) => void; onPreview: (attachment: NoteAttachment) => void; audioEnabled?: boolean }) {
   const input = useRef<HTMLInputElement>(null)
   const recorder = useRef<MediaRecorder | null>(null)
   const speech = useRef<SpeechRecognitionLike | null>(null)
   const audioChunks = useRef<BlobPart[]>([])
-  const transcriptSegments = useRef<string[]>([])
+  const transcriptSegments = useRef<LiveTranscriptSegment[]>([])
+  const recordingStartedAt = useRef(0)
   const recordingActive = useRef(false)
   const speechShouldContinue = useRef(false)
   const speechSessionId = useRef(0)
@@ -21,6 +24,7 @@ export function NoteAttachmentsPanel({ attachments, assets = [], onAdd, onAddAss
   const [ocrBusy, setOcrBusy] = useState('')
   const [transcriptionBusy, setTranscriptionBusy] = useState('')
   const [ocrResult, setOcrResult] = useState('')
+  const [ocrResultAttachment, setOcrResultAttachment] = useState<NoteAttachment | null>(null)
   const [recording, setRecording] = useState(false)
   const [transcript, setTranscript] = useState('')
   const [audioError, setAudioError] = useState('')
@@ -38,11 +42,11 @@ export function NoteAttachmentsPanel({ attachments, assets = [], onAdd, onAddAss
     const value = transcriptText.current.trim()
     if (!attachment || !value || persistedTranscript.current === value) return
     persistedTranscript.current = value
-    onSaveTranscript(attachment, value)
+    onSaveTranscript(attachment, value, transcriptSegments.current.filter(segment => segment.text.trim()))
   }
 
   function updateSpeechTranscript(interim = '') {
-    const complete = transcriptSegments.current.filter(Boolean).join(' ').replace(/\s+/g, ' ').trim()
+    const complete = transcriptSegments.current.map(segment => segment?.text ?? '').filter(Boolean).join(' ').replace(/\s+/g, ' ').trim()
     transcriptText.current = complete
     setTranscript([complete, interim.trim()].filter(Boolean).join(' '))
   }
@@ -96,6 +100,7 @@ export function NoteAttachmentsPanel({ attachments, assets = [], onAdd, onAddAss
         } finally { mediaStream.getTracks().forEach(track => track.stop()) }
       }
       mediaRecorder.start()
+      recordingStartedAt.current = Date.now()
       recordingActive.current = true
       setRecording(true)
 
@@ -140,7 +145,7 @@ export function NoteAttachmentsPanel({ attachments, assets = [], onAdd, onAddAss
                 const result = event.results[index]
                 const words = result[0].transcript.trim()
                 if (!words) continue
-                if (result.isFinal) transcriptSegments.current[sessionOffset + index] = words
+                if (result.isFinal) transcriptSegments.current[sessionOffset + index] = { startMs: Math.max(0, Date.now() - recordingStartedAt.current), text: words }
                 else interim = words
               }
               if (interim || event.results.length) {
@@ -215,8 +220,8 @@ export function NoteAttachmentsPanel({ attachments, assets = [], onAdd, onAddAss
   }
   async function runOcr(attachment: NoteAttachment) {
     if (!onOcr) return
-    setOcrBusy(attachment.id); setOcrResult('')
-    try { setOcrResult(await onOcr(attachment)) } catch (error) { setAudioError(error instanceof Error ? error.message : 'Nie udało się odczytać tekstu.') }
+    setOcrBusy(attachment.id); setOcrResult(''); setOcrResultAttachment(null)
+    try { setOcrResult(await onOcr(attachment)); setOcrResultAttachment(attachment) } catch (error) { setAudioError(error instanceof Error ? error.message : 'Nie udało się odczytać tekstu.') }
     finally { setOcrBusy('') }
   }
   async function runTranscription(attachment: NoteAttachment) {
@@ -251,11 +256,13 @@ export function NoteAttachmentsPanel({ attachments, assets = [], onAdd, onAddAss
       const transcriptValue = transcriptDrafts[attachment.id] ?? attachment.transcript ?? ''
       return <article className={`attachment-card ${isAudio ? 'audio-attachment-card' : isVideo ? 'video-attachment-card' : ''}`} key={attachment.id}>
       {isAudio ? <div className="attachment-audio-card"><AudioLines size={20} /><span className="attachment-file-name">{attachment.fileName}</span><audio controls preload="none" src={attachment.dataUrl} aria-label={'Odtwórz ' + attachment.fileName} />{onTranscribe && <button type="button" className="button secondary audio-transcribe-button" disabled={transcriptionBusy === attachment.id} onClick={() => void runTranscription(attachment)}>{transcriptionBusy === attachment.id ? 'Transkrybuję lokalnie…' : 'Transkrybuj lokalnie'}</button>}<details className="audio-transcript-details" open={Boolean(attachment.transcript)}><summary>{attachment.transcript ? 'Transkrypcja' : 'Dodaj transkrypcję'}</summary><textarea aria-label={'Transkrypcja ' + attachment.fileName} value={transcriptValue} onChange={event => setTranscriptDrafts(current => ({ ...current, [attachment.id]: event.target.value }))} placeholder="Wpisz lub popraw transkrypcję nagrania" rows={4} /><div><button type="button" className="button secondary" disabled={!transcriptValue.trim()} onClick={() => onSaveTranscript(attachment, transcriptValue.trim())}>Zapisz transkrypcję</button></div></details><button type="button" className="button primary audio-transcript-insert" disabled={!transcriptValue.trim()} onClick={() => onInsertText(transcriptValue)}>Wstaw do notatki</button></div> : isVideo ? <div className="attachment-video-card"><video controls preload="metadata" src={attachment.dataUrl} aria-label={'Odtwórz ' + attachment.fileName} /><span className="attachment-file-name">{attachment.fileName}</span><small>{sizeLabel(attachment.size)}</small></div> : <button className="attachment-preview-button" type="button" onClick={() => onPreview(attachment)} aria-label={'Podgląd: ' + attachment.fileName}>{attachment.mimeType.startsWith('image/') ? <img src={attachment.dataUrl} alt={attachment.fileName} /> : <span className="attachment-pdf-icon"><FileText size={25} /><small>PDF</small></span>}<span className="attachment-file-name">{attachment.fileName}</span><small>{sizeLabel(attachment.size)}</small></button>}
+      {attachmentMetadataSummary(attachment) && <small className="attachment-metadata-card-summary" title={attachmentMetadataSummary(attachment)}>{attachmentMetadataSummary(attachment)}</small>}
+      <button type="button" className="attachment-metadata-button" aria-label={`Metadane załącznika ${attachment.fileName}`} title="Edytuj metadane i otwórz podgląd" onClick={() => onPreview(attachment)}><Pencil size={13} /></button>
       {attachment.mimeType.startsWith('image/') && onOcr && <button type="button" className="attachment-ocr" disabled={ocrBusy === attachment.id} onClick={() => void runOcr(attachment)}><ScanText size={13} />{ocrBusy === attachment.id ? 'Odczytuję…' : 'Odczytaj tekst'}</button>}
       <button type="button" className="attachment-insert-link" aria-label={`Wstaw link do notatki: ${attachment.fileName}`} title="Wstaw link do notatki" onClick={() => onInsertAttachmentLink(attachment)}><Link2 size={13} /><span>Wstaw link</span></button>
       <button className="attachment-delete" type="button" aria-label={`Usuń załącznik ${attachment.fileName}`} onClick={() => onRemove(attachment)}><Trash2 size={14} /></button>
     </article>})}</div> : <p className="attachment-empty">Dodaj plik lub utwórz schemat SVG dla tej notatki.</p>}
-    {ocrResult && <div className="ocr-result"><strong>Rozpoznany tekst</strong><textarea value={ocrResult} onChange={event => setOcrResult(event.target.value)} rows={5} /><div><button type="button" className="button secondary" onClick={() => setOcrResult('')}>Odrzuć</button><button type="button" className="button primary" onClick={() => { onInsertText(ocrResult); setOcrResult('') }}>Wstaw do notatki</button></div></div>}
+    {ocrResult && <div className="ocr-result"><strong>Rozpoznany tekst · {ocrResultAttachment?.fileName}</strong><textarea value={ocrResult} onChange={event => setOcrResult(event.target.value)} rows={5} /><div><button type="button" className="button secondary" onClick={() => { setOcrResult(''); setOcrResultAttachment(null) }}>Odrzuć</button>{onSaveExtractedText && ocrResultAttachment && <button type="button" className="button secondary" onClick={event => { const button = event.currentTarget; button.disabled = true; void Promise.resolve(onSaveExtractedText(ocrResultAttachment, ocrResult)).then(() => { setOcrResult(''); setOcrResultAttachment(null) }).catch(error => setAudioError(error instanceof Error ? error.message : 'Nie udało się zapisać rozpoznanego tekstu.')).finally(() => { button.disabled = false }) }}>Zapisz przy załączniku</button>}<button type="button" className="button primary" onClick={() => { onInsertText(ocrResult); setOcrResult(''); setOcrResultAttachment(null) }}>Wstaw do notatki</button></div></div>}
     {showMicrophonePrompt && <div className="modal-backdrop microphone-permission-backdrop" role="presentation" onMouseDown={event => { if (event.target === event.currentTarget && !microphoneRequesting) setShowMicrophonePrompt(false) }}><section className="folder-dialog microphone-permission-dialog" role="dialog" aria-modal="true" aria-labelledby="microphone-permission-title"><div className="folder-dialog-mark microphone-permission-mark"><Mic size={19} /></div><p className="eyebrow">NOTATKA GŁOSOWA</p><h2 id="microphone-permission-title">Dostęp do mikrofonu</h2><p>No-Tie nagra audio jako załącznik. Jeśli przeglądarka obsługuje rozpoznawanie mowy, pokaże też transkrypcję na żywo.</p><div className="microphone-permission-info"><AudioLines size={17} /><span>Po kontynuowaniu system lub przeglądarka pokaże własne pytanie o zgodę.</span></div>{audioError && <p className="microphone-permission-error" role="alert">{audioError}</p>}<div className="folder-dialog-actions"><button type="button" className="button secondary" disabled={microphoneRequesting} onClick={() => { setShowMicrophonePrompt(false); setAudioError('') }}>Anuluj</button><button type="button" className="button primary" disabled={microphoneRequesting} onClick={() => void requestMicrophone()}>{microphoneRequesting ? 'Proszę czekać…' : <><Mic size={14} />Zezwól i nagraj</>}</button></div></section></div>}
   </section>
 }

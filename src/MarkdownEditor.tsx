@@ -37,6 +37,138 @@ type TableTarget = { tablePos: number; row: number; column: number; element: HTM
 type TableOverlayState = TableTarget & { left: number; top: number }
 type TableContextState = TableTarget & { left: number; top: number }
 type TableFilterState = { tablePos: number; column: number; value: string }
+type AssistPanel = 'outline' | 'find' | 'comments' | 'shortcuts' | 'validation' | null
+type ShortcutAction = 'find' | 'outline' | 'comments' | 'focus'
+type EditorShortcutMap = Record<ShortcutAction, string>
+type HeadingEntry = { id: string; level: number; text: string; pos: number }
+type InlineComment = { id: string; text: string; excerpt: string; from: number; to: number; resolved: boolean }
+type TextMatch = { from: number; to: number }
+type TextSegment = { from: number; to: number; start: number; end: number }
+
+const SHORTCUTS_STORAGE_KEY = 'no-tie-editor-shortcuts'
+const VALIDATION_STORAGE_KEY = 'no-tie-editor-validation'
+const DEFAULT_SHORTCUTS: EditorShortcutMap = { find: 'Ctrl+Shift+F', outline: 'Ctrl+Shift+O', comments: 'Ctrl+Shift+J', focus: 'Ctrl+Shift+M' }
+
+function readShortcuts(): EditorShortcutMap {
+  try {
+    const stored = JSON.parse(localStorage.getItem(SHORTCUTS_STORAGE_KEY) || '{}') as Partial<EditorShortcutMap> | null
+    return Object.fromEntries((Object.keys(DEFAULT_SHORTCUTS) as ShortcutAction[]).map(action => [action, typeof stored?.[action] === 'string' ? stored[action] : DEFAULT_SHORTCUTS[action]])) as EditorShortcutMap
+  }
+  catch { return DEFAULT_SHORTCUTS }
+}
+
+function readValidationOptions(): { spelling: boolean; markdown: boolean } {
+  try {
+    const parsed = JSON.parse(localStorage.getItem(VALIDATION_STORAGE_KEY) || '{}')
+    return { spelling: parsed.spelling !== false, markdown: parsed.markdown !== false }
+  } catch { return { spelling: true, markdown: true } }
+}
+
+function shortcutFromEvent(event: KeyboardEvent): string {
+  const parts: string[] = []
+  if (event.ctrlKey || event.metaKey) parts.push('Ctrl')
+  if (event.altKey) parts.push('Alt')
+  if (event.shiftKey) parts.push('Shift')
+  const key = event.key.length === 1 ? event.key.toUpperCase() : event.key
+  if (!['Control', 'Alt', 'Shift', 'Meta'].includes(key)) parts.push(key)
+  return parts.join('+')
+}
+
+function headingEntries(view: EditorView): HeadingEntry[] {
+  const occurrences = new Map<string, number>()
+  const headings: HeadingEntry[] = []
+  view.state.doc.descendants((node, pos) => {
+    if (node.type.name !== 'heading') return true
+    const level = Number(node.attrs.level) || 1
+    const text = node.textContent.trim() || 'Pusty nagłówek'
+    const key = `${level}:${text}`
+    const occurrence = occurrences.get(key) ?? 0
+    occurrences.set(key, occurrence + 1)
+    headings.push({ id: `${key}:${occurrence}`, level, text, pos })
+    return true
+  })
+  return headings
+}
+
+function textMatches(doc: import('@milkdown/kit/prose/model').Node, query: string): TextMatch[] {
+  const needle = query.trim()
+  if (!needle) return []
+  const matches: TextMatch[] = []
+  const normalizedNeedle = needle.toLocaleLowerCase()
+  doc.descendants((block, blockPos) => {
+    if (!block.isTextblock) return true
+    const segments: TextSegment[] = []
+    let text = ''
+    block.descendants((node, pos) => {
+      if (!node.isText) return true
+      const value = node.text ?? ''
+      const start = text.length
+      text += value
+      segments.push({ from: blockPos + 1 + pos, to: blockPos + 1 + pos + node.nodeSize, start, end: text.length })
+      return false
+    })
+    const normalizedText = text.toLocaleLowerCase()
+    const positionAt = (offset: number) => {
+      const segment = segments.find(item => offset >= item.start && offset < item.end) ?? (offset === text.length ? segments.at(-1) : undefined)
+      if (!segment) return undefined
+      return segment.from + Math.min(offset - segment.start, segment.to - segment.from)
+    }
+    let cursor = 0
+    while (cursor <= normalizedText.length - normalizedNeedle.length) {
+      const found = normalizedText.indexOf(normalizedNeedle, cursor)
+      if (found < 0) break
+      const from = positionAt(found)
+      const to = positionAt(found + needle.length)
+      if (from !== undefined && to !== undefined && to > from) matches.push({ from, to })
+      cursor = found + Math.max(needle.length, 1)
+    }
+    return true
+  })
+  return matches
+}
+
+function inlineComments(view: EditorView): InlineComment[] {
+  const comments = new Map<string, InlineComment>()
+  view.state.doc.descendants((node, pos) => {
+    if (!node.isText) return true
+    const mark = node.marks.find(item => item.type.name === 'noteComment')
+    if (!mark) return true
+    const markId = String(mark.attrs.id || '')
+    const id = markId || `legacy:${pos}`
+    const current = comments.get(id)
+    const excerpt = node.text ?? ''
+    if (current) {
+      current.excerpt += excerpt
+      current.to = pos + node.nodeSize
+    } else {
+      comments.set(id, {
+        id,
+        text: String(mark.attrs.text || ''),
+        excerpt,
+        from: pos,
+        to: pos + node.nodeSize,
+        resolved: Boolean(mark.attrs.resolved),
+      })
+    }
+    return true
+  })
+  return [...comments.values()].sort((left, right) => left.from - right.from)
+}
+
+function markdownWarnings(markdown: string, notes: import('./types').Note[]): string[] {
+  const warnings: string[] = []
+  const fences = markdown.match(/^\s*```/gm)?.length ?? 0
+  if (fences % 2) warnings.push('Niezamknięty blok kodu — dodaj końcowe ```.')
+  if (/^\s{0,3}#{1,6}\S/m.test(markdown)) warnings.push('Nagłówek Markdown powinien mieć spację po znakach #.')
+  if (/\[\[[^\]]*$/.test(markdown)) warnings.push('Niedokończony link do notatki — sprawdź zapis [[nazwa]].')
+  if (/\[[^\]]*\]\(\s*\)/.test(markdown)) warnings.push('Link Markdown nie ma adresu docelowego.')
+  if (/\[[^\]]*\]\([^)]*$/.test(markdown)) warnings.push('Niedokończony link Markdown — zamknij adres nawiasem ).')
+  const noteNames = new Set(notes.flatMap(note => [note.id, note.title, ...(note.aliases ?? [])].map(value => value.trim().toLocaleLowerCase())))
+  const unresolved = [...markdown.matchAll(/\[\[([^\]]+)\]\]/g)].map(match => match[1]?.trim()).filter((target): target is string => Boolean(target) && !noteNames.has(target.toLocaleLowerCase()))
+  for (const target of [...new Set(unresolved)].slice(0, 8)) warnings.push(`Nie znaleziono notatki „${target}”.`)
+  if (!warnings.length) warnings.push('Nie znaleziono problemów w Markdownzie ani linkach.')
+  return warnings
+}
 
 function tablePositionAt(doc: import('@milkdown/kit/prose/model').Node, pos: number): number | undefined {
   try {
@@ -120,7 +252,7 @@ export function MarkdownEditor({
   onChange: (markdown: string) => void
   onSelectionChange: (text: string) => void
   onOpenNote: (target: string) => void
-  onOpenAttachment: (fileName: string) => void
+  onOpenAttachment: (fileName: string, page?: number, fragment?: string) => void
   notes: import('./types').Note[]
   allAssets: NoteAsset[]
   noteActions: MarkdownNoteAction[]
@@ -148,6 +280,20 @@ export function MarkdownEditor({
   const [tableFilterView, setTableFilterView] = useState<TableFilterState | null>(null)
   const [tableRevision, setTableRevision] = useState(0)
   const [tableCopied, setTableCopied] = useState(false)
+  const [assistPanel, setAssistPanel] = useState<AssistPanel>(null)
+  const [assistRevision, setAssistRevision] = useState(0)
+  const [headings, setHeadings] = useState<HeadingEntry[]>([])
+  const [foldedHeadings, setFoldedHeadings] = useState<Set<string>>(() => new Set())
+  const [findText, setFindText] = useState('')
+  const [replaceText, setReplaceText] = useState('')
+  const [activeFindMatch, setActiveFindMatch] = useState(-1)
+  const [comments, setComments] = useState<InlineComment[]>([])
+  const [commentDraft, setCommentDraft] = useState('')
+  const [pendingCommentRange, setPendingCommentRange] = useState<TextMatch | null>(null)
+  const [shortcuts, setShortcuts] = useState<EditorShortcutMap>(readShortcuts)
+  const [capturingShortcut, setCapturingShortcut] = useState<ShortcutAction | null>(null)
+  const [validationOptions, setValidationOptions] = useState(readValidationOptions)
+  const [focusMode, setFocusMode] = useState(false)
   const [initialDocument] = useState(() => ({ markdown, assets, attachments }))
   const lastMarkdown = useRef(initialDocument.markdown)
 
@@ -178,23 +324,117 @@ export function MarkdownEditor({
           const next = markdownWithTableColumnWidths(markdownToWikiLinks(markdownFromEditor(updated, initialDocument.assets, initialDocument.attachments)), _ctx.get(editorViewCtx))
           if (next === lastMarkdown.current) return
           lastMarkdown.current = next
+          setAssistRevision(value => value + 1)
           onChangeRef.current(next)
         })
       })
       .use([...commonmark, columnResizingPlugin, ...gfm, ...markdownMarkupPlugins, ...noteEmbedPlugins, listener])
     void editor.create().then(() => {
       editorRef.current = editor
-      editor.ctx.get(editorViewCtx).setProps({ editable: () => !readOnly })
+      const editorView = editor.ctx.get(editorViewCtx)
+      editorView.setProps({ editable: () => !readOnly })
+      editorView.dom.setAttribute('spellcheck', String(validationOptions.spelling))
+      editorView.dom.setAttribute('aria-label', 'Treść notatki')
+      editorView.dom.setAttribute('aria-readonly', String(readOnly))
       const widths = parseTableColumnWidths(initialDocument.markdown)
       if (widths.length) applyTableColumnWidths(editor.ctx.get(editorViewCtx), widths)
       applyTableRowHeights(editor.ctx.get(editorViewCtx), parseTableRowHeights(initialDocument.markdown))
       refreshNoteEmbeds(root.current, notesRef.current, assetsRef.current, note => onOpenNoteRef.current(note.title || note.id))
+      setAssistRevision(value => value + 1)
     }).catch(error => console.error('Nie udało się uruchomić edytora Markdown', error))
     return () => {
       editorRef.current = null
       void editor.destroy()
     }
   }, [noteId, revision, initialDocument, readOnly])
+
+  useEffect(() => {
+    try { localStorage.setItem(SHORTCUTS_STORAGE_KEY, JSON.stringify(shortcuts)) } catch { /* Browser storage can be disabled. */ }
+  }, [shortcuts])
+
+  useEffect(() => {
+    try { localStorage.setItem(VALIDATION_STORAGE_KEY, JSON.stringify(validationOptions)) } catch { /* Browser storage can be disabled. */ }
+    editorRef.current?.ctx.get(editorViewCtx).dom.setAttribute('spellcheck', String(validationOptions.spelling))
+  }, [validationOptions])
+
+  useEffect(() => {
+    const editor = editorRef.current
+    if (!editor) {
+      setHeadings([])
+      setComments([])
+      return
+    }
+    const view = editor.ctx.get(editorViewCtx)
+    setHeadings(headingEntries(view))
+    setComments(inlineComments(view))
+  }, [assistRevision, noteId, readOnly])
+
+  useEffect(() => {
+    const editor = editorRef.current
+    const proseMirror = root.current?.querySelector('.ProseMirror')
+    if (!editor || !proseMirror) return
+    const blocks = Array.from(proseMirror.children) as HTMLElement[]
+    const headingMap = new Map<string, HeadingEntry[]>()
+    for (const heading of headings) {
+      const key = `${heading.level}:${heading.text}`
+      headingMap.set(key, [...(headingMap.get(key) ?? []), heading])
+    }
+    let foldedLevel: number | null = null
+    let hiddenByFold = false
+    for (const block of blocks) {
+      const match = /^H([1-6])$/.exec(block.tagName)
+      if (match) {
+        const level = Number(match[1])
+        if (foldedLevel !== null && level <= foldedLevel) foldedLevel = null
+        hiddenByFold = foldedLevel !== null
+        const key = `${level}:${block.textContent?.trim() || 'Pusty nagłówek'}`
+        const entry = headingMap.get(key)?.shift()
+        if (entry) {
+          block.dataset.noTieHeadingId = entry.id
+          if (foldedHeadings.has(entry.id) && foldedLevel === null) foldedLevel = level
+        }
+      } else hiddenByFold = foldedLevel !== null
+      block.hidden = hiddenByFold
+    }
+    return () => { for (const block of blocks) { block.hidden = false; delete block.dataset.noTieHeadingId } }
+  }, [headings, foldedHeadings, assistRevision, noteId])
+
+  useEffect(() => {
+    const appShell = root.current?.closest('.app-shell')
+    appShell?.classList.toggle('note-focus-mode', focusMode)
+    return () => { appShell?.classList.remove('note-focus-mode') }
+  }, [focusMode, noteId])
+
+  useEffect(() => {
+    if (!capturingShortcut) return
+    const capture = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') { event.preventDefault(); setCapturingShortcut(null); return }
+      if (!(event.ctrlKey || event.metaKey || event.altKey)) return
+      event.preventDefault()
+      event.stopImmediatePropagation()
+      setShortcuts(current => ({ ...current, [capturingShortcut]: shortcutFromEvent(event) }))
+      setCapturingShortcut(null)
+    }
+    window.addEventListener('keydown', capture, true)
+    return () => window.removeEventListener('keydown', capture, true)
+  }, [capturingShortcut])
+
+  useEffect(() => {
+    const onShortcut = (event: KeyboardEvent) => {
+      const target = event.target
+      if (readOnly || !(target instanceof Element) || !root.current?.parentElement?.contains(target)) return
+      if (target instanceof HTMLElement && ((target.isContentEditable && !target.closest('.ProseMirror')) || ['INPUT', 'TEXTAREA', 'SELECT'].includes(target.tagName))) return
+      const pressed = shortcutFromEvent(event)
+      const action = (Object.keys(shortcuts) as ShortcutAction[]).find(key => shortcuts[key].toLocaleLowerCase() === pressed.toLocaleLowerCase())
+      if (!action) return
+      event.preventDefault()
+      event.stopPropagation()
+      if (action === 'focus') setFocusMode(current => !current)
+      else setAssistPanel(current => current === action ? null : action)
+    }
+    window.addEventListener('keydown', onShortcut, true)
+    return () => window.removeEventListener('keydown', onShortcut, true)
+  }, [shortcuts, readOnly])
 
   useEffect(() => {
     refreshNoteEmbeds(root.current, notes, allAssets, note => onOpenNoteRef.current(note.title || note.id))
@@ -423,6 +663,7 @@ export function MarkdownEditor({
   }
 
   function showContextMenu(event: ReactMouseEvent<HTMLDivElement>) {
+    if (event.target instanceof Element && event.target.closest('.markdown-assist')) return
     event.preventDefault()
     const target = event.target
     if (target instanceof Element) {
@@ -525,7 +766,7 @@ export function MarkdownEditor({
       const cellValue = row.cells[column]?.textContent?.trim().toLocaleLowerCase() ?? ''
       if (cellValue.includes(normalized)) return
       const rowPath = selectorFromAncestor(table, row)
-      if (rowPath) rules.push(`.markdown-editor > ${tablePath} > ${rowPath} { display: none !important; }`)
+      if (rowPath) rules.push(`.markdown-editor-canvas > ${tablePath} > ${rowPath} { display: none !important; }`)
     })
     style.textContent = rules.join('\n')
   }
@@ -535,7 +776,120 @@ export function MarkdownEditor({
     const updated = markdownWithTableColumnWidths(markdownToWikiLinks(markdownFromEditor(editor.action(getMarkdown()), initialDocument.assets, initialDocument.attachments)), view)
     if (updated === lastMarkdown.current) return
     lastMarkdown.current = updated
+    setAssistRevision(value => value + 1)
     onChangeRef.current(updated)
+  }
+
+  function navigateToHeading(heading: HeadingEntry) {
+    const editor = editorRef.current
+    if (!editor) return
+    const view = editor.ctx.get(editorViewCtx)
+    const stack: HeadingEntry[] = []
+    for (const current of headings) {
+      if (current.id === heading.id) break
+      while (stack.length && stack.at(-1)!.level >= current.level) stack.pop()
+      stack.push(current)
+    }
+    const collapsedAncestors = stack.filter(parent => parent.level < heading.level && foldedHeadings.has(parent.id))
+    const move = () => {
+      if (!view.dom.isConnected) return
+      const selection = TextSelection.near(view.state.doc.resolve(Math.min(heading.pos + 1, view.state.doc.content.size)))
+      view.dispatch(view.state.tr.setSelection(selection).scrollIntoView())
+      view.focus()
+    }
+    if (collapsedAncestors.length) {
+      const ids = new Set(collapsedAncestors.map(parent => parent.id))
+      setFoldedHeadings(current => new Set([...current].filter(id => !ids.has(id))))
+      window.requestAnimationFrame(move)
+    } else move()
+  }
+
+  function goToNextMatch() {
+    const editor = editorRef.current
+    if (!editor || !findText.trim()) return
+    const view = editor.ctx.get(editorViewCtx)
+    const matches = textMatches(view.state.doc, findText)
+    if (!matches.length) { setActiveFindMatch(-1); return }
+    const start = view.state.selection.to
+    let index = matches.findIndex(match => match.from >= start)
+    if (index < 0) index = 0
+    const match = matches[index]
+    if (!match) return
+    setActiveFindMatch(index)
+    view.dispatch(view.state.tr.setSelection(TextSelection.create(view.state.doc, match.from, match.to)).scrollIntoView())
+    view.focus()
+  }
+
+  function replaceCurrentMatch() {
+    const editor = editorRef.current
+    if (!editor || !findText.trim()) return
+    const view = editor.ctx.get(editorViewCtx)
+    const matches = textMatches(view.state.doc, findText)
+    const selected = matches.find(match => match.from === view.state.selection.from && match.to === view.state.selection.to)
+    if (!selected) { goToNextMatch(); return }
+    view.dispatch(view.state.tr.insertText(replaceText, selected.from, selected.to).scrollIntoView())
+    saveEditorMarkdown(editor)
+    setActiveFindMatch(-1)
+    view.focus()
+  }
+
+  function replaceEveryMatch() {
+    const editor = editorRef.current
+    if (!editor || !findText.trim()) return
+    const view = editor.ctx.get(editorViewCtx)
+    const matches = textMatches(view.state.doc, findText)
+    if (!matches.length) return
+    let transaction = view.state.tr
+    for (const match of [...matches].reverse()) transaction = transaction.insertText(replaceText, match.from, match.to)
+    view.dispatch(transaction)
+    saveEditorMarkdown(editor)
+    setActiveFindMatch(-1)
+    view.focus()
+  }
+
+  function toggleCommentResolved(comment: InlineComment) {
+    const editor = editorRef.current
+    if (!editor) return
+    const view = editor.ctx.get(editorViewCtx)
+    const markType = view.state.schema.marks.noteComment
+    if (!markType) return
+    const transaction = view.state.tr
+    const nextResolved = !comment.resolved
+    view.state.doc.nodesBetween(comment.from, comment.to, (node, pos) => {
+      if (!node.isText) return
+      const mark = node.marks.find(item => item.type === markType && (comment.id.startsWith('legacy:') ? !item.attrs.id : item.attrs.id === comment.id))
+      if (!mark) return
+      transaction.removeMark(pos, pos + node.nodeSize, markType)
+      transaction.addMark(pos, pos + node.nodeSize, markType.create({ ...mark.attrs, resolved: nextResolved }))
+    })
+    if (!transaction.docChanged) return
+    view.dispatch(transaction)
+    saveEditorMarkdown(editor)
+  }
+
+  function focusComment(comment: InlineComment) {
+    const editor = editorRef.current
+    if (!editor) return
+    const view = editor.ctx.get(editorViewCtx)
+    view.dispatch(view.state.tr.setSelection(TextSelection.create(view.state.doc, comment.from, comment.to)).scrollIntoView())
+    view.focus()
+  }
+
+  function addComment() {
+    const editor = editorRef.current
+    const text = commentDraft.trim()
+    if (!editor || !text || !pendingCommentRange) return
+    const view = editor.ctx.get(editorViewCtx)
+    const max = view.state.doc.content.size
+    const from = Math.max(0, Math.min(pendingCommentRange.from, max))
+    const to = Math.max(from, Math.min(pendingCommentRange.to, max))
+    if (from === to) return
+    const commentMark = noteCommentSchema.type(editor.ctx).create({ id: crypto.randomUUID(), text, resolved: false })
+    view.dispatch(view.state.tr.addMark(from, to, commentMark))
+    saveEditorMarkdown(editor)
+    setCommentDraft('')
+    setPendingCommentRange(null)
+    view.focus()
   }
 
   function applyTableAction(action: MarkdownTableAction, target: TableTarget, fromContextMenu: boolean) {
@@ -696,7 +1050,16 @@ export function MarkdownEditor({
     const attachmentAnchor = target.closest<HTMLAnchorElement>('a[href^="no-tie-attachment:"]')
     if (attachmentAnchor) {
       event.preventDefault()
-      try { onOpenAttachmentRef.current(decodeURIComponent(attachmentAnchor.getAttribute('href')?.slice('no-tie-attachment:'.length) ?? '')) } catch { /* Ignore malformed attachment names. */ }
+      try {
+        const reference = attachmentAnchor.getAttribute('href')?.slice('no-tie-attachment:'.length) ?? ''
+        const suffixIndex = reference.search(/[?#]/)
+        const encodedName = suffixIndex < 0 ? reference : reference.slice(0, suffixIndex)
+        const suffix = suffixIndex < 0 ? '' : reference.slice(suffixIndex + 1)
+        const parameters = new URLSearchParams(suffix)
+        const page = Number(parameters.get('page'))
+        const fragment = parameters.get('search') ?? parameters.get('fragment') ?? ''
+        onOpenAttachmentRef.current(decodeURIComponent(encodedName), Number.isFinite(page) && page > 0 ? page : undefined, fragment)
+      } catch { /* Ignore malformed attachment references. */ }
       return
     }
     const anchor = target.closest<HTMLAnchorElement>('a[href^="#no-tie-note/"], a[href^="notie-note:"]')
@@ -780,7 +1143,16 @@ export function MarkdownEditor({
         case 'highlight': toggle(highlightSchema.type(ctx), { color: '#fff176' }); break
         case 'code': commands.call(toggleInlineCodeCommand.key); break
         case 'inline-math': replace(`$${selectedText || 'x'}$`); break
-        case 'comment': toggle(noteCommentSchema.type(ctx)); break
+        case 'comment': {
+          if (range.from === range.to) {
+            window.alert('Zaznacz tekst, do którego ma być przypięty komentarz.')
+            break
+          }
+          setPendingCommentRange(range)
+          setCommentDraft('')
+          setAssistPanel('comments')
+          break
+        }
         case 'clear-format': {
           const transaction = view.state.tr
           if (range.from === range.to) transaction.setStoredMarks([])
@@ -830,13 +1202,18 @@ export function MarkdownEditor({
     const updated = markdownWithTableColumnWidths(markdownToWikiLinks(markdownFromEditor(editor.action(getMarkdown()), initialDocument.assets, initialDocument.attachments)), editor.ctx.get(editorViewCtx))
     if (updated !== lastMarkdown.current) {
       lastMarkdown.current = updated
+      setAssistRevision(value => value + 1)
       onChangeRef.current(updated)
     }
   }
 
+  const currentFindMatches = assistPanel === 'find' && editorRef.current && findText.trim()
+    ? textMatches(editorRef.current.ctx.get(editorViewCtx).state.doc, findText)
+    : []
+  const currentMarkdownWarnings = assistPanel === 'validation' && validationOptions.markdown ? markdownWarnings(markdown, notes) : []
+
   return <div
     className="markdown-editor"
-    ref={root}
     aria-label="Treść notatki"
     aria-readonly={readOnly}
     onPointerDown={readOnly ? undefined : startRowResize}
@@ -846,6 +1223,59 @@ export function MarkdownEditor({
     onMouseOut={readOnly ? undefined : dismissTableToolbar}
     onClick={readOnly ? undefined : openWikiLink}
   >
+    {!readOnly && <div className="markdown-assist">
+      <div className="markdown-assist-toolbar" role="toolbar" aria-label="Narzędzia edytora">
+        <button type="button" className={assistPanel === 'outline' ? 'active' : ''} onClick={() => setAssistPanel(current => current === 'outline' ? null : 'outline')}>Spis nagłówków</button>
+        <button type="button" className={assistPanel === 'find' ? 'active' : ''} onClick={() => setAssistPanel(current => current === 'find' ? null : 'find')}>Znajdź i zamień</button>
+        <button type="button" className={assistPanel === 'comments' ? 'active' : ''} onClick={() => {
+          const range = selectedRange.current
+          if (range.to > range.from) setPendingCommentRange(range)
+          setAssistPanel(current => current === 'comments' ? null : 'comments')
+        }}>Komentarze{comments.length ? ` · ${comments.filter(comment => !comment.resolved).length}` : ''}</button>
+        <button type="button" className={assistPanel === 'validation' ? 'active' : ''} onClick={() => setAssistPanel(current => current === 'validation' ? null : 'validation')}>Sprawdzanie</button>
+        <button type="button" className={assistPanel === 'shortcuts' ? 'active' : ''} onClick={() => setAssistPanel(current => current === 'shortcuts' ? null : 'shortcuts')}>Skróty</button>
+        <button type="button" className={`markdown-focus-toggle ${focusMode ? 'active' : ''}`} onClick={() => setFocusMode(value => !value)}>{focusMode ? 'Wyjdź ze skupienia' : 'Tryb skupienia'}</button>
+      </div>
+      {assistPanel === 'outline' && <section className="markdown-assist-panel markdown-outline-panel" aria-label="Spis nagłówków">
+        <strong>Nagłówki w tej notatce</strong>
+        {headings.length ? headings.map(heading => <div className={`markdown-outline-row level-${heading.level}`} key={heading.id}>
+          <button type="button" className="markdown-outline-jump" onClick={() => navigateToHeading(heading)} title="Przejdź do nagłówka">{heading.text}</button>
+          <button type="button" className="markdown-fold-toggle" aria-label={`${foldedHeadings.has(heading.id) ? 'Rozwiń' : 'Zwiń'} sekcję ${heading.text}`} title={`${foldedHeadings.has(heading.id) ? 'Rozwiń' : 'Zwiń'} sekcję`} onClick={() => {
+            const editor = editorRef.current
+            if (editor) navigateToHeading(heading)
+            setFoldedHeadings(current => { const next = new Set(current); if (next.has(heading.id)) next.delete(heading.id); else next.add(heading.id); return next })
+          }}>{foldedHeadings.has(heading.id) ? '＋' : '−'}</button>
+        </div>) : <span className="markdown-assist-empty">Dodaj nagłówki Markdown, aby zbudować spis.</span>}
+      </section>}
+      {assistPanel === 'find' && <section className="markdown-assist-panel markdown-find-panel" aria-label="Znajdź i zamień">
+        <label>Szukaj<input value={findText} onChange={event => { setFindText(event.target.value); setActiveFindMatch(-1) }} onKeyDown={event => { if (event.key === 'Enter') { event.preventDefault(); goToNextMatch() } }} placeholder="Tekst w tej notatce" /></label>
+        <label>Zamień na<input value={replaceText} onChange={event => setReplaceText(event.target.value)} placeholder="Nowy tekst" /></label>
+        <div className="markdown-assist-actions"><span>{currentFindMatches.length ? `${currentFindMatches.length} wyników${activeFindMatch >= 0 ? ` · ${activeFindMatch + 1} z ${currentFindMatches.length}` : ''}` : 'Brak wyników'}</span><button type="button" onClick={goToNextMatch} disabled={!currentFindMatches.length}>Następny</button><button type="button" onClick={replaceCurrentMatch} disabled={!currentFindMatches.length}>Zamień</button><button type="button" onClick={replaceEveryMatch} disabled={!currentFindMatches.length}>Zamień wszystkie</button></div>
+      </section>}
+      {assistPanel === 'comments' && <section className="markdown-assist-panel markdown-comments-panel" aria-label="Komentarze do zaznaczeń">
+        <strong>Komentarze przypięte do tekstu</strong>
+        <div className="markdown-comment-compose">
+          <textarea value={commentDraft} onChange={event => setCommentDraft(event.target.value)} placeholder="Napisz komentarz do zaznaczonego fragmentu…" aria-label="Treść nowego komentarza" />
+          <div><span>{pendingCommentRange ? `Fragment: „${editorRef.current?.ctx.get(editorViewCtx).state.doc.textBetween(pendingCommentRange.from, pendingCommentRange.to, ' ').slice(0, 100)}”` : 'Zaznacz tekst w notatce, aby przypiąć komentarz.'}</span><button type="button" onClick={addComment} disabled={!pendingCommentRange || !commentDraft.trim()}>Dodaj komentarz</button></div>
+        </div>
+        {comments.length ? comments.map(comment => <article className={`markdown-comment-card ${comment.resolved ? 'is-resolved' : ''}`} key={comment.id}>
+          <button type="button" className="markdown-comment-anchor" onClick={() => focusComment(comment)}><span>„{comment.excerpt || 'zaznaczenie'}”</span><small>{comment.text || 'Starsze oznaczenie komentarza'}</small></button>
+          <button type="button" onClick={() => toggleCommentResolved(comment)}>{comment.resolved ? 'Otwórz ponownie' : 'Rozwiąż'}</button>
+        </article>) : <span className="markdown-assist-empty">Zaznacz fragment i wybierz „Komentarz” z menu kontekstowego.</span>}
+      </section>}
+      {assistPanel === 'shortcuts' && <section className="markdown-assist-panel markdown-shortcuts-panel" aria-label="Skróty klawiszowe">
+        <strong>Ustaw skróty dla narzędzi edytora</strong>
+        {([['find', 'Znajdź i zamień'], ['outline', 'Spis nagłówków'], ['comments', 'Komentarze'], ['focus', 'Tryb skupienia']] as [ShortcutAction, string][]).map(([action, label]) => <div className="markdown-shortcut-row" key={action}><span>{label}</span><kbd>{capturingShortcut === action ? 'Naciśnij skrót…' : shortcuts[action]}</kbd><button type="button" onClick={() => setCapturingShortcut(action)}>{capturingShortcut === action ? 'Oczekiwanie…' : 'Zmień'}</button></div>)}
+        <small>Użyj Ctrl/⌘, Alt lub Shift razem z klawiszem. Esc anuluje zmianę.</small>
+      </section>}
+      {assistPanel === 'validation' && <section className="markdown-assist-panel markdown-validation-panel" aria-label="Sprawdzanie treści">
+        <strong>Kontrola podczas pisania</strong>
+        <label><input type="checkbox" checked={validationOptions.spelling} onChange={event => setValidationOptions(current => ({ ...current, spelling: event.target.checked }))} />Sprawdzanie pisowni systemu</label>
+        <label><input type="checkbox" checked={validationOptions.markdown} onChange={event => setValidationOptions(current => ({ ...current, markdown: event.target.checked }))} />Kontroluj składnię Markdown i linki</label>
+        {validationOptions.markdown && <ul>{currentMarkdownWarnings.map((warning, index) => <li key={`${warning}:${index}`} className={warning.startsWith('Nie znaleziono problemów') ? 'is-valid' : ''}>{warning}</li>)}</ul>}
+      </section>}
+    </div>}
+    <div className="markdown-editor-canvas" ref={root} />
     {contextMenu && <MarkdownContextMenu {...contextMenu} noteActions={noteActions} onNoteAction={action => { setContextMenu(null); onNoteAction(action) }} onAction={applyAction} onDismiss={() => setContextMenu(null)} />}
     {!tableContextMenu && hoverTable && <MarkdownTableMenu
       key={`hover-${hoverTable.tablePos}-${hoverTable.row}-${hoverTable.column}`}

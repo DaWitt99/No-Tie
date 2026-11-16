@@ -62,12 +62,36 @@ export const highlightSchema = $markSchema('noteHighlight', () => ({
 
 const commentAttr = $markAttr('noteComment')
 export const noteCommentSchema = $markSchema('noteComment', () => ({
-  parseDOM: [{ tag: 'span[data-no-tie-comment="true"]' }],
-  toDOM: () => ['span', { class: 'note-comment-mark', 'data-no-tie-comment': 'true', title: 'Komentarz Markdown' }, 0],
+  attrs: {
+    id: { default: '', validate: 'string' },
+    text: { default: '', validate: 'string' },
+    resolved: { default: false, validate: 'boolean' },
+  },
+  parseDOM: [{
+    tag: 'span[data-no-tie-comment="true"]',
+    getAttrs: dom => {
+      const element = dom as HTMLElement
+      let text = element.dataset.noTieCommentText ?? ''
+      try { text = decodeURIComponent(text) } catch { /* keep older plain-text comment attributes */ }
+      return { id: element.dataset.noTieCommentId ?? '', text, resolved: element.dataset.noTieCommentResolved === 'true' }
+    },
+  }],
+  toDOM: mark => ['span', {
+    class: `note-comment-mark${mark.attrs.resolved ? ' is-resolved' : ''}`,
+    'data-no-tie-comment': 'true',
+    'data-no-tie-comment-id': mark.attrs.id,
+    'data-no-tie-comment-text': encodeURIComponent(mark.attrs.text || ''),
+    'data-no-tie-comment-resolved': String(Boolean(mark.attrs.resolved)),
+    title: mark.attrs.text || 'Komentarz do zaznaczenia',
+  }, 0],
   parseMarkdown: {
     match: node => node.type === 'noTieComment',
     runner: (state, node, type) => {
-      state.openMark(type)
+      state.openMark(type, {
+        id: typeof node.id === 'string' ? decodeCommentText(node.id) : '',
+        text: typeof node.commentText === 'string' ? decodeCommentText(node.commentText) : '',
+        resolved: node.resolved === true || node.resolved === 'true',
+      })
       state.next(node.children)
       state.closeMark(type)
     },
@@ -75,7 +99,10 @@ export const noteCommentSchema = $markSchema('noteComment', () => ({
   toMarkdown: {
     match: mark => mark.type.name === 'noteComment',
     runner: (state, mark, node) => {
-      state.addNode('html', undefined, '<span data-no-tie-comment="true">', { data: { noTieGenerated: true } })
+      const id = encodeURIComponent(String(mark.attrs.id ?? ''))
+      const text = encodeURIComponent(String(mark.attrs.text ?? ''))
+      const resolved = Boolean(mark.attrs.resolved)
+      state.addNode('html', undefined, `<span data-no-tie-comment="true" data-no-tie-comment-id="${id}" data-no-tie-comment-text="${text}" data-no-tie-comment-resolved="${resolved}">`, { data: { noTieGenerated: true } })
       state.next(node.mark(mark.type.removeFromSet(node.marks)))
       state.addNode('html', undefined, '</span>', { data: { noTieGenerated: true } })
       return true
@@ -97,9 +124,22 @@ function inlineMarker(value: string): { type: string; close: (candidate: string)
     return { type: 'noTieHighlight', attrs: { color: normalizeHighlightColor(color) }, close: candidate => /^<\/mark\s*>$/i.test(candidate) }
   }
   if (/^<span\b[^>]*data-no-tie-comment=["']true["'][^>]*>$/i.test(value)) {
-    return { type: 'noTieComment', close: candidate => /^<\/span\s*>$/i.test(candidate) }
+    const attribute = (name: string) => value.match(new RegExp(`\\b${name}=["']([^"']*)["']`, 'i'))?.[1]
+    return {
+      type: 'noTieComment',
+      attrs: {
+        id: attribute('data-no-tie-comment-id') ?? '',
+        commentText: attribute('data-no-tie-comment-text') ?? '',
+        resolved: attribute('data-no-tie-comment-resolved') === 'true' ? 'true' : 'false',
+      },
+      close: candidate => /^<\/span\s*>$/i.test(candidate),
+    }
   }
   return undefined
+}
+
+function decodeCommentText(value: string): string {
+  try { return decodeURIComponent(value) } catch { return value }
 }
 
 function transformInlineMarkdown(node: MarkdownNode): void {

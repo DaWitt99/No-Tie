@@ -15,13 +15,13 @@ type Tool = 'select' | 'lasso' | 'shapeBuilder' | 'rect' | 'roundRect' | 'ellips
 type ArrowMode = 'end' | 'start' | 'both' | 'none'
 type Box = { x: number; y: number; width: number; height: number }
 type ViewBox = Box
-type Point = { x: number; y: number }
+type Point = { x: number; y: number; pressure?: number }
 type ResizeHandle = 'n' | 'ne' | 'e' | 'se' | 's' | 'sw' | 'w' | 'nw'
 type GeometryDraft = { x: string; y: string; width: string; height: string }
 type Snap = { delta: number; target: number } | undefined
 type Interaction =
   | { type: 'draw'; tool: Tool; element: any; id: string; x: number; y: number; keepTool: boolean; startTarget?: string; startAnchor?: string }
-  | { type: 'freehand'; element: any; id: string; points: Point[]; keepTool: boolean }
+  | { type: 'freehand'; element: any; id: string; points: Point[]; keepTool: boolean; pressureSensitive: boolean }
   | { type: 'connect'; line: SVGLineElement; id: string; side: 'start' | 'end'; x: number; y: number; moved: boolean }
   | { type: 'move'; ids: string[]; elements: SVGElement[]; others: Box[]; startX: number; startY: number; lastX: number; lastY: number; bounds: Box; moved: boolean }
   | { type: 'resize'; ids: string[]; targets: { element: SVGElement; source: SVGElement; box: Box }[]; startBounds: Box; handle: ResizeHandle; moved: boolean }
@@ -129,6 +129,33 @@ function smoothStroke(points: Point[]): string {
     path += ` C ${rounded(control1.x)} ${rounded(control1.y)} ${rounded(control2.x)} ${rounded(control2.y)} ${rounded(end.x)} ${rounded(end.y)}`
   }
   return path
+}
+
+function pressureStroke(points: Point[], width: number): string {
+  if (!points.length) return ''
+  const roundedPoint = (value: number) => Number(value.toFixed(2))
+  if (points.length === 1) {
+    const pressure = Math.max(.08, Math.min(1, points[0].pressure ?? .5))
+    const radius = Math.max(.1, width * (.18 + pressure * 1.22) / 2)
+    const x = roundedPoint(points[0].x); const y = roundedPoint(points[0].y); const r = roundedPoint(radius)
+    return `M ${x - r} ${y} a ${r} ${r} 0 1 0 ${r * 2} 0 a ${r} ${r} 0 1 0 ${-r * 2} 0 Z`
+  }
+  const left: Point[] = []
+  const right: Point[] = []
+  points.forEach((point, index) => {
+    const before = points[Math.max(0, index - 1)]
+    const after = points[Math.min(points.length - 1, index + 1)]
+    const dx = after.x - before.x
+    const dy = after.y - before.y
+    const length = Math.hypot(dx, dy) || 1
+    const pressure = Math.max(.08, Math.min(1, point.pressure ?? .5))
+    const radius = Math.max(.1, width * (.18 + pressure * 1.22) / 2)
+    const nx = -dy / length * radius
+    const ny = dx / length * radius
+    left.push({ x: point.x + nx, y: point.y + ny })
+    right.push({ x: point.x - nx, y: point.y - ny })
+  })
+  return [...left, ...right.reverse()].map((point, index) => `${index ? 'L' : 'M'} ${roundedPoint(point.x)} ${roundedPoint(point.y)}`).join(' ') + ' Z'
 }
 
 function simplifyStroke(points: Point[], tolerance: number): Point[] {
@@ -1109,6 +1136,7 @@ export function VectorEditor({
   const history = useRef<string[]>([])
   const redoHistory = useRef<string[]>([])
   const interaction = useRef<Interaction | null>(null)
+  const interactionPointerId = useRef<number | null>(null)
   const textEdit = useRef<TextEdit | null>(null)
   const activePen = useRef<ActivePen | null>(null)
   const finishPenAction = useRef<() => void>(() => {})
@@ -1579,21 +1607,23 @@ export function VectorEditor({
     const point = (event: PointerEvent, snap = true) => {
       const bounds = stage.node.getBoundingClientRect()
       const visible = viewBoxRef.current
+      const pressure = event.pointerType === 'pen' ? (event.pressure > 0 ? event.pressure : .5) : undefined
       const location = {
         x: Number((visible.x + (event.clientX - bounds.left) * visible.width / bounds.width).toFixed(1)),
         y: Number((visible.y + (event.clientY - bounds.top) * visible.height / bounds.height).toFixed(1)),
       }
+      const withPressure = (value: Point): Point => pressure === undefined ? value : { ...value, pressure }
       if (snap && viewOptionsRef.current.snapGeometry) {
         const threshold = Math.max(visible.width / Math.max(bounds.width, 1), visible.height / Math.max(bounds.height, 1)) * 9
         const excludedIds = toolRef.current === 'select' ? selectedIdsRef.current : []
         const target = findGeometrySnap(stage.node, location, excludedIds, threshold)
-        if (target) return { x: Number(target.x.toFixed(1)), y: Number(target.y.toFixed(1)) }
+        if (target) return withPressure({ x: Number(target.x.toFixed(1)), y: Number(target.y.toFixed(1)) })
       }
       if (snap && viewOptionsRef.current.snap) {
         const size = Math.max(2, viewOptionsRef.current.gridSize)
-        return { x: Math.round(location.x / size) * size, y: Math.round(location.y / size) * size }
+        return withPressure({ x: Math.round(location.x / size) * size, y: Math.round(location.y / size) * size })
       }
-      return location
+      return withPressure(location)
     }
 
     const beginTextEdit = (location: { x: number; y: number }, existing?: SVGElement, keepTool = false) => {
@@ -1701,16 +1731,23 @@ export function VectorEditor({
     }
 
     const start = (event: PointerEvent) => {
+      if (interactionPointerId.current !== null && interactionPointerId.current !== event.pointerId) {
+        event.preventDefault()
+        return
+      }
       const currentTool = toolRef.current
       const clickedObject = findObjectTarget(stage.node, event.target)
       const allowTextDoubleClick = currentTool === 'select'
-        && event.pointerType === 'mouse'
+        && (event.pointerType === 'mouse' || event.pointerType === 'pen')
         && clickedObject?.tagName.toLowerCase() === 'text'
       if (!allowTextDoubleClick) event.preventDefault()
       stage.node.focus({ preventScroll: true })
-      const location = point(event, !(event.button === 1 || spacePanRef.current) && currentTool !== 'lasso')
-      if (event.button === 1 || spacePanRef.current) {
+      const penPan = event.pointerType === 'pen' && event.button === 2
+      const wantsPan = event.button === 1 || spacePanRef.current || penPan
+      const location = point(event, !wantsPan && currentTool !== 'lasso')
+      if (wantsPan) {
         stage.node.setPointerCapture(event.pointerId)
+        interactionPointerId.current = event.pointerId
         interaction.current = { type: 'pan', startClientX: event.clientX, startClientY: event.clientY, viewBox: { ...viewBoxRef.current } }
         stage.node.setAttribute('data-panning', 'true')
         return
@@ -1725,6 +1762,7 @@ export function VectorEditor({
         if (guideHit && (guides[guideIndex]?.locked || guideLockAll)) return
         if (rulerHit) setViewOptions(current => ({ ...current, guides: [...current.guides, { axis, value: axis === 'x' ? location.x : location.y, locked: guideLockAll }] }))
         stage.node.setPointerCapture(event.pointerId)
+        interactionPointerId.current = event.pointerId
         interaction.current = { type: 'guide', index: guideIndex, axis, moved: false, created: Boolean(rulerHit) }
         return
       }
@@ -1778,6 +1816,7 @@ export function VectorEditor({
         return
       }
       stage.node.setPointerCapture(event.pointerId)
+      interactionPointerId.current = event.pointerId
       if (currentTool === 'lasso') {
         interaction.current = { type: 'lasso', points: [location], additive: event.shiftKey, initialIds: event.shiftKey ? selectedIdsRef.current : [], moved: false }
         renderOverlay(stage, selectedIdsRef.current, { lasso: [location] })
@@ -1800,7 +1839,11 @@ export function VectorEditor({
         const created = startShape(currentTool, startPoint)
         if (created) {
           if (currentTool === 'freehand') {
-            interaction.current = { type: 'freehand', element: created.element, id: created.id, points: [startPoint], keepTool: event.ctrlKey }
+            const pressureSensitive = event.pointerType === 'pen'
+            if (pressureSensitive) {
+              created.element.attr({ d: pressureStroke([startPoint], strokeWidthRef.current), fill: strokeColorRef.current, stroke: 'none', 'data-pressure-stroke': 'true' })
+            }
+            interaction.current = { type: 'freehand', element: created.element, id: created.id, points: [startPoint], keepTool: event.ctrlKey, pressureSensitive }
           } else {
             if (anchor && anchorPoint) created.element.attr({ 'data-start-target': anchor.id, 'data-start-anchor': anchor.anchor })
             interaction.current = { type: 'draw', tool: currentTool, element: created.element, id: created.id, x: startPoint.x, y: startPoint.y, keepTool: event.ctrlKey, startTarget: anchor?.id, startAnchor: anchor?.anchor }
@@ -1917,6 +1960,7 @@ export function VectorEditor({
     }
 
     const move = (event: PointerEvent) => {
+      if (interactionPointerId.current !== null && interactionPointerId.current !== event.pointerId) return
       const current = interaction.current
       if (!current) return
       const location = point(event, current.type !== 'pan' && current.type !== 'lasso')
@@ -1968,7 +2012,7 @@ export function VectorEditor({
           const last = current.points.at(-1)!
           if (Math.hypot(samplePoint.x - last.x, samplePoint.y - last.y) >= 1.2 && current.points.length < 1600) current.points.push(samplePoint)
         })
-        current.element.attr('d', smoothStroke(current.points))
+        current.element.attr('d', current.pressureSensitive ? pressureStroke(current.points, strokeWidthRef.current) : smoothStroke(current.points))
         const bounds = pointsBounds(current.points)
         renderOverlay(stage, [current.id], { dimensions: bounds })
       } else if (current.type === 'pen-node') {
@@ -2103,9 +2147,14 @@ export function VectorEditor({
     }
 
     const finish = (event: PointerEvent) => {
+      if (interactionPointerId.current !== null && interactionPointerId.current !== event.pointerId) return
       const current = interaction.current
-      if (!current) return
+      if (!current) {
+        if (interactionPointerId.current === event.pointerId) interactionPointerId.current = null
+        return
+      }
       interaction.current = null
+      interactionPointerId.current = null
       if (current.type === 'pan') {
         stage.node.removeAttribute('data-panning')
       } else if (current.type === 'guide') {
@@ -2132,7 +2181,7 @@ export function VectorEditor({
         const location = point(event)
         const last = current.points.at(-1)!
         if (Math.hypot(location.x - last.x, location.y - last.y) >= 0.5 && current.points.length < 1600) current.points.push(location)
-        current.element.attr('d', smoothStroke(current.points))
+        current.element.attr('d', current.pressureSensitive ? pressureStroke(current.points, strokeWidthRef.current) : smoothStroke(current.points))
         const bounds = pointsBounds(current.points)
         if (smartDrawingRef.current) {
           if (smartShapeIdRef.current !== 'auto') {
@@ -2148,12 +2197,22 @@ export function VectorEditor({
                   const value = current.element.node.getAttribute(attribute)
                   if (value !== null) replacement.setAttribute(attribute, value)
                 }
+                if (current.pressureSensitive) {
+                  replacement.setAttribute('stroke', strokeColorRef.current)
+                  replacement.setAttribute('stroke-width', String(strokeWidthRef.current))
+                }
                 replacement.setAttribute('x1', rounded(recognition.start.x)); replacement.setAttribute('y1', rounded(recognition.start.y))
                 replacement.setAttribute('x2', rounded(recognition.end.x)); replacement.setAttribute('y2', rounded(recognition.end.y))
                 current.element.node.replaceWith(replacement)
               } else {
                 const replacement = createLibraryShapeNode(recognition.shapeId, shapeTransformBox(recognition.shapeId, recognition.box), current.element.node, current.id)
                 replacement.setAttribute('fill', fillEnabledRef.current ? fillColorRef.current : 'none')
+                if (current.pressureSensitive) {
+                  replacement.setAttribute('stroke', strokeColorRef.current)
+                  replacement.setAttribute('stroke-width', String(strokeWidthRef.current))
+                  replacement.setAttribute('stroke-linecap', 'round')
+                  replacement.setAttribute('stroke-linejoin', 'round')
+                }
                 current.element.node.replaceWith(replacement)
               }
             }
@@ -3887,7 +3946,7 @@ export function VectorEditor({
     { id: 'arrow', label: 'Strzałka', icon: ArrowRight },
     { id: 'polygon', label: 'Wielokąt', icon: Triangle },
     { id: 'shape', label: 'Kształty biblioteczne', icon: Shapes },
-    { id: 'freehand', label: 'Pędzel odręczny', icon: Pencil },
+    { id: 'freehand', label: 'Pędzel odręczny · nacisk rysika zmienia szerokość kreski', icon: Pencil },
     { id: 'pen', label: 'Pióro Béziera, kliknij punkty i Enter, aby zakończyć', icon: Pencil },
     { id: 'text', label: 'Tekst na planszy', icon: Type },
   ]

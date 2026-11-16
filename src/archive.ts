@@ -2,7 +2,7 @@ import { invoke, isTauri } from '@tauri-apps/api/core'
 import { strFromU8, strToU8, unzipSync, zipSync } from 'fflate'
 import { markdownToNote, noteToMarkdown, sanitizeSvg } from './content'
 import { fileFingerprint } from './fileFingerprint'
-import { isFlashcardStudyMode, type Flashcard, type FlashcardTrashEntry, type Note, type NoteAsset, type NoteAttachment, type NoteAttachmentHistory, type NoteAttachmentReference, type NoteTemplate, type NoteVersion, type ReviewSession, type SavedSearch, type TrashEntry, type WorkspaceBackup } from './types'
+import { isFlashcardStudyMode, type Flashcard, type FlashcardTrashEntry, type Note, type NoteAsset, type NoteAttachment, type NoteAttachmentHistory, type NoteAttachmentReference, type NoteCollection, type NoteTemplate, type NoteVersion, type OrganizationSettings, type ReviewSession, type SavedSearch, type SavedWorkspaceLayout, type TrashEntry, type WorkspaceBackup } from './types'
 
 const NOTE_VERSIONS_FILE = '.no-tie-versions.json'
 const WORKSPACE_BACKUP_FILE = '.no-tie-workspace.json'
@@ -43,7 +43,7 @@ export function buildArchive(notes: Note[], assets: NoteAsset[], versions: NoteV
     })
     const transcripts = Object.fromEntries(attachments.filter(attachment => attachment.noteId === note.id && attachment.transcript?.trim()).map(attachment => [attachment.fileName, attachment.transcript]))
     if (Object.keys(transcripts).length) files[`${folder}/${ATTACHMENT_TRANSCRIPTS_FILE}`] = strToU8(JSON.stringify(transcripts, null, 2))
-    const attachmentMetadata = Object.fromEntries(attachments.filter(attachment => attachment.noteId === note.id).map(attachment => [attachment.fileName, { mimeType: attachment.mimeType, extractedText: attachment.extractedText, transcriptSegments: attachment.transcriptSegments, pdfAnnotations: attachment.pdfAnnotations }]))
+    const attachmentMetadata = Object.fromEntries(attachments.filter(attachment => attachment.noteId === note.id).map(attachment => [attachment.fileName, { mimeType: attachment.mimeType, extractedText: attachment.extractedText, transcriptSegments: attachment.transcriptSegments, pdfAnnotations: attachment.pdfAnnotations, author: attachment.author, documentDate: attachment.documentDate, description: attachment.description }]))
     if (Object.keys(attachmentMetadata).length) files[`${folder}/${ATTACHMENT_METADATA_FILE}`] = strToU8(JSON.stringify(attachmentMetadata, null, 2))
   })
   if (workspace) files[WORKSPACE_BACKUP_FILE] = strToU8(JSON.stringify(workspace, null, 2))
@@ -162,7 +162,25 @@ function parseWorkspaceBackup(bytes: Uint8Array): WorkspaceBackup {
     if (typeof entry.id !== 'string' || typeof entry.batchId !== 'string' || typeof entry.deletedAt !== 'number' || !entry.note || typeof entry.note.id !== 'string') return []
     return [{ id: entry.id, batchId: entry.batchId, deletedAt: entry.deletedAt, note: entry.note, assets: Array.isArray(entry.assets) ? entry.assets : [], attachments: Array.isArray(entry.attachments) ? entry.attachments : [] }]
   }) : []
-  return { reviewSessions, savedSearches, noteTemplates, folderColors, flashcards, flashcardTrash, trash }
+  const organizationSource = source.organization && typeof source.organization === 'object' ? source.organization as Partial<OrganizationSettings> : undefined
+  const organization: OrganizationSettings | undefined = organizationSource ? {
+    noteOrder: Array.isArray(organizationSource.noteOrder) ? [...new Set(organizationSource.noteOrder.filter((id): id is string => typeof id === 'string'))] : [],
+    folderOrder: Array.isArray(organizationSource.folderOrder) ? [...new Set(organizationSource.folderOrder.filter((folder): folder is string => typeof folder === 'string'))] : [],
+    folderTemplateDefaults: organizationSource.folderTemplateDefaults && typeof organizationSource.folderTemplateDefaults === 'object' ? Object.fromEntries(Object.entries(organizationSource.folderTemplateDefaults).filter((entry): entry is [string, string] => typeof entry[0] === 'string' && typeof entry[1] === 'string')) : {},
+    workspaces: Array.isArray(organizationSource.workspaces) ? organizationSource.workspaces.flatMap(item => {
+      if (!item || typeof item !== 'object') return []
+      const layout = item as Partial<SavedWorkspaceLayout>
+      if (typeof layout.id !== 'string' || typeof layout.name !== 'string') return []
+      return [{ id: layout.id, name: layout.name, selectedNoteId: typeof layout.selectedNoteId === 'string' ? layout.selectedNoteId : '', activeFilter: typeof layout.activeFilter === 'string' ? layout.activeFilter : 'all', activeReviewSessionId: typeof layout.activeReviewSessionId === 'string' ? layout.activeReviewSessionId : '', allNotesPreset: layout.allNotesPreset === 'favorites' || layout.allNotesPreset === 'recent' ? layout.allNotesPreset : 'all', allNotesFolderPreset: typeof layout.allNotesFolderPreset === 'string' ? layout.allNotesFolderPreset : '', noteGridEnabled: layout.noteGridEnabled === true, noteGridIds: Array.isArray(layout.noteGridIds) ? layout.noteGridIds.filter((id): id is string => typeof id === 'string').slice(0, 4) : [], editorMode: layout.editorMode === 'source' ? 'source' : 'rendered', showLibrary: layout.showLibrary !== false, showMainSidebar: layout.showMainSidebar !== false, showChat: layout.showChat === true, createdAt: typeof layout.createdAt === 'number' ? layout.createdAt : Date.now() }]
+    }) : [],
+    collections: Array.isArray(organizationSource.collections) ? organizationSource.collections.flatMap(item => {
+      if (!item || typeof item !== 'object') return []
+      const collection = item as Partial<NoteCollection>
+      if (typeof collection.id !== 'string' || typeof collection.name !== 'string' || !collection.name.trim()) return []
+      return [{ id: collection.id, name: collection.name.trim(), noteIds: Array.isArray(collection.noteIds) ? [...new Set(collection.noteIds.filter((id): id is string => typeof id === 'string'))] : [] }]
+    }) : [],
+  } : undefined
+  return { reviewSessions, savedSearches, noteTemplates, folderColors, flashcards, flashcardTrash, trash, organization }
 }
 
 function parseAttachmentHistory(bytes: Uint8Array): NoteAttachmentHistory[] {
@@ -214,7 +232,7 @@ export function parseArchive(bytes: Uint8Array): { notes: Note[]; assets: NoteAs
     const baseDirectory = lastSlash < 0 ? '' : path.slice(0, lastSlash)
     const basePrefix = baseDirectory ? `${baseDirectory}/` : ''
     let attachmentTranscripts: Record<string, string> = {}
-    let attachmentMetadata: Record<string, Partial<Pick<NoteAttachment, 'mimeType' | 'extractedText' | 'transcriptSegments' | 'pdfAnnotations'>>> = {}
+    let attachmentMetadata: Record<string, Partial<Pick<NoteAttachment, 'mimeType' | 'extractedText' | 'transcriptSegments' | 'pdfAnnotations' | 'author' | 'documentDate' | 'description'>>> = {}
     const transcriptFile = files[`${basePrefix}${ATTACHMENT_TRANSCRIPTS_FILE}`]
     if (transcriptFile) {
       try {
@@ -282,7 +300,7 @@ export function parseArchive(bytes: Uint8Array): { notes: Note[]; assets: NoteAs
     }
     if (!noTieLayout) for (const [externalPath, internalPath] of externalPathMappings) {
       const escaped = externalPath.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
-      note.content = note.content.replace(new RegExp(`\\((?:\\./)?${escaped}(?:#[^)]*)?\\)`, 'g'), `(${internalPath})`)
+      note.content = note.content.replace(new RegExp(`\\((?:\\./)?${escaped}(#[^)]*)?\\)`, 'g'), `(${internalPath}$1)`)
     }
   }
   if (!notes.length) throw new Error('W paczce nie znaleziono plików Markdown.')

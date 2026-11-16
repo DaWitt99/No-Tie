@@ -36,6 +36,9 @@ export type NoteAttachment = {
   dataUrl: string
   size: number
   contentHash?: string
+  author?: string
+  documentDate?: string
+  description?: string
   transcript?: string
   transcriptSegments?: { startMs: number; endMs?: number; text: string; speaker?: string }[]
   extractedText?: string
@@ -130,6 +133,96 @@ export type NoteTemplate = {
   content: string
 }
 
+export type NoteCollection = {
+  id: string
+  name: string
+  noteIds: string[]
+}
+
+export type SavedWorkspaceLayout = {
+  id: string
+  name: string
+  selectedNoteId: string
+  activeFilter: string
+  activeReviewSessionId: string
+  allNotesPreset: 'all' | 'favorites' | 'recent'
+  allNotesFolderPreset: string
+  noteGridEnabled: boolean
+  noteGridIds: string[]
+  editorMode: 'rendered' | 'source'
+  showLibrary: boolean
+  showMainSidebar: boolean
+  showChat: boolean
+  createdAt: number
+}
+
+export type AiTaskType = 'chat' | 'summary' | 'tasks' | 'flashcards' | 'quiz' | 'selection-edit' | 'metadata' | 'flashcard-assist' | 'ocr'
+export type AiOutputFormat = 'markdown' | 'bullets' | 'json' | 'table'
+
+export type AiPromptProfile = {
+  id: string
+  task: AiTaskType
+  name: string
+  prompt: string
+}
+
+export type AiOutputTemplate = {
+  id: string
+  name: string
+  format: AiOutputFormat
+  instruction: string
+}
+
+export type AiOutputRating = {
+  task: AiTaskType
+  rating: 1 | -1
+  comment: string
+  createdAt: number
+}
+
+export type AiDiagnostic = {
+  task: AiTaskType
+  model: string
+  contextCharacters: number
+  contextImages: number
+  durationMs: number
+  error?: string
+  createdAt: number
+}
+
+export type AiPreferences = {
+  promptProfiles: AiPromptProfile[]
+  outputTemplates: AiOutputTemplate[]
+  folderAccessRestricted: boolean
+  allowedFolders: string[]
+  fallbackModel: string
+  ratings: AiOutputRating[]
+  lastDiagnostic?: AiDiagnostic
+}
+
+export const DEFAULT_AI_PREFERENCES: AiPreferences = {
+  promptProfiles: [],
+  outputTemplates: [
+    { id: 'default-markdown', name: 'Markdown', format: 'markdown', instruction: 'Użyj czytelnego Markdown z nagłówkami tam, gdzie pomagają w odbiorze.' },
+    { id: 'default-bullets', name: 'Lista punktowana', format: 'bullets', instruction: 'Przedstaw wynik jako zwięzłą listę punktowaną. Każdy punkt ma zawierać jedną myśl.' },
+    { id: 'default-json', name: 'JSON', format: 'json', instruction: 'Zwróć poprawny JSON bez ogrodzenia kodu ani dodatkowego tekstu.' },
+    { id: 'default-table', name: 'Tabela', format: 'table', instruction: 'Przedstaw wynik w czytelnej tabeli Markdown z krótkimi nazwami kolumn.' },
+  ],
+  folderAccessRestricted: false,
+  allowedFolders: [],
+  fallbackModel: '',
+  ratings: [],
+}
+
+export type OrganizationSettings = {
+  noteOrder: string[]
+  folderOrder: string[]
+  folderTemplateDefaults: Record<string, string>
+  workspaces: SavedWorkspaceLayout[]
+  collections: NoteCollection[]
+  aiPreferences?: AiPreferences
+}
+
 export type ReviewSessionStatus = 'ready' | 'running' | 'paused' | 'completed'
 
 export type ReviewSession = {
@@ -153,4 +246,5 @@ export type WorkspaceBackup = {
   flashcards?: Flashcard[]
   flashcardTrash?: FlashcardTrashEntry[]
   trash?: TrashEntry[]
+  organization?: OrganizationSettings
 }

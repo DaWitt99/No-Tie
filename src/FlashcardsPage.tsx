@@ -357,6 +357,7 @@ function safeJsonValue(value: string): unknown {
 
 function FlashcardImageOcclusionField({ value, onChange }: { value?: FlashcardImageOcclusion; onChange: (value: FlashcardImageOcclusion | undefined) => void }) {
   const input = useRef<HTMLInputElement>(null)
+  const activePointerId = useRef<number | null>(null)
   const [start, setStart] = useState<{ x: number; y: number } | null>(null)
   const [draft, setDraft] = useState<{ x: number; y: number; width: number; height: number } | null>(null)
   const [imageError, setImageError] = useState('')
@@ -374,22 +375,31 @@ function FlashcardImageOcclusionField({ value, onChange }: { value?: FlashcardIm
     reader.readAsDataURL(file)
   }
   function beginDraw(event: ReactPointerEvent<HTMLDivElement>) {
-    if (!value) return
+    if (!value || activePointerId.current !== null) return
     const point = imagePoint(event)
     setStart(point)
     setDraft({ ...point, width: 0, height: 0 })
     event.currentTarget.setPointerCapture(event.pointerId)
+    activePointerId.current = event.pointerId
   }
   function moveDraw(event: ReactPointerEvent<HTMLDivElement>) {
-    if (!start) return
+    if (!start || activePointerId.current !== event.pointerId) return
     const point = imagePoint(event)
     setDraft({ x: Math.min(start.x, point.x), y: Math.min(start.y, point.y), width: Math.abs(point.x - start.x), height: Math.abs(point.y - start.y) })
   }
   function finishDraw(event: ReactPointerEvent<HTMLDivElement>) {
-    if (!start || !value) return
+    if (activePointerId.current !== event.pointerId) return
+    activePointerId.current = null
+    if (!start || !value) { setStart(null); setDraft(null); return }
     const point = imagePoint(event)
     const region = { x: Math.min(start.x, point.x), y: Math.min(start.y, point.y), width: Math.abs(point.x - start.x), height: Math.abs(point.y - start.y) }
     if (region.width >= .018 && region.height >= .018) onChange({ ...value, regions: [...value.regions, { ...region, id: crypto.randomUUID(), label: '' }] })
+    setStart(null)
+    setDraft(null)
+  }
+  function cancelDraw(event: ReactPointerEvent<HTMLDivElement>) {
+    if (activePointerId.current !== event.pointerId) return
+    activePointerId.current = null
     setStart(null)
     setDraft(null)
   }
@@ -398,7 +408,7 @@ function FlashcardImageOcclusionField({ value, onChange }: { value?: FlashcardIm
     <div className="flashcard-occlusion-heading"><strong>Zakryj fragmenty obrazu</strong><button type="button" className="button secondary" onClick={() => input.current?.click()}>{value ? 'Zmień obraz' : 'Wybierz obraz'}</button><input ref={input} type="file" accept="image/png,image/jpeg,image/gif,image/webp" hidden onChange={event => { readImage(event.currentTarget.files?.[0]); event.currentTarget.value = '' }} /></div>
     {imageError && <small className="flashcard-form-error" role="alert">{imageError}</small>}
     {value ? <>
-      <div className="flashcard-occlusion-draw-area" onPointerDown={beginDraw} onPointerMove={moveDraw} onPointerUp={finishDraw} onPointerCancel={() => { setStart(null); setDraft(null) }}>
+      <div className="flashcard-occlusion-draw-area" onPointerDown={beginDraw} onPointerMove={moveDraw} onPointerUp={finishDraw} onPointerCancel={cancelDraw}>
         <FlashcardOcclusionImage value={value} reveal={false} fallback="Odpowiedź" />
         {draft && <span className="flashcard-occlusion-mask draft" style={{ left: `${draft.x * 100}%`, top: `${draft.y * 100}%`, width: `${draft.width * 100}%`, height: `${draft.height * 100}%` }} />}
       </div>

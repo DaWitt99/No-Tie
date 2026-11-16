@@ -1,4 +1,4 @@
-import { lazy, Suspense, useState } from 'react'
+import { lazy, Suspense, useState, type WheelEvent as ReactWheelEvent } from 'react'
 import { Code2, Eye, FileText, Folder, X } from 'lucide-react'
 import { MarkdownSourceEditor } from './MarkdownSourceEditor'
 import type { MarkdownNoteAction } from './MarkdownContextMenu'
@@ -37,7 +37,7 @@ export function NoteGridView({
   onSelectionChange: (noteId: string, mode: 'rendered' | 'source', text: string) => void
   onNoteAction: (action: string, noteId: string, mode: 'rendered' | 'source') => void
   onOpenNote: (target: string, sourceNoteId: string) => void
-  onOpenAttachment: (fileName: string, sourceNoteId: string) => void
+  onOpenAttachment: (fileName: string, sourceNoteId: string, page?: number, fragment?: string) => void
 }) {
   const [search, setSearch] = useState('')
   const availableNotes = allNotes.filter(note => !notes.some(openNote => openNote.id === note.id))
@@ -46,7 +46,7 @@ export function NoteGridView({
 
   return <section className="note-grid-view" aria-label="Siatka edycji notatek">
     <div className="note-grid-toolbar">
-      <div className="note-grid-description"><strong>Siatka notatek</strong><span>{notes.length} z 4 otwartych · wybierz kartę, aby ustawić fokus</span></div>
+      <div className="note-grid-description"><strong>Siatka notatek</strong><span>{notes.length} z 4 otwartych · wybierz kartę, aby ustawić fokus · Ctrl + kółko: powiększenie</span></div>
       <details className="note-grid-add-menu">
         <summary className="button secondary"><FileText size={14} />Dodaj notatkę</summary>
         <div className="note-grid-picker" role="group" aria-label="Dodaj notatkę do siatki">
@@ -79,7 +79,7 @@ export function NoteGridView({
         onSelectionChange={(mode, text) => onSelectionChange(note.id, mode, text)}
         onNoteAction={(action, mode) => onNoteAction(action, note.id, mode)}
         onOpenNote={target => onOpenNote(target, note.id)}
-        onOpenAttachment={fileName => onOpenAttachment(fileName, note.id)}
+        onOpenAttachment={(fileName, page, fragment) => onOpenAttachment(fileName, note.id, page, fragment)}
       />)}
       {!notes.length && <div className="note-grid-empty"><FileText size={20} /><strong>Dodaj notatki do siatki</strong><span>Otwórz kilka notatek obok siebie i pracuj nad każdą niezależnie.</span></div>}
     </div>
@@ -117,14 +117,22 @@ function NoteGridCard({
   onSelectionChange: (mode: 'rendered' | 'source', text: string) => void
   onNoteAction: (action: string, mode: 'rendered' | 'source') => void
   onOpenNote: (target: string) => void
-  onOpenAttachment: (fileName: string) => void
+  onOpenAttachment: (fileName: string, page?: number, fragment?: string) => void
 }) {
   const [mode, setMode] = useState<'rendered' | 'source'>('rendered')
+  const [zoom, setZoom] = useState(1)
   const noteActions = getNoteActions(note.id, mode)
-  return <article className={`note-grid-card ${active ? 'is-focused' : ''}`} onPointerDownCapture={onFocus} onFocusCapture={onFocus} aria-label={`Notatka: ${note.title || 'Bez tytułu'}`}>
+  function handleEditorWheel(event: ReactWheelEvent<HTMLDivElement>) {
+    if (!event.ctrlKey) return
+    event.preventDefault()
+    onFocus()
+    const deltaY = event.deltaMode === 1 ? event.deltaY * 16 : event.deltaMode === 2 ? event.deltaY * 120 : event.deltaY
+    setZoom(current => Math.max(.6, Math.min(2.25, current * Math.pow(1.1, -deltaY / 120))))
+  }
+  return <article className={`note-grid-card ${active ? 'is-focused' : ''}`} data-note-grid-slot={note.id} title="Upuść tu notatkę z panelu Foldery i pliki, aby otworzyć ją w tym polu" onPointerDownCapture={onFocus} onFocusCapture={onFocus} aria-label={`Notatka: ${note.title || 'Bez tytułu'}`}>
     <header className="note-grid-card-header">
       <span className="note-grid-card-mark"><FileText size={15} /></span>
-      <span className="note-grid-card-heading"><strong>{note.folder || 'Bez folderu'}</strong><small>{active ? 'Ma fokus' : 'Kliknij, aby ustawić fokus'}</small></span>
+      <span className="note-grid-card-heading"><strong>{note.folder || 'Bez folderu'}</strong><small>{active ? 'Ma fokus' : 'Kliknij, aby ustawić fokus'} · {Math.round(zoom * 100)}%</small></span>
       <div className="note-grid-card-actions" role="group" aria-label="Widok notatki">
         <button type="button" className={`view-mode-button ${mode === 'rendered' ? 'active' : ''}`} title="Widok wizualny" aria-label={`Pokaż ${note.title} jako widok wizualny`} aria-pressed={mode === 'rendered'} onClick={() => { onFocus(); setMode('rendered') }}><Eye size={15} /></button>
         <button type="button" className={`view-mode-button ${mode === 'source' ? 'active' : ''}`} title="Surowy Markdown" aria-label={`Pokaż ${note.title} jako Markdown`} aria-pressed={mode === 'source'} onClick={() => { onFocus(); setMode('source') }}><Code2 size={15} /></button>
@@ -133,10 +141,12 @@ function NoteGridCard({
     </header>
     <div className="note-grid-card-title"><input value={note.title} onChange={event => onPatch({ title: event.target.value })} onFocus={onFocus} aria-label={`Tytuł notatki ${note.title || 'Bez tytułu'}`} placeholder="Tytuł notatki" /></div>
     <div className="note-grid-card-meta"><Folder size={12} /><span>{note.folder || 'Bez folderu'}</span><span aria-hidden="true">·</span><span>{note.tags.length ? note.tags.join(', ') : 'Bez tagów'}</span></div>
-    <div className="note-grid-card-editor">
-      {mode === 'source'
-        ? <MarkdownSourceEditor noteId={note.id} markdown={note.content} onChange={markdown => onPatch({ content: markdown })} onSelectionChange={text => onSelectionChange('source', text)} noteActions={noteActions} onNoteAction={action => onNoteAction(action, 'source')} />
-        : <Suspense fallback={<div className="editor-loading">Otwieram edytor…</div>}><MarkdownEditor key={`${note.id}-${revision}`} noteId={note.id} markdown={note.content} assets={assets} attachments={attachments} revision={revision} onChange={markdown => onPatch({ content: markdown })} onSelectionChange={text => onSelectionChange('rendered', text)} onOpenNote={onOpenNote} onOpenAttachment={onOpenAttachment} notes={allNotes} allAssets={allAssets} noteActions={noteActions} onNoteAction={action => onNoteAction(action, 'rendered')} /></Suspense>}
+    <div className="note-grid-card-editor" onWheel={handleEditorWheel} title="Ctrl + kółko myszy zmienia powiększenie treści">
+      <div className="note-grid-card-zoom" style={{ zoom }}>
+        {mode === 'source'
+          ? <MarkdownSourceEditor noteId={note.id} markdown={note.content} onChange={markdown => onPatch({ content: markdown })} onSelectionChange={text => onSelectionChange('source', text)} noteActions={noteActions} onNoteAction={action => onNoteAction(action, 'source')} />
+          : <Suspense fallback={<div className="editor-loading">Otwieram edytor…</div>}><MarkdownEditor key={`${note.id}-${revision}`} noteId={note.id} markdown={note.content} assets={assets} attachments={attachments} revision={revision} onChange={markdown => onPatch({ content: markdown })} onSelectionChange={text => onSelectionChange('rendered', text)} onOpenNote={onOpenNote} onOpenAttachment={onOpenAttachment} notes={allNotes} allAssets={allAssets} noteActions={noteActions} onNoteAction={action => onNoteAction(action, 'rendered')} /></Suspense>}
+      </div>
     </div>
   </article>
 }

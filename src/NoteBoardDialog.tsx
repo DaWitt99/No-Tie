@@ -1,4 +1,4 @@
-import { useState, type PointerEvent as ReactPointerEvent } from 'react'
+import { useRef, useState, type PointerEvent as ReactPointerEvent } from 'react'
 import { ArrowLeft, ArrowRight, Columns3, GripVertical } from 'lucide-react'
 import type { Note } from './types'
 
@@ -8,12 +8,14 @@ type NoteBoardDrag = { noteId: string; pointerId: number; startStatus: NoteWorkf
 
 export function NoteBoardPage({ notes, onSetStatus, onOpen, onClose }: { notes: Note[]; onSetStatus: (noteId: string, status: NoteWorkflowStatus) => void; onOpen: (noteId: string) => void; onClose: () => void }) {
   const [drag, setDrag] = useState<NoteBoardDrag | null>(null)
+  const activePointerId = useRef<number | null>(null)
   const [dropTarget, setDropTarget] = useState<NoteWorkflowStatus | null>(null)
 
   function startDrag(note: Note, event: ReactPointerEvent<HTMLButtonElement>) {
-    if (event.button !== 0) return
+    if (event.button !== 0 || activePointerId.current !== null) return
     event.preventDefault()
     event.currentTarget.setPointerCapture(event.pointerId)
+    activePointerId.current = event.pointerId
     setDrag({
       noteId: note.id,
       pointerId: event.pointerId,
@@ -40,11 +42,14 @@ export function NoteBoardPage({ notes, onSetStatus, onOpen, onClose }: { notes: 
     const active = drag.active || Math.hypot(event.clientX - drag.startX, event.clientY - drag.startY) >= 6
     if (active && targetStatus && targetStatus !== drag.startStatus) onSetStatus(drag.noteId, targetStatus)
     if (event.currentTarget.hasPointerCapture(event.pointerId)) event.currentTarget.releasePointerCapture(event.pointerId)
+    activePointerId.current = null
     setDrag(null)
     setDropTarget(null)
   }
 
-  function cancelDrag() {
+  function cancelDrag(event: ReactPointerEvent<HTMLButtonElement>) {
+    if (activePointerId.current !== event.pointerId) return
+    activePointerId.current = null
     setDrag(null)
     setDropTarget(null)
   }

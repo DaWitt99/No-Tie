@@ -249,3 +249,42 @@ export async function streamOllamaMessage(baseUrl: string, model: string, messag
     throw connectionError(error, baseUrl)
   }
 }
+
+export async function streamOllamaMessageWithFallback(
+  baseUrl: string,
+  model: string,
+  fallbackModel: string,
+  messages: OllamaMessage[],
+  onChunk: (content: string) => void,
+  signal?: AbortSignal,
+  generationOptions?: OllamaGenerationOptions,
+  onFallback?: (model: string) => void,
+  onModelUsed?: (model: string) => void,
+): Promise<void> {
+  let primaryOutput = ''
+  let primaryError: unknown
+  try {
+    await streamOllamaMessage(baseUrl, model, messages, chunk => { primaryOutput += chunk; onChunk(chunk) }, signal, generationOptions)
+    if (signal?.aborted) return
+    if (primaryOutput.trim()) { onModelUsed?.(model); return }
+    primaryError = new Error('Model nie zwrócił odpowiedzi.')
+  } catch (error) {
+    if (signal?.aborted) throw error
+    primaryError = error
+  }
+  const backup = fallbackModel.trim()
+  if (!backup || backup === model.trim()) throw primaryError instanceof Error ? primaryError : new Error(String(primaryError || 'Nie udało się uzyskać odpowiedzi modelu.'))
+  onFallback?.(backup)
+  let fallbackOutput = ''
+  try {
+    await streamOllamaMessage(baseUrl, backup, messages, chunk => { fallbackOutput += chunk; onChunk(chunk) }, signal, generationOptions)
+    if (signal?.aborted) return
+    if (!fallbackOutput.trim()) throw new Error('Model zapasowy nie zwrócił odpowiedzi.')
+    onModelUsed?.(backup)
+  } catch (error) {
+    if (signal?.aborted) throw error
+    const detail = error instanceof Error ? error.message : String(error)
+    const firstDetail = primaryError instanceof Error ? primaryError.message : String(primaryError || 'brak odpowiedzi')
+    throw new Error(`Model główny nie odpowiedział (${firstDetail}); model zapasowy „${backup}” również zawiódł (${detail}).`)
+  }
+}

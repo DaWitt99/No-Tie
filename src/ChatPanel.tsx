@@ -1,7 +1,7 @@
 import { Fragment, useEffect, useRef, useState, type ReactNode } from 'react'
-import { Bot, Check, FileText, LoaderCircle, MessageSquare, Search, Send, Settings2, Sparkles, Square, Trash2, UserRound, X } from 'lucide-react'
-import type { Note, NoteAsset, NoteAttachment } from './types'
-import { imageAttachmentToPngBase64, streamOllamaMessage, svgToPngBase64, type OllamaMessage } from './ollama'
+import { Bot, Check, FileText, LoaderCircle, MessageSquare, Search, Send, Settings2, Sparkles, Square, ThumbsDown, ThumbsUp, Trash2, UserRound, X } from 'lucide-react'
+import { DEFAULT_AI_PREFERENCES, type AiDiagnostic, type AiPreferences, type AiOutputRating, type Note, type NoteAsset, type NoteAttachment } from './types'
+import { imageAttachmentToPngBase64, streamOllamaMessageWithFallback, svgToPngBase64, type OllamaMessage } from './ollama'
 
 const MAX_LIBRARY_CONTEXT_CHARACTERS = 48_000
 const MAX_LIBRARY_CONTEXT_NOTES = 50
@@ -11,6 +11,7 @@ type ChatPanelProps = {
   open: boolean
   baseUrl: string
   model: string
+  preferences?: AiPreferences
   note?: Note
   notes: Note[]
   assets: NoteAsset[]
@@ -20,6 +21,9 @@ type ChatPanelProps = {
   contextPickerEnabled?: boolean
   citationsEnabled?: boolean
   onOpenCitation?: (noteTitle: string, fileName?: string, page?: number, folder?: string) => void
+  onRunTask?: (label: string, run: (signal: AbortSignal) => Promise<void>) => Promise<void>
+  onDiagnostic?: (diagnostic: AiDiagnostic) => void
+  onRateOutput?: (task: AiOutputRating['task'], rating: 1 | -1, comment: string) => void
 }
 
 type ChatLine = Pick<OllamaMessage, 'role' | 'content'> & { responseDurationMs?: number }
@@ -140,7 +144,7 @@ function selectLibraryNotes(notes: Note[], query: string, pinnedNoteId?: string,
   }
 }
 
-export function ChatPanel({ open, baseUrl, model, note, notes, assets, attachments, onClose, onOpenSettings, contextPickerEnabled = true, citationsEnabled = true, onOpenCitation }: ChatPanelProps) {
+export function ChatPanel({ open, baseUrl, model, note, notes, assets, attachments, preferences = DEFAULT_AI_PREFERENCES, onClose, onOpenSettings, contextPickerEnabled = true, citationsEnabled = true, onOpenCitation, onRunTask, onDiagnostic, onRateOutput }: ChatPanelProps) {
   const [conversations, setConversations] = useState<Record<string, ChatLine[]>>({})
   const [conversationErrors, setConversationErrors] = useState<Record<string, string>>({})
   const [draft, setDraft] = useState('')
@@ -149,6 +153,10 @@ export function ChatPanel({ open, baseUrl, model, note, notes, assets, attachmen
   const [manualContextIds, setManualContextIds] = useState<string[]>([])
   const [showSourcePicker, setShowSourcePicker] = useState(false)
   const [sourceQuery, setSourceQuery] = useState('')
+  const [selectedProfileId, setSelectedProfileId] = useState('')
+  const [selectedTemplateId, setSelectedTemplateId] = useState('default-markdown')
+  const [ratingComment, setRatingComment] = useState('')
+  const [ratedMessage, setRatedMessage] = useState('')
   const [sending, setSending] = useState(false)
   const [responseStartedAt, setResponseStartedAt] = useState<number | null>(null)
   const [responseElapsedMs, setResponseElapsedMs] = useState(0)
@@ -188,13 +196,19 @@ export function ChatPanel({ open, baseUrl, model, note, notes, assets, attachmen
     setConversations(current => ({ ...current, [requestKey]: nextMessages }))
     localStorage.setItem(requestKey, JSON.stringify(nextMessages))
     setDraft('')
+    setRatedMessage('')
+    setRatingComment('')
     setConversationErrors(current => ({ ...current, [requestKey]: '' }))
     const requestController = new AbortController()
     activeRequestController.current = requestController
     setSending(true)
     let answer = ''
     let responseStart: number | null = null
+    let cancelledByQueue = false
     setConversations(current => ({ ...current, [requestKey]: [...nextMessages, { role: 'assistant', content: '' }] }))
+    let selectedModel = model
+    let diagnosticContextCharacters = content.length
+    let diagnosticImageCount = 0
 
     const explicitNotes = contextPickerEnabled && manualContextIds.length ? notes.filter(item => manualContextIds.includes(item.id)) : undefined
     const librarySelection = !explicitNotes && useLibraryContext ? selectLibraryNotes(notes, content, useNoteContext ? note?.id : undefined, attachments) : undefined
@@ -225,10 +239,11 @@ export function ChatPanel({ open, baseUrl, model, note, notes, assets, attachmen
       const assembledContext = `${noteHeader}\n\n${audioContext ? `${audioContext}\n\n` : ''}Treść notatki:\n${note.content}`
       context.push(`${assembledContext.slice(0, 48_000)}${assembledContext.length > 48_000 ? '\n[notatka i transkrypcje skrócone do limitu kontekstu]' : ''}`)
     }
-    const prompt: OllamaMessage[] = context.length ? [{
-      role: 'system',
-      content: `Jesteś lokalnym asystentem w aplikacji do notatek. Odpowiadaj po polsku, chyba że użytkownik poprosi inaczej. Nie twierdź, że zmieniłeś notatki. Gdy korzystasz z podanych źródeł, opieraj odpowiedź na ich treści i nie dopowiadaj brakujących informacji.${citationsEnabled ? ' Przy ważnych twierdzeniach dodawaj krótkie cytowania dokładnie w formacie [źródło: Tytuł notatki | folder: Nazwa folderu | plik: nazwa.pdf | strona: 3] albo [źródło: Tytuł notatki | folder: Nazwa folderu]. Pomijaj pola folder, plik lub strona, jeśli nie są dostępne. Podawaj wyłącznie źródła obecne w kontekście.' : ''}\n\n${context.join('\n\n')}`,
-    }] : []
+    const selectedProfile = preferences.promptProfiles.find(profile => profile.id === selectedProfileId && profile.task === 'chat')
+    const selectedTemplate = preferences.outputTemplates.find(template => template.id === selectedTemplateId)
+    const learnedPreferences = preferences.ratings.filter(rating => rating.task === 'chat').slice(-3).map(rating => `${rating.rating > 0 ? 'Zachowaj jakość poprzedniej odpowiedzi' : 'Unikaj problemu z poprzedniej odpowiedzi'}${rating.comment ? `: ${rating.comment}` : ''}`).join('\n')
+    const systemInstructions = `Jesteś lokalnym asystentem w aplikacji do notatek. Odpowiadaj po polsku, chyba że użytkownik poprosi inaczej. Nie twierdź, że zmieniłeś notatki. Gdy korzystasz z podanych źródeł, opieraj odpowiedź na ich treści i nie dopowiadaj brakujących informacji.${citationsEnabled && context.length ? ' Przy ważnych twierdzeniach dodawaj krótkie cytowania dokładnie w formacie [źródło: Tytuł notatki | folder: Nazwa folderu | plik: nazwa.pdf | strona: 3] albo [źródło: Tytuł notatki | folder: Nazwa folderu]. Pomijaj pola folder, plik lub strona, jeśli nie są dostępne. Podawaj wyłącznie źródła obecne w kontekście.' : ''}${selectedProfile?.prompt ? `\nProfil promptu: ${selectedProfile.prompt}` : ''}${selectedTemplate?.instruction ? `\nFormat odpowiedzi „${selectedTemplate.name}”: ${selectedTemplate.instruction}` : ''}${learnedPreferences ? `\nPreferencje z wcześniejszych ocen:\n${learnedPreferences}` : ''}${context.length ? `\n\n${context.join('\n\n')}` : ''}`
+    const prompt: OllamaMessage[] = [{ role: 'system', content: systemInstructions }]
 
     try {
       const noteById = new Map(notes.map(item => [item.id, item]))
@@ -292,19 +307,31 @@ export function ChatPanel({ open, baseUrl, model, note, notes, assets, attachmen
       } else if (currentUserMessage?.role === 'user' && omittedVisuals) {
         currentUserMessage.content += `\n\nNiektóre pliki wizualne pominięto z powodu limitu ${MAX_CONTEXT_IMAGES} obrazów.`
       }
+      diagnosticContextCharacters += context.reduce((total, block) => total + block.length, 0) + systemInstructions.length
+      diagnosticImageCount = encodedImages.length
       responseStart = performance.now()
       setResponseElapsedMs(0)
       setResponseStartedAt(responseStart)
-      await streamOllamaMessage(baseUrl, model, requestMessages, chunk => {
-        answer += chunk
-        setConversations(current => ({ ...current, [requestKey]: [...nextMessages, { role: 'assistant', content: answer }] }))
-      }, requestController.signal)
+      const execute = async (queueSignal: AbortSignal) => {
+        const signal = AbortSignal.any([requestController.signal, queueSignal])
+        signal.addEventListener('abort', () => { if (queueSignal.aborted) cancelledByQueue = true }, { once: true })
+        await streamOllamaMessageWithFallback(baseUrl, model, preferences.fallbackModel, requestMessages, chunk => {
+          answer += chunk
+          setConversations(current => ({ ...current, [requestKey]: [...nextMessages, { role: 'assistant', content: answer }] }))
+        }, signal, undefined, fallback => {
+          answer = ''
+          selectedModel = fallback
+          setConversations(current => ({ ...current, [requestKey]: [...nextMessages, { role: 'assistant', content: '' }] }))
+        }, used => { selectedModel = used })
+      }
+      await (onRunTask ? onRunTask(`Czat · ${note?.title || 'rozmowa'}`, execute) : execute(requestController.signal))
       const responseDurationMs = responseStart === null ? undefined : performance.now() - responseStart
       const complete = answer ? [...nextMessages, { role: 'assistant' as const, content: answer, responseDurationMs }] : nextMessages
       localStorage.setItem(requestKey, JSON.stringify(complete))
       setConversations(current => ({ ...current, [requestKey]: complete }))
+      onDiagnostic?.({ task: 'chat', model: selectedModel, contextCharacters: diagnosticContextCharacters, contextImages: diagnosticImageCount, durationMs: responseDurationMs ?? 0, createdAt: Date.now() })
     } catch (sendError) {
-      if (requestController.signal.aborted) {
+      if (requestController.signal.aborted || cancelledByQueue) {
         const partial = answer ? [...nextMessages, { role: 'assistant' as const, content: answer }] : nextMessages
         localStorage.setItem(requestKey, JSON.stringify(partial))
         setConversations(current => ({ ...current, [requestKey]: partial }))
@@ -316,6 +343,7 @@ export function ChatPanel({ open, baseUrl, model, note, notes, assets, attachmen
       localStorage.setItem(requestKey, JSON.stringify(partial))
       setConversations(current => ({ ...current, [requestKey]: partial }))
       setConversationErrors(current => ({ ...current, [requestKey]: message }))
+      onDiagnostic?.({ task: 'chat', model: selectedModel, contextCharacters: diagnosticContextCharacters, contextImages: diagnosticImageCount, durationMs: responseDurationMs ?? 0, error: message, createdAt: Date.now() })
     } finally {
       if (activeRequestController.current === requestController) activeRequestController.current = null
       setResponseStartedAt(null)
@@ -365,10 +393,12 @@ export function ChatPanel({ open, baseUrl, model, note, notes, assets, attachmen
             {messages.length === 0 && <div className="chat-welcome"><div className="chat-empty-mark"><Sparkles size={21} /></div><strong>{note ? 'Porozmawiaj o tej notatce' : 'Zacznij rozmowę'}</strong><p>{note ? `Kontekst: ${note.title}` : 'Wiadomości są wysyłane do lokalnego serwera Ollama.'}</p></div>}
             {messages.map((message, index) => {
               const isCurrentResponse = sending && responseStartedAt !== null && index === messages.length - 1 && message.role === 'assistant'
+              const canRate = !sending && index === messages.length - 1 && message.role === 'assistant' && Boolean(message.content.trim()) && onRateOutput
+              const ratingKey = `${storageKey}:${index}:${message.content.length}`
               const responseDuration = isCurrentResponse ? responseElapsedMs : message.responseDurationMs
               return <article key={`${index}-${message.role}`} className={`chat-message ${message.role}`}>
               <div className="chat-message-avatar">{message.role === 'user' ? <UserRound size={14} /> : <Bot size={14} />}</div>
-              <div className="chat-message-body"><div className="chat-message-label"><span>{message.role === 'user' ? 'Ty' : 'Asystent'}</span>{message.role === 'assistant' && responseDuration !== undefined && <time className="chat-response-time" title="Czas odpowiedzi AI" aria-label={`Czas odpowiedzi AI: ${formatResponseTime(responseDuration)}`} aria-live="off">{formatResponseTime(responseDuration)}</time>}</div><p>{message.role === 'assistant' && citationsEnabled ? renderCitations(message.content, onOpenCitation) : message.content}{sending && index === messages.length - 1 && message.role === 'assistant' && message.content && <span className="chat-stream-cursor" aria-hidden="true">▍</span>}</p></div>
+              <div className="chat-message-body"><div className="chat-message-label"><span>{message.role === 'user' ? 'Ty' : 'Asystent'}</span>{message.role === 'assistant' && responseDuration !== undefined && <time className="chat-response-time" title="Czas odpowiedzi AI" aria-label={`Czas odpowiedzi AI: ${formatResponseTime(responseDuration)}`} aria-live="off">{formatResponseTime(responseDuration)}</time>}</div><p>{message.role === 'assistant' && citationsEnabled ? renderCitations(message.content, onOpenCitation) : message.content}{sending && index === messages.length - 1 && message.role === 'assistant' && message.content && <span className="chat-stream-cursor" aria-hidden="true">▍</span>}</p>{canRate && ratedMessage !== ratingKey && <div className="chat-output-rating"><input value={ratingComment} onChange={event => setRatingComment(event.target.value)} placeholder="Opcjonalna wskazówka" aria-label="Komentarz do oceny odpowiedzi" /><button type="button" className="chat-icon-button" aria-label="Dobra odpowiedź" onClick={() => { onRateOutput?.('chat', 1, ratingComment); setRatedMessage(ratingKey) }}><ThumbsUp size={14} /></button><button type="button" className="chat-icon-button" aria-label="Słaba odpowiedź" onClick={() => { onRateOutput?.('chat', -1, ratingComment); setRatedMessage(ratingKey) }}><ThumbsDown size={14} /></button></div>}</div>
             </article>
             })}
             {sending && messages.at(-1)?.role === 'assistant' && !messages.at(-1)?.content && <div className="chat-thinking"><LoaderCircle size={15} className="spin" />Model przygotowuje odpowiedź…</div>}
@@ -379,6 +409,7 @@ export function ChatPanel({ open, baseUrl, model, note, notes, assets, attachmen
             {contextPickerEnabled && <div className="chat-source-picker-control"><button type="button" className="chat-source-picker-button" onClick={() => setShowSourcePicker(true)}><FileText size={13} />Wybierz źródła{manualContextIds.length ? ` · ${manualContextIds.length}` : ''}</button>{manualContextIds.length > 0 && <button type="button" className="chat-source-clear" onClick={() => setManualContextIds([])}>Wyczyść</button>}</div>}
             {manualContextIds.length > 0 && <span className="chat-library-context-info">Wiadomość użyje ręcznie wybranych notatek jako głównego kontekstu.</span>}
             {useLibraryContext && <span className="chat-library-context-info">Dobieram notatki do pytania; dołączę maks. 20 obrazów lub stron PDF.</span>}
+            <div className="chat-ai-options"><label><span>Profil promptu</span><select value={selectedProfileId} onChange={event => setSelectedProfileId(event.target.value)} disabled={sending}><option value="">Domyślny</option>{preferences.promptProfiles.filter(profile => profile.task === 'chat').map(profile => <option key={profile.id} value={profile.id}>{profile.name}</option>)}</select></label><label><span>Format</span><select value={selectedTemplateId} onChange={event => setSelectedTemplateId(event.target.value)} disabled={sending}>{preferences.outputTemplates.map(template => <option key={template.id} value={template.id}>{template.name}</option>)}</select></label></div>
             {error && <p className="chat-error" role="alert">{error}</p>}
             <div className="chat-compose-box"><textarea value={draft} onChange={event => setDraft(event.target.value)} onKeyDown={event => { if (event.key === 'Enter' && !event.shiftKey) { event.preventDefault(); void sendMessage() } }} placeholder="Napisz wiadomość…" aria-label="Wiadomość do lokalnego modelu" rows={3} disabled={sending} />{sending ? <button type="button" className="chat-stop-button" onClick={stopGeneration} title="Zatrzymaj generowanie odpowiedzi" aria-label="Zatrzymaj generowanie odpowiedzi"><Square size={13} /><span>Zatrzymaj</span></button> : <button type="submit" disabled={!draft.trim()} title="Wyślij" aria-label="Wyślij wiadomość"><Send size={16} /></button>}</div>
             <span className="chat-local-note"><MessageSquare size={12} />Rozmowa pozostaje na tym urządzeniu</span>

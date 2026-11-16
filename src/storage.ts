@@ -3,7 +3,7 @@ import { documentDir, join } from '@tauri-apps/api/path'
 import { exists, mkdir, readDir, readFile, readTextFile, remove, rename, stat, writeFile, writeTextFile } from '@tauri-apps/plugin-fs'
 import { markdownToNote, noteToMarkdown, sanitizeSvg } from './content'
 import { fileFingerprint } from './fileFingerprint'
-import { isFlashcardStudyMode, type Flashcard, type FlashcardTrashEntry, type Note, type NoteAsset, type NoteAttachment, type NoteAttachmentHistory, type NoteAttachmentReference, type NoteTemplate, type NoteVersion, type ReviewSession, type ReviewSessionStatus, type SavedSearch, type TrashEntry } from './types'
+import { DEFAULT_AI_PREFERENCES, isFlashcardStudyMode, type AiPreferences, type Flashcard, type FlashcardTrashEntry, type Note, type NoteAsset, type NoteAttachment, type NoteAttachmentHistory, type NoteAttachmentReference, type NoteCollection, type NoteTemplate, type NoteVersion, type OrganizationSettings, type ReviewSession, type ReviewSessionStatus, type SavedSearch, type SavedWorkspaceLayout, type TrashEntry } from './types'
 
 const DATABASE = 'no-tie-notes'
 const DATABASE_VERSION = 4
@@ -16,6 +16,7 @@ const NOTE_TEMPLATES_FILE = '.no-tie-templates.json'
 const NOTE_ATTACHMENT_HISTORY_FILE = '.no-tie-attachment-history.json'
 const NOTE_ATTACHMENT_TRANSCRIPTS_FILE = '.no-tie-attachment-transcripts.json'
 const NOTE_ATTACHMENT_METADATA_FILE = '.no-tie-attachment-metadata.json'
+const ORGANIZATION_SETTINGS_FILE = '.no-tie-organization-settings.json'
 const ADVANCED_DATA_FILE = '.no-tie-advanced.json'
 const AUTO_BACKUP_FOLDER = '_kopie-zapasowe'
 const MAX_NOTE_VERSIONS = 80
@@ -306,6 +307,89 @@ export async function saveNoteTemplates(templates: NoteTemplate[]): Promise<void
   const normalized = normalizeNoteTemplates(templates)
   if (!usesNativeFiles) return withStore<IDBValidKey>('settings', 'readwrite', store => store.put(normalized, 'noteTemplates')).then(() => {})
   await writeTextFile(await join(await getNativeNotesRoot(), NOTE_TEMPLATES_FILE), JSON.stringify(normalized, null, 2))
+}
+
+const emptyOrganizationSettings = (): OrganizationSettings => ({ noteOrder: [], folderOrder: [], folderTemplateDefaults: {}, workspaces: [], collections: [], aiPreferences: DEFAULT_AI_PREFERENCES })
+
+function normalizeOrganizationSettings(value: unknown): OrganizationSettings {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return emptyOrganizationSettings()
+  const source = value as Partial<OrganizationSettings>
+  const folderTemplateDefaults = source.folderTemplateDefaults && typeof source.folderTemplateDefaults === 'object' && !Array.isArray(source.folderTemplateDefaults)
+    ? Object.fromEntries(Object.entries(source.folderTemplateDefaults).filter(([folder, templateId]) => folder.trim() && typeof templateId === 'string')) as Record<string, string>
+    : {}
+  const workspaces: SavedWorkspaceLayout[] = Array.isArray(source.workspaces) ? source.workspaces.flatMap(item => {
+    if (!item || typeof item !== 'object') return []
+    const layout = item as Partial<SavedWorkspaceLayout>
+    if (typeof layout.id !== 'string' || typeof layout.name !== 'string') return []
+    return [{
+      id: layout.id,
+      name: layout.name,
+      selectedNoteId: typeof layout.selectedNoteId === 'string' ? layout.selectedNoteId : '',
+      activeFilter: typeof layout.activeFilter === 'string' ? layout.activeFilter : 'all',
+      activeReviewSessionId: typeof layout.activeReviewSessionId === 'string' ? layout.activeReviewSessionId : '',
+      allNotesPreset: layout.allNotesPreset === 'favorites' || layout.allNotesPreset === 'recent' ? layout.allNotesPreset : 'all',
+      allNotesFolderPreset: typeof layout.allNotesFolderPreset === 'string' ? layout.allNotesFolderPreset : '',
+      noteGridEnabled: layout.noteGridEnabled === true,
+      noteGridIds: Array.isArray(layout.noteGridIds) ? [...new Set(layout.noteGridIds.filter((id): id is string => typeof id === 'string'))].slice(0, 4) : [],
+      editorMode: layout.editorMode === 'source' ? 'source' : 'rendered',
+      showLibrary: layout.showLibrary !== false,
+      showMainSidebar: layout.showMainSidebar !== false,
+      showChat: layout.showChat === true,
+      createdAt: typeof layout.createdAt === 'number' && Number.isFinite(layout.createdAt) ? layout.createdAt : Date.now(),
+    }]
+  }) : []
+  const collections: NoteCollection[] = Array.isArray(source.collections) ? source.collections.flatMap(item => {
+    if (!item || typeof item !== 'object') return []
+    const collection = item as Partial<NoteCollection>
+    if (typeof collection.id !== 'string' || typeof collection.name !== 'string') return []
+    return [{ id: collection.id, name: collection.name.trim(), noteIds: Array.isArray(collection.noteIds) ? [...new Set(collection.noteIds.filter((id): id is string => typeof id === 'string'))] : [] }]
+  }).filter(collection => collection.name) : []
+  const rawAi = source.aiPreferences && typeof source.aiPreferences === 'object' && !Array.isArray(source.aiPreferences) ? source.aiPreferences as Partial<AiPreferences> : {}
+  const aiPreferences: AiPreferences = {
+    promptProfiles: Array.isArray(rawAi.promptProfiles) ? rawAi.promptProfiles.flatMap(profile => {
+      if (!profile || typeof profile !== 'object') return []
+      const item = profile as AiPreferences['promptProfiles'][number]
+      if (typeof item.id !== 'string' || typeof item.name !== 'string' || typeof item.prompt !== 'string' || !['chat', 'summary', 'tasks', 'flashcards', 'quiz', 'selection-edit', 'metadata', 'flashcard-assist', 'ocr'].includes(item.task)) return []
+      return [{ id: item.id, task: item.task, name: item.name.slice(0, 80), prompt: item.prompt.slice(0, 8_000) }]
+    }) : [],
+    outputTemplates: Array.isArray(rawAi.outputTemplates) ? rawAi.outputTemplates.flatMap(template => {
+      if (!template || typeof template !== 'object') return []
+      const item = template as AiPreferences['outputTemplates'][number]
+      if (typeof item.id !== 'string' || typeof item.name !== 'string' || typeof item.instruction !== 'string' || !['markdown', 'bullets', 'json', 'table'].includes(item.format)) return []
+      return [{ id: item.id, name: item.name.slice(0, 80), format: item.format, instruction: item.instruction.slice(0, 8_000) }]
+    }) : DEFAULT_AI_PREFERENCES.outputTemplates,
+    folderAccessRestricted: rawAi.folderAccessRestricted === true,
+    allowedFolders: Array.isArray(rawAi.allowedFolders) ? [...new Set(rawAi.allowedFolders.filter((folder): folder is string => typeof folder === 'string'))] : [],
+    fallbackModel: typeof rawAi.fallbackModel === 'string' ? rawAi.fallbackModel.slice(0, 160) : '',
+    ratings: Array.isArray(rawAi.ratings) ? rawAi.ratings.flatMap(rating => {
+      if (!rating || typeof rating !== 'object') return []
+      const item = rating as AiPreferences['ratings'][number]
+      if (!['chat', 'summary', 'tasks', 'flashcards', 'quiz', 'selection-edit', 'metadata', 'flashcard-assist', 'ocr'].includes(item.task) || (item.rating !== 1 && item.rating !== -1) || typeof item.createdAt !== 'number') return []
+      return [{ task: item.task, rating: item.rating, comment: typeof item.comment === 'string' ? item.comment.slice(0, 1_000) : '', createdAt: item.createdAt }]
+    }).slice(-100) : [],
+    lastDiagnostic: rawAi.lastDiagnostic && typeof rawAi.lastDiagnostic === 'object' ? rawAi.lastDiagnostic : undefined,
+  }
+  return {
+    noteOrder: Array.isArray(source.noteOrder) ? [...new Set(source.noteOrder.filter((id): id is string => typeof id === 'string'))] : [],
+    folderOrder: Array.isArray(source.folderOrder) ? [...new Set(source.folderOrder.filter((folder): folder is string => typeof folder === 'string'))] : [],
+    folderTemplateDefaults,
+    workspaces,
+    collections,
+    aiPreferences,
+  }
+}
+
+export async function getOrganizationSettings(): Promise<OrganizationSettings> {
+  if (!usesNativeFiles) return normalizeOrganizationSettings(await withStore<unknown>('settings', 'readonly', store => store.get('organizationSettings')))
+  const path = await join(await getNativeNotesRoot(), ORGANIZATION_SETTINGS_FILE)
+  if (!await exists(path)) return emptyOrganizationSettings()
+  try { return normalizeOrganizationSettings(JSON.parse(await readTextFile(path))) } catch { return emptyOrganizationSettings() }
+}
+
+export async function saveOrganizationSettings(settings: OrganizationSettings): Promise<void> {
+  const normalized = normalizeOrganizationSettings(settings)
+  if (!usesNativeFiles) return withStore<IDBValidKey>('settings', 'readwrite', store => store.put(normalized, 'organizationSettings')).then(() => {})
+  await writeTextFile(await join(await getNativeNotesRoot(), ORGANIZATION_SETTINGS_FILE), JSON.stringify(normalized, null, 2))
 }
 
 function normalizeTrashEntries(value: unknown): TrashEntry[] {
@@ -781,7 +865,7 @@ async function readNativeAttachmentTranscripts(directory: string): Promise<Recor
   } catch { return {} }
 }
 
-type AttachmentExtraMetadata = Partial<Pick<NoteAttachment, 'extractedText' | 'transcriptSegments' | 'pdfAnnotations' | 'mimeType'>>
+type AttachmentExtraMetadata = Partial<Pick<NoteAttachment, 'extractedText' | 'transcriptSegments' | 'pdfAnnotations' | 'mimeType' | 'author' | 'documentDate' | 'description'>>
 async function readNativeAttachmentMetadata(directory: string): Promise<Record<string, AttachmentExtraMetadata>> {
   const path = await join(directory, NOTE_ATTACHMENT_METADATA_FILE)
   if (!await exists(path)) return {}
@@ -885,6 +969,9 @@ function normalizeAttachmentHistory(value: unknown, noteId: string): NoteAttachm
       dataUrl: attachment.dataUrl,
       size: attachment.size,
       contentHash: typeof attachment.contentHash === 'string' ? attachment.contentHash : fileFingerprint(dataUrlBytes(attachment.dataUrl)),
+      author: typeof attachment.author === 'string' ? attachment.author : undefined,
+      documentDate: typeof attachment.documentDate === 'string' ? attachment.documentDate : undefined,
+      description: typeof attachment.description === 'string' ? attachment.description : undefined,
       transcript: typeof attachment.transcript === 'string' ? attachment.transcript : undefined,
       transcriptSegments: Array.isArray(attachment.transcriptSegments) ? attachment.transcriptSegments : undefined,
       extractedText: typeof attachment.extractedText === 'string' ? attachment.extractedText : undefined,
@@ -953,7 +1040,7 @@ export async function saveAttachment(attachment: NoteAttachment): Promise<IDBVal
   const fileName = safeAttachmentFileName(attachment.fileName)
   await writeFile(await join(assetsDirectory, fileName), dataUrlBytes(attachment.dataUrl))
   if (attachment.transcript !== undefined) await writeNativeAttachmentTranscript(directory, fileName, attachment.transcript)
-  await writeNativeAttachmentMetadata(directory, fileName, { mimeType: attachment.mimeType, extractedText: attachment.extractedText, transcriptSegments: attachment.transcriptSegments, pdfAnnotations: attachment.pdfAnnotations })
+  await writeNativeAttachmentMetadata(directory, fileName, { mimeType: attachment.mimeType, extractedText: attachment.extractedText, transcriptSegments: attachment.transcriptSegments, pdfAnnotations: attachment.pdfAnnotations, author: attachment.author, documentDate: attachment.documentDate, description: attachment.description })
 }
 
 export async function saveAttachmentMetadata(attachment: NoteAttachment, metadata: AttachmentExtraMetadata): Promise<void> {
@@ -991,7 +1078,7 @@ export async function removeAttachment(attachment: NoteAttachment): Promise<void
   if (path && await exists(path)) await remove(path)
   if (directory) {
     await writeNativeAttachmentTranscript(directory, fileName, '')
-    await writeNativeAttachmentMetadata(directory, fileName, { extractedText: undefined, transcriptSegments: undefined, pdfAnnotations: undefined })
+    await writeNativeAttachmentMetadata(directory, fileName, { extractedText: undefined, transcriptSegments: undefined, pdfAnnotations: undefined, author: undefined, documentDate: undefined, description: undefined })
   }
 }
 

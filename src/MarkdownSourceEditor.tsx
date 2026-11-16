@@ -36,6 +36,17 @@ export function MarkdownSourceEditor({
   const contextRange = useRef({ from: 0, to: 0 })
   const selectionRange = useRef({ from: 0, to: 0 })
   const [contextMenu, setContextMenu] = useState<ContextMenuPosition | null>(null)
+  const [focusMode, setFocusMode] = useState(false)
+  const [spellChecking, setSpellChecking] = useState(() => {
+    try { return JSON.parse(localStorage.getItem('no-tie-editor-validation') || '{}').spelling !== false }
+    catch { return true }
+  })
+
+  useEffect(() => {
+    const appShell = textareaRef.current?.closest('.app-shell')
+    appShell?.classList.toggle('note-focus-mode', focusMode)
+    return () => { appShell?.classList.remove('note-focus-mode') }
+  }, [focusMode, noteId])
 
   useEffect(() => {
     const insertWikiLink = (event: Event) => {
@@ -143,7 +154,16 @@ export function MarkdownSourceEditor({
       case 'highlight': wrap('<mark data-no-tie-color="#fff176">', '</mark>'); break
       case 'code': wrap('`', '`', 'kod'); break
       case 'inline-math': wrap('$', '$', 'x'); break
-      case 'comment': wrap('<span data-no-tie-comment="true">', '</span>'); break
+      case 'comment': {
+        if (!selected) { window.alert('Zaznacz tekst, do którego ma być przypięty komentarz.'); break }
+        const text = window.prompt('Treść komentarza do zaznaczenia:')?.trim()
+        if (!text) break
+        const id = encodeURIComponent(crypto.randomUUID())
+        const comment = encodeURIComponent(text)
+        const openingTag = `<span data-no-tie-comment="true" data-no-tie-comment-id="${id}" data-no-tie-comment-text="${comment}" data-no-tie-comment-resolved="false">`
+        replace(`${openingTag}${selected}</span>`, openingTag.length, selected.length)
+        break
+      }
       case 'clear-format': {
         const line = selectedLineRange(markdown, start, end)
         const target = selected || markdown.slice(line.start, line.end)
@@ -204,12 +224,20 @@ export function MarkdownSourceEditor({
     }
   }
 
-  return <>
+  return <div className="markdown-source-editor-wrap">
+    <div className="markdown-source-toolbar"><span>Markdown źródłowy</span><label><input type="checkbox" checked={spellChecking} onChange={event => {
+      const spelling = event.target.checked
+      setSpellChecking(spelling)
+      try {
+        const current = JSON.parse(localStorage.getItem('no-tie-editor-validation') || '{}')
+        localStorage.setItem('no-tie-editor-validation', JSON.stringify({ ...current, spelling }))
+      } catch { /* Keep the browser preference for this session. */ }
+    }} />Sprawdzaj pisownię</label><button type="button" className={focusMode ? 'active' : ''} onClick={() => setFocusMode(value => !value)}>{focusMode ? 'Wyjdź ze skupienia' : 'Tryb skupienia'}</button></div>
     <textarea
       ref={textareaRef}
       className="markdown-source-editor"
       aria-label="Surowy tekst Markdown"
-      spellCheck={false}
+      spellCheck={spellChecking}
       value={markdown}
       onContextMenu={showContextMenu}
       onSelect={event => {
@@ -225,5 +253,5 @@ export function MarkdownSourceEditor({
       }}
     />
     {contextMenu && <MarkdownContextMenu {...contextMenu} noteActions={noteActions} onNoteAction={action => { setContextMenu(null); onNoteAction(action) }} onAction={applyAction} onDismiss={() => setContextMenu(null)} />}
-  </>
+  </div>
 }

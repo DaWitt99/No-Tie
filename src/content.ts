@@ -98,19 +98,24 @@ export function markdownForEditor(content: string, assets: NoteAsset[], attachme
   }, content)
   return withSvg.replace(/(!?)\[([^\]]*)\]\(([^)]+)\)/g, (whole, image: string, label: string, rawHref: string) => {
     const href = rawHref.trim().split(/\s+/, 1)[0]
-    let decodedHref = href
-    try { decodedHref = decodeURIComponent(href) } catch { /* Keep malformed encodings unchanged. */ }
-    const attachment = attachments.find(item => decodedHref === `./assets/${item.fileName}` || href === `./assets/${encodeURIComponent(item.fileName)}`)
+    const path = href.split(/[?#]/, 1)[0]
+    let decodedPath = path
+    try { decodedPath = decodeURIComponent(path) } catch { /* Keep malformed encodings unchanged. */ }
+    const attachment = attachments.find(item => decodedPath === `./assets/${item.fileName}` || path === `./assets/${encodeURIComponent(item.fileName)}`)
     if (!attachment) return whole
     if (image && attachment.mimeType.startsWith('image/')) return `![${label}](${attachment.dataUrl})`
-    return `[${label}](no-tie-attachment:${encodeURIComponent(attachment.fileName)})`
+    return `[${label}](no-tie-attachment:${encodeURIComponent(attachment.fileName)}${href.slice(path.length)})`
   })
 }
 
 export function markdownFromEditor(content: string, assets: NoteAsset[], attachments: NoteAttachment[] = []): string {
-  const withAttachments = attachments.reduce((markdown, attachment) => markdown
-    .replaceAll(`](${attachment.dataUrl})`, `](./assets/${encodeURIComponent(attachment.fileName)})`)
-    .replaceAll(`](no-tie-attachment:${encodeURIComponent(attachment.fileName)})`, `](./assets/${encodeURIComponent(attachment.fileName)})`), content)
+  const withAttachments = attachments.reduce((markdown, attachment) => {
+    const encodedName = encodeURIComponent(attachment.fileName)
+    const escapedName = encodedName.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+    const internalLink = new RegExp(`\\]\\(no-tie-attachment:${escapedName}([?#][^)]*)?\\)`, 'g')
+    return markdown.replaceAll(`](${attachment.dataUrl})`, `](./assets/${encodedName})`)
+      .replace(internalLink, `](./assets/${encodedName}$1)`)
+  }, content)
   const markdown = assets.reduce((value, asset) => {
     return value.replaceAll(`](${svgDataUrl(asset.svg)})`, `](./assets/${asset.fileName})`)
   }, withAttachments)

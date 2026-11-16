@@ -1,14 +1,16 @@
-import { lazy, Suspense, useMemo, useState } from 'react'
+import { lazy, Suspense, useEffect, useMemo, useState } from 'react'
 import { Code2, Eye, FilePlus2, Folder, Tag } from 'lucide-react'
 import type { Note, NoteAsset, NoteTemplate } from './types'
 
 const MarkdownEditor = lazy(() => import('./MarkdownEditor').then(module => ({ default: module.MarkdownEditor })))
 const noop = () => {}
 
-export function CreateNotePage({ templates, folders, initialFolder, notes, assets, onCreate, onClose }: {
+export function CreateNotePage({ templates, folders, initialFolder, folderTemplateDefaults = {}, onSetFolderTemplateDefault, notes, assets, onCreate, onClose }: {
   templates: NoteTemplate[]
   folders: string[]
   initialFolder: string
+  folderTemplateDefaults?: Record<string, string>
+  onSetFolderTemplateDefault?: (folder: string, templateId: string | undefined) => void
   notes: Note[]
   assets: NoteAsset[]
   onCreate: (template: NoteTemplate | undefined, folder: string) => void
@@ -18,6 +20,10 @@ export function CreateNotePage({ templates, folders, initialFolder, notes, asset
   const [folder, setFolder] = useState(initialFolder)
   const [viewMode, setViewMode] = useState<'rendered' | 'markdown'>('rendered')
   const template = templates.find(item => item.id === templateId)
+  useEffect(() => {
+    const defaultId = folderTemplateDefaults[folder] ?? ''
+    setTemplateId(templates.some(item => item.id === defaultId) ? defaultId : '')
+  }, [folder, folderTemplateDefaults, templates])
   const content = template?.content ?? '# Nowa notatka\n\nZacznij pisać…\n'
   const folderOptions = useMemo(() => [...new Set([...folders, initialFolder].filter(Boolean))].sort((a, b) => a.localeCompare(b, 'pl')), [folders, initialFolder])
   const previewId = `create-note-preview-${template?.id ?? 'blank'}`
@@ -33,6 +39,7 @@ export function CreateNotePage({ templates, folders, initialFolder, notes, asset
         <div className="create-note-settings-heading"><span><Folder size={15} /></span><div><h2>Ustawienia</h2><p>Wybierz folder i układ notatki.</p></div></div>
         <label className="create-note-page-field"><span>Folder</span><select value={folder} onChange={event => setFolder(event.target.value)}><option value="">Poziom główny</option>{folderOptions.map(item => <option value={item} key={item}>{item}</option>)}</select></label>
         <label className="create-note-page-field"><span>Szablon</span><select value={templateId} onChange={event => setTemplateId(event.target.value)}><option value="">Pusta notatka</option>{templates.map(item => <option value={item.id} key={item.id}>{item.title}</option>)}</select></label>
+        {onSetFolderTemplateDefault && <button type="button" className={`create-note-default-template ${folderTemplateDefaults[folder] === templateId && templateId ? 'active' : ''}`} disabled={!templateId} onClick={() => onSetFolderTemplateDefault(folder, folderTemplateDefaults[folder] === templateId ? undefined : templateId)}>{folderTemplateDefaults[folder] === templateId && templateId ? 'Domyślny szablon tego folderu' : 'Ustaw jako domyślny w folderze'}</button>}
         {template && <div className="create-note-template-details"><strong>{template.title}</strong><div><Tag size={13} />{template.tags.length ? template.tags.map(tag => <span className="create-note-template-tag" key={tag}>{tag}</span>) : <span className="create-note-template-no-tags">Bez tagów</span>}</div></div>}
         <div className="create-note-settings-tip"><FilePlus2 size={15} /><span>Możesz sprawdzić treść w podglądzie wizualnym albo w Markdown.</span></div>
       </aside>

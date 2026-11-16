@@ -32,7 +32,8 @@ export function usePointerReorder(noteIds: string[], onReorder: (noteIds: string
   }, [noteIds, onReorder])
 
   useEffect(() => {
-    const clear = () => {
+    const clear = (pointerId?: number) => {
+      if (pointerId !== undefined && activeDrag.current?.pointerId !== pointerId) return
       activeDrag.current = null
       setDragState(null)
     }
@@ -54,7 +55,8 @@ export function usePointerReorder(noteIds: string[], onReorder: (noteIds: string
     }
     const finish = (event: PointerEvent) => {
       const drag = activeDrag.current
-      if (drag && event.pointerId === drag.pointerId && drag.active && drag.targetId) {
+      if (!drag || event.pointerId !== drag.pointerId) return
+      if (drag.active && drag.targetId) {
         const ids = noteIdsRef.current
         const sourceIndex = ids.indexOf(drag.sourceId)
         const targetIndex = ids.indexOf(drag.targetId)
@@ -69,16 +71,17 @@ export function usePointerReorder(noteIds: string[], onReorder: (noteIds: string
     }
     document.addEventListener('pointermove', move, true)
     document.addEventListener('pointerup', finish, true)
-    document.addEventListener('pointercancel', clear, true)
+    const cancel = (event: PointerEvent) => clear(event.pointerId)
+    document.addEventListener('pointercancel', cancel, true)
     return () => {
       document.removeEventListener('pointermove', move, true)
       document.removeEventListener('pointerup', finish, true)
-      document.removeEventListener('pointercancel', clear, true)
+      document.removeEventListener('pointercancel', cancel, true)
     }
   }, [])
 
   function startDrag(event: ReactPointerEvent<HTMLElement>, noteId: string) {
-    if (event.button !== 0 || !noteIdsRef.current.includes(noteId)) return
+    if (event.button !== 0 || activeDrag.current || !noteIdsRef.current.includes(noteId)) return
     event.preventDefault()
     event.stopPropagation()
     activeDrag.current = {

@@ -40,7 +40,7 @@ export function searchNotes(notes: Note[], { query, tag = '', folder = '', attac
   return notes.filter(note => {
     const title = normalize(note.title)
     const noteAttachments = attachmentByNote.get(note.id) ?? []
-    const attachmentText = noteAttachments.map(attachment => `${attachment.fileName} ${attachment.transcript ?? ''} ${attachment.extractedText ?? ''}`).join(' ')
+    const attachmentText = noteAttachments.map(attachment => `${attachment.fileName} ${attachment.author ?? ''} ${attachment.documentDate ?? ''} ${attachment.description ?? ''} ${attachment.transcript ?? ''} ${attachment.extractedText ?? ''}`).join(' ')
     const content = normalize(`${note.content} ${attachmentText}`)
     const noteFolder = normalize(note.folder)
     const tags = note.tags.map(normalize)
