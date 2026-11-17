@@ -1,3 +1,4 @@
+import { useEffect, useState } from 'react'
 import { ArrowDown, ArrowUp, ArrowUpRight, BookOpen, Check, Clock3, GripVertical, Pause, Pencil, Play, RotateCcw, Square } from 'lucide-react'
 import { formatReviewDuration, moveReviewNote, reviewNoteTime, reviewTotalTime } from './reviews'
 import { usePointerReorder } from './usePointerReorder'
@@ -6,7 +7,6 @@ import type { Note, ReviewSession } from './types'
 type ReviewSessionViewProps = {
   session: ReviewSession
   notes: Note[]
-  now: number
   onStart: () => void
   onPause: () => void
   onFinish: () => void
@@ -24,7 +24,13 @@ function sessionStatusLabel(status: ReviewSession['status']) {
   return 'Gotowa'
 }
 
-export function ReviewSessionView({ session, notes, now, onStart, onPause, onFinish, onReset, onSetActiveNote, onOpenNote, onEdit, onReorder }: ReviewSessionViewProps) {
+export function ReviewSessionView({ session, notes, onStart, onPause, onFinish, onReset, onSetActiveNote, onOpenNote, onEdit, onReorder }: ReviewSessionViewProps) {
+  const [now, setNow] = useState(() => Date.now())
+  useEffect(() => {
+    if (session.status !== 'running') return
+    const interval = window.setInterval(() => setNow(Date.now()), 1000)
+    return () => window.clearInterval(interval)
+  }, [session.status])
   const { draggingNoteId, dropTargetNoteId, dropAfter, dragPosition, startDrag } = usePointerReorder(session.noteIds, onReorder)
   const noteById = new Map(notes.map(note => [note.id, note]))
   const sessionNotes = session.noteIds.map(id => ({ id, note: noteById.get(id) }))

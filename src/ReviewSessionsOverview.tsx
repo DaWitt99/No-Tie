@@ -1,3 +1,4 @@
+import { useEffect, useState } from 'react'
 import { ArrowUpRight, Clock3, Pencil, Plus, Repeat2 } from 'lucide-react'
 import { formatReviewDuration, reviewTotalTime } from './reviews'
 import type { Note, ReviewSession } from './types'
@@ -12,18 +13,23 @@ function statusLabel(status: ReviewSession['status']) {
 export function ReviewSessionsOverview({
   sessions,
   notes,
-  now,
   onOpen,
   onCreate,
   onEdit,
 }: {
   sessions: ReviewSession[]
   notes: Note[]
-  now: number
   onOpen: (sessionId: string) => void
   onCreate: () => void
   onEdit: (sessionId: string) => void
 }) {
+  const [now, setNow] = useState(() => Date.now())
+  const hasRunningSession = sessions.some(session => session.status === 'running')
+  useEffect(() => {
+    if (!hasRunningSession) return
+    const interval = window.setInterval(() => setNow(Date.now()), 1000)
+    return () => window.clearInterval(interval)
+  }, [hasRunningSession])
   const noteById = new Map(notes.map(note => [note.id, note]))
 
   return <section className="review-sessions-overview">

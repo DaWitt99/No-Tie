@@ -1,8 +1,8 @@
 import { invoke, isTauri } from '@tauri-apps/api/core'
-import { strFromU8, strToU8, unzipSync, zipSync } from 'fflate'
+import { AsyncUnzipInflate, AsyncZipDeflate, strFromU8, strToU8, Unzip, Zip, zipSync } from 'fflate'
+import type { UnzipFile } from 'fflate'
 import { stringify as stringifyYaml } from 'yaml'
 import { markdownToNote, noteToMarkdown, sanitizeSvg } from './content'
-import { fileFingerprint } from './fileFingerprint'
 import { markdownToWikiLinks } from './wikiLinks'
 import { isFlashcardStudyMode, type Flashcard, type FlashcardTrashEntry, type Note, type NoteAsset, type NoteAttachment, type NoteAttachmentHistory, type NoteAttachmentReference, type NoteCollection, type NoteTemplate, type NoteVersion, type OrganizationSettings, type ReviewSession, type SavedSearch, type SavedWorkspaceLayout, type TrashEntry, type WorkspaceBackup } from './types'
 
@@ -11,6 +11,9 @@ const WORKSPACE_BACKUP_FILE = '.no-tie-workspace.json'
 const ATTACHMENT_HISTORY_FILE = '.no-tie-attachment-history.json'
 const ATTACHMENT_TRANSCRIPTS_FILE = '.no-tie-attachment-transcripts.json'
 const ATTACHMENT_METADATA_FILE = '.no-tie-attachment-metadata.json'
+
+export type ArchiveTransferProgress = { stage: 'unpack' | 'parse' | 'compress' | 'save'; completed: number; total: number; current: string; percent: number }
+type ArchiveProgressHandler = (progress: ArchiveTransferProgress) => void
 
 function safeFilePart(value: string): string {
   return value.normalize('NFKD').replace(/[\u0300-\u036f]/g, '').toLowerCase().replace(/[^a-z0-9-]+/g, '-').replace(/^-|-$/g, '').slice(0, 48) || 'notatka'
@@ -24,33 +27,130 @@ function attachmentBytes(dataUrl: string): Uint8Array {
   return bytes
 }
 
-function bytesToDataUrl(bytes: Uint8Array, mimeType: string): string {
-  let binary = ''
-  for (let start = 0; start < bytes.length; start += 0x8000) binary += String.fromCharCode(...bytes.subarray(start, start + 0x8000))
-  return `data:${mimeType};base64,${btoa(binary)}`
+function groupByNoteId<T extends { noteId: string }>(items: T[]): Map<string, T[]> {
+  const groups = new Map<string, T[]>()
+  items.forEach(item => {
+    const group = groups.get(item.noteId)
+    if (group) group.push(item)
+    else groups.set(item.noteId, [item])
+  })
+  return groups
 }
 
-export function buildArchive(notes: Note[], assets: NoteAsset[], versions: NoteVersion[] = [], attachments: NoteAttachment[] = [], workspace?: WorkspaceBackup, attachmentHistory: NoteAttachmentHistory[] = []): Uint8Array {
+async function bytesToDataUrlProgressively(bytes: Uint8Array, mimeType: string, onProgress?: (percent: number) => void): Promise<string> {
+  const encoded: string[] = []
+  const chunkSize = 1024 * 1024 - 1
+  for (let start = 0; start < bytes.length; start += chunkSize) {
+    const end = Math.min(bytes.length, start + chunkSize)
+    let binary = ''
+    for (let offset = start; offset < end; offset += 0x8000) binary += String.fromCharCode(...bytes.subarray(offset, Math.min(end, offset + 0x8000)))
+    encoded.push(btoa(binary))
+    onProgress?.(Math.round((end / Math.max(1, bytes.length)) * 100))
+    if (end < bytes.length) await new Promise<void>(resolve => requestAnimationFrame(() => resolve()))
+  }
+  return `data:${mimeType};base64,${encoded.join('')}`
+}
+
+async function fileFingerprintProgressively(bytes: Uint8Array, onProgress?: (percent: number) => void): Promise<string> {
+  let first = 0x811c9dc5
+  let second = 0x9e3779b9
+  const chunkSize = 1024 * 1024
+  for (let start = 0; start < bytes.length; start += chunkSize) {
+    const end = Math.min(bytes.length, start + chunkSize)
+    for (const byte of bytes.subarray(start, end)) {
+      first = Math.imul(first ^ byte, 0x01000193)
+      second = Math.imul(second ^ byte, 0x85ebca6b)
+    }
+    onProgress?.(Math.round((end / Math.max(1, bytes.length)) * 100))
+    if (end < bytes.length) await new Promise<void>(resolve => requestAnimationFrame(() => resolve()))
+  }
+  return `${bytes.byteLength}:${(first >>> 0).toString(16)}${(second >>> 0).toString(16)}`
+}
+
+function buildArchiveFiles(notes: Note[], assets: NoteAsset[], versions: NoteVersion[] = [], attachments: NoteAttachment[] = [], workspace?: WorkspaceBackup, attachmentHistory: NoteAttachmentHistory[] = []): Record<string, Uint8Array> {
   const files: Record<string, Uint8Array> = {}
+  const assetsByNote = groupByNoteId(assets)
+  const attachmentsByNote = groupByNoteId(attachments)
+  const versionsByNote = groupByNoteId(versions)
   notes.forEach(note => {
     const folder = `notatki/${safeFilePart(note.title)}-${note.id}`
     files[`${folder}/notatka.md`] = strToU8(noteToMarkdown(note))
-    const noteVersions = versions.filter(version => version.noteId === note.id)
+    const noteVersions = versionsByNote.get(note.id) ?? []
     if (noteVersions.length) files[`${folder}/${NOTE_VERSIONS_FILE}`] = strToU8(JSON.stringify(noteVersions, null, 2))
-    assets.filter(asset => asset.noteId === note.id).forEach(asset => {
+    const noteAssets = assetsByNote.get(note.id) ?? []
+    const noteAttachments = attachmentsByNote.get(note.id) ?? []
+    noteAssets.forEach(asset => {
       files[`${folder}/assets/${asset.fileName}`] = strToU8(sanitizeSvg(asset.svg))
     })
-    attachments.filter(attachment => attachment.noteId === note.id).forEach(attachment => {
+    noteAttachments.forEach(attachment => {
       files[`${folder}/assets/${attachment.fileName}`] = attachmentBytes(attachment.dataUrl)
     })
-    const transcripts = Object.fromEntries(attachments.filter(attachment => attachment.noteId === note.id && attachment.transcript?.trim()).map(attachment => [attachment.fileName, attachment.transcript]))
+    const transcripts = Object.fromEntries(noteAttachments.filter(attachment => attachment.transcript?.trim()).map(attachment => [attachment.fileName, attachment.transcript]))
     if (Object.keys(transcripts).length) files[`${folder}/${ATTACHMENT_TRANSCRIPTS_FILE}`] = strToU8(JSON.stringify(transcripts, null, 2))
-    const attachmentMetadata = Object.fromEntries(attachments.filter(attachment => attachment.noteId === note.id).map(attachment => [attachment.fileName, { mimeType: attachment.mimeType, extractedText: attachment.extractedText, transcriptSegments: attachment.transcriptSegments, pdfAnnotations: attachment.pdfAnnotations, author: attachment.author, documentDate: attachment.documentDate, description: attachment.description }]))
+    const attachmentMetadata = Object.fromEntries(noteAttachments.map(attachment => [attachment.fileName, { mimeType: attachment.mimeType, extractedText: attachment.extractedText, transcriptSegments: attachment.transcriptSegments, pdfAnnotations: attachment.pdfAnnotations, author: attachment.author, documentDate: attachment.documentDate, description: attachment.description }]))
     if (Object.keys(attachmentMetadata).length) files[`${folder}/${ATTACHMENT_METADATA_FILE}`] = strToU8(JSON.stringify(attachmentMetadata, null, 2))
   })
   if (workspace) files[WORKSPACE_BACKUP_FILE] = strToU8(JSON.stringify(workspace, null, 2))
   if (attachmentHistory.length) files[ATTACHMENT_HISTORY_FILE] = strToU8(JSON.stringify(attachmentHistory, null, 2))
-  return zipSync(files, { level: 6 })
+  return files
+}
+
+export function buildArchive(notes: Note[], assets: NoteAsset[], versions: NoteVersion[] = [], attachments: NoteAttachment[] = [], workspace?: WorkspaceBackup, attachmentHistory: NoteAttachmentHistory[] = []): Uint8Array {
+  return zipSync(buildArchiveFiles(notes, assets, versions, attachments, workspace, attachmentHistory), { level: 6 })
+}
+
+function zipArchiveProgressively(files: Record<string, Uint8Array>, onProgress?: ArchiveProgressHandler): Promise<Uint8Array> {
+  const entries = Object.entries(files)
+  return new Promise<Uint8Array>((resolve, reject) => {
+    const chunks: Uint8Array[] = []
+    let finishedEntries = 0
+    let nextEntry = 0
+    let activeStreams = 0
+    let zipEnded = false
+    let failed = false
+    const zip = new Zip((error, chunk, final) => {
+      if (error) { failed = true; reject(error); return }
+      if (chunk?.length) chunks.push(chunk)
+      if (final) {
+        const total = chunks.reduce((sum, part) => sum + part.length, 0)
+        const result = new Uint8Array(total)
+        let offset = 0
+        for (const part of chunks) { result.set(part, offset); offset += part.length }
+        resolve(result)
+      }
+    })
+    const addNextEntries = () => {
+      if (failed) return
+      let budget = 4
+      while (activeStreams < 4 && nextEntry < entries.length && budget > 0) {
+        budget -= 1
+        const [fileName, bytes] = entries[nextEntry]
+        nextEntry += 1
+        activeStreams += 1
+        const stream = new AsyncZipDeflate(fileName, { level: 6 })
+        try {
+          zip.add(stream)
+          const ondata = stream.ondata
+          stream.ondata = (error, chunk, final) => {
+            ondata(error, chunk, final)
+            if (failed || error) return
+            if (final) {
+              finishedEntries += 1
+              activeStreams -= 1
+              onProgress?.({ stage: 'compress', completed: finishedEntries, total: entries.length, current: fileName, percent: Math.round((finishedEntries / Math.max(1, entries.length)) * 100) })
+              addNextEntries()
+            }
+          }
+          stream.push(bytes, true)
+        } catch (error) { failed = true; reject(error); zip.terminate(); return }
+      }
+      if (nextEntry === entries.length && !zipEnded) {
+        zipEnded = true
+        zip.end()
+      }
+    }
+    addNextEntries()
+  })
 }
 
 function safeObsidianSegment(value: string, fallback: string): string {
@@ -118,8 +218,10 @@ function noteToObsidianMarkdown(note: Note): string {
   return `---\n${stringifyYaml(metadata).trimEnd()}\n---\n\n${note.content.trimStart()}\n`
 }
 
-export function buildObsidianVaultArchive(notes: Note[], assets: NoteAsset[] = [], attachments: NoteAttachment[] = []): Uint8Array {
+function buildObsidianVaultFiles(notes: Note[], assets: NoteAsset[] = [], attachments: NoteAttachment[] = []): Record<string, Uint8Array> {
   const files: Record<string, Uint8Array> = {}
+  const assetsByNote = groupByNoteId(assets)
+  const attachmentsByNote = groupByNoteId(attachments)
   const usedNotePaths = new Set<string>()
   const notePaths = new Map<string, string>()
   const targetPaths = new Map<string, string>()
@@ -143,8 +245,8 @@ export function buildObsidianVaultArchive(notes: Note[], assets: NoteAsset[] = [
   notes.forEach(note => {
     const notePath = notePaths.get(note.id)
     if (!notePath) return
-    const noteAssets = assets.filter(asset => asset.noteId === note.id).map(asset => ({ fileName: asset.fileName, mimeType: 'image/svg+xml', svg: asset.svg }))
-    const noteAttachments = attachments.filter(attachment => attachment.noteId === note.id).map(attachment => ({ fileName: attachment.fileName, mimeType: attachment.mimeType, dataUrl: attachment.dataUrl }))
+    const noteAssets = (assetsByNote.get(note.id) ?? []).map(asset => ({ fileName: asset.fileName, mimeType: 'image/svg+xml', svg: asset.svg }))
+    const noteAttachments = (attachmentsByNote.get(note.id) ?? []).map(attachment => ({ fileName: attachment.fileName, mimeType: attachment.mimeType, dataUrl: attachment.dataUrl }))
     const usedAssetNames = new Set<string>()
     const assetNames = new Map<string, { fileName: string; mimeType: string }>()
     noteAssets.forEach(asset => {
@@ -177,7 +279,11 @@ export function buildObsidianVaultArchive(notes: Note[], assets: NoteAsset[] = [
     const content = rewriteObsidianAssetReferences(rewriteObsidianNoteLinks(note.content, targetPaths), assetNames)
     files[`${notePath}.md`] = strToU8(noteToObsidianMarkdown({ ...note, content }))
   })
-  return zipSync(files, { level: 6 })
+  return files
+}
+
+export function buildObsidianVaultArchive(notes: Note[], assets: NoteAsset[] = [], attachments: NoteAttachment[] = []): Uint8Array {
+  return zipSync(buildObsidianVaultFiles(notes, assets, attachments), { level: 6 })
 }
 
 function archivedNoteVersions(value: unknown, noteId: string): NoteVersion[] {
@@ -323,8 +429,113 @@ function parseAttachmentHistory(bytes: Uint8Array): NoteAttachmentHistory[] {
   })
 }
 
-export function parseArchive(bytes: Uint8Array): { notes: Note[]; assets: NoteAsset[]; versions: NoteVersion[]; attachments: NoteAttachment[]; attachmentHistory: NoteAttachmentHistory[]; workspace?: WorkspaceBackup } {
-  const unzipped = unzipSync(bytes)
+export type ParsedArchive = { notes: Note[]; assets: NoteAsset[]; versions: NoteVersion[]; attachments: NoteAttachment[]; attachmentHistory: NoteAttachmentHistory[]; workspace?: WorkspaceBackup }
+
+function zipEntryCount(bytes: Uint8Array): number {
+  const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength)
+  const start = Math.max(0, bytes.byteLength - 65_557)
+  for (let offset = bytes.byteLength - 22; offset >= start; offset -= 1) {
+    if (view.getUint32(offset, true) !== 0x06054b50) continue
+    const count = view.getUint16(offset + 10, true)
+    return count === 0xffff ? 0 : count
+  }
+  return 0
+}
+
+function unzipArchiveProgressively(bytes: Uint8Array, onProgress?: ArchiveProgressHandler): Promise<Record<string, Uint8Array>> {
+  return new Promise((resolve, reject) => {
+    const files: Record<string, Uint8Array> = {}
+    const activeFiles = new Set<{ terminate(): void }>()
+    const pendingFiles: { file: UnzipFile; chunks: Uint8Array[]; expectedBytes: number; byteLength: number }[] = []
+    const expectedTotal = zipEntryCount(bytes)
+    let discovered = 0
+    let completed = 0
+    let activeCount = 0
+    let parsingFinished = false
+    let settled = false
+    let startScheduled = false
+    let lastPercent = 0
+
+    const report = (current: string, currentFraction = 0) => {
+      const total = expectedTotal || discovered
+      if (!total) { onProgress?.({ stage: 'unpack', completed, total: 0, current, percent: 0 }); return }
+      const rawPercent = Math.floor(((completed + currentFraction) / total) * 100)
+      lastPercent = Math.max(lastPercent, Math.min(99, rawPercent))
+      onProgress?.({ stage: 'unpack', completed, total, current, percent: lastPercent })
+    }
+    const finish = () => {
+      if (!settled && parsingFinished && completed === discovered) {
+        settled = true
+        onProgress?.({ stage: 'unpack', completed, total: expectedTotal || discovered, current: '', percent: 100 })
+        resolve(files)
+      }
+    }
+    const scheduleStart = () => {
+      if (settled || startScheduled || activeCount >= 4 || !pendingFiles.length) return
+      startScheduled = true
+      window.setTimeout(() => {
+        startScheduled = false
+        let budget = 4
+        while (!settled && activeCount < 4 && pendingFiles.length && budget > 0) {
+          budget -= 1
+          const entry = pendingFiles.shift()!
+          activeCount += 1
+          activeFiles.add(entry.file)
+          entry.file.ondata = (error, chunk, final) => {
+            if (error) { fail(error); return }
+            if (chunk?.length) { entry.chunks.push(chunk); entry.byteLength += chunk.length }
+            const currentFraction = entry.expectedBytes > 0 ? Math.min(0.99, entry.byteLength / entry.expectedBytes) : 0
+            if (final) {
+              const output = new Uint8Array(entry.byteLength)
+              let offset = 0
+              for (const part of entry.chunks) { output.set(part, offset); offset += part.length }
+              files[entry.file.name] = output
+              completed += 1
+              activeCount -= 1
+              activeFiles.delete(entry.file)
+              report(entry.file.name)
+              scheduleStart()
+              finish()
+            } else report(entry.file.name, currentFraction)
+          }
+          try { entry.file.start() } catch (error) { activeCount -= 1; activeFiles.delete(entry.file); fail(error) }
+        }
+        if (pendingFiles.length && activeCount < 4) scheduleStart()
+        finish()
+      }, 0)
+    }
+    const fail = (error: unknown) => {
+      if (settled) return
+      settled = true
+      activeFiles.forEach(file => file.terminate())
+      reject(error instanceof Error ? error : new Error(String(error)))
+    }
+
+    const unzipper = new Unzip(file => {
+      discovered += 1
+      pendingFiles.push({ file, chunks: [], expectedBytes: file.originalSize ?? 0, byteLength: 0 })
+      report(file.name)
+      scheduleStart()
+    })
+
+    unzipper.register(AsyncUnzipInflate)
+    try {
+      unzipper.push(bytes, true)
+      parsingFinished = true
+      scheduleStart()
+      finish()
+    } catch (error) { fail(error) }
+  })
+}
+
+export async function parseArchive(bytes: Uint8Array, onProgress?: ArchiveProgressHandler): Promise<ParsedArchive> {
+  const files = await unzipArchiveProgressively(bytes, onProgress)
+  onProgress?.({ stage: 'parse', completed: 0, total: 0, current: '', percent: 0 })
+  await new Promise<void>(resolve => requestAnimationFrame(() => requestAnimationFrame(() => resolve())))
+  return parseUnzippedArchive(files, onProgress)
+}
+
+async function parseUnzippedArchive(unzipped: Record<string, Uint8Array>, onProgress?: ArchiveProgressHandler): Promise<ParsedArchive> {
   const unzippedPaths = Object.keys(unzipped)
   const firstPathParts = unzippedPaths[0]?.split('/') ?? []
   const commonRoot = firstPathParts.length > 1 && firstPathParts[0] !== 'notatki' && unzippedPaths.every(path => path.startsWith(`${firstPathParts[0]}/`)) ? `${firstPathParts[0]}/` : ''
@@ -342,6 +553,30 @@ export function parseArchive(bytes: Uint8Array): { notes: Note[]; assets: NoteAs
     try { workspace = parseWorkspaceBackup(files[WORKSPACE_BACKUP_FILE]) } catch { /* Ignore an invalid optional workspace file. */ }
   }
   const markdownPaths = Object.keys(files).filter(path => path.toLowerCase().endsWith('.md') && !path.split('/').some(part => part === '.obsidian' || part === '.trash'))
+  const allArchivePaths = Object.keys(files)
+  const archivePathByNormalized = new Map(allArchivePaths.map(path => [path.toLocaleLowerCase('pl'), path]))
+  const archivePathsByDirectory = new Map<string, string[]>()
+  const archivePathsByBaseName = new Map<string, string[]>()
+  const markdownTargetSuffixes = new Set<string>()
+  const notesByDirectory = new Map<string, number>()
+  for (const path of allArchivePaths) {
+    const directory = path.includes('/') ? path.slice(0, path.lastIndexOf('/')) : ''
+    const directoryPaths = archivePathsByDirectory.get(directory)
+    if (directoryPaths) directoryPaths.push(path)
+    else archivePathsByDirectory.set(directory, [path])
+    if (!path.toLowerCase().endsWith('.md')) {
+      const baseName = path.split('/').at(-1)?.toLocaleLowerCase('pl') ?? ''
+      const namePaths = archivePathsByBaseName.get(baseName)
+      if (namePaths) namePaths.push(path)
+      else archivePathsByBaseName.set(baseName, [path])
+    }
+  }
+  markdownPaths.forEach(path => {
+    const directory = path.includes('/') ? path.slice(0, path.lastIndexOf('/')) : ''
+    notesByDirectory.set(directory, (notesByDirectory.get(directory) ?? 0) + 1)
+    const parts = path.toLocaleLowerCase('pl').split('/')
+    for (let index = 0; index < parts.length; index += 1) markdownTargetSuffixes.add(parts.slice(index).join('/'))
+  })
   const noTieNotePaths = markdownPaths.filter(path => /^notatki\/[^/]+\/notatka\.md$/i.test(path))
   const noTieLayout = Boolean(files[WORKSPACE_BACKUP_FILE]) || noTieNotePaths.length > 0 && noTieNotePaths.length === markdownPaths.length
   const supportedAttachment = (name: string) => {
@@ -358,7 +593,8 @@ export function parseArchive(bytes: Uint8Array): { notes: Note[]; assets: NoteAs
     } as Record<string, string>)[ext ?? ''] ?? ''
   }
 
-  for (const path of markdownPaths) {
+  for (let noteIndex = 0; noteIndex < markdownPaths.length; noteIndex += 1) {
+    const path = markdownPaths[noteIndex]
     const markdown = strFromU8(files[path])
     const baseName = path.split('/').at(-1)?.replace(/\.md$/i, '') || 'Notatka'
     const idFromPath = noTieLayout ? path.split('/').at(-2) ?? crypto.randomUUID() : crypto.randomUUID()
@@ -390,11 +626,10 @@ export function parseArchive(bytes: Uint8Array): { notes: Note[]; assets: NoteAs
         if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) attachmentMetadata = parsed as typeof attachmentMetadata
       } catch { /* Ignore optional attachment indexing metadata. */ }
     }
-    const notesInSameDirectory = markdownPaths.filter(markdownPath => markdownPath.includes('/') ? markdownPath.slice(0, markdownPath.lastIndexOf('/')) === baseDirectory : !baseDirectory).length
+    const notesInSameDirectory = notesByDirectory.get(baseDirectory) ?? 0
     const externalPathMappings: [string, string][] = []
     const referencedFiles = new Map<string, string[]>()
     const obsidianEmbedReferences: { raw: string; path: string; alias: string; fragment: string; embed: boolean }[] = []
-    const allArchivePaths = Object.keys(files)
     const noteSpecificAssetPrefix = `${path.replace(/\.md$/i, '')}/assets/`
     if (!noTieLayout) {
       const normalizeVaultPath = (value: string) => {
@@ -415,9 +650,11 @@ export function parseArchive(bytes: Uint8Array): { notes: Note[]; assets: NoteAs
         if (!canonical || canonical.toLowerCase().endsWith('.md')) continue
         const basename = canonical.split('/').at(-1)?.toLocaleLowerCase('pl')
         const noteSpecificPath = normalizeVaultPath(`${path.replace(/\.md$/i, '')}/assets/${basename ?? ''}`)
-        const directPath = allArchivePaths.includes(canonical) ? canonical : allArchivePaths.includes(normalizeVaultPath(`${baseDirectory}/${canonical}`)) ? normalizeVaultPath(`${baseDirectory}/${canonical}`) : ''
-        const matchedPath = directPath || (noteSpecificPath && files[noteSpecificPath] ? noteSpecificPath : '') || allArchivePaths
-          .filter(archivePath => archivePath.split('/').at(-1)?.toLocaleLowerCase('pl') === basename && !archivePath.toLowerCase().endsWith('.md'))
+        const rootPath = normalizeVaultPath(`${baseDirectory}/${canonical}`)
+        const directPath = archivePathByNormalized.get(canonical.toLocaleLowerCase('pl')) ?? archivePathByNormalized.get(rootPath.toLocaleLowerCase('pl'))
+        const noteSpecificArchivePath = archivePathByNormalized.get(noteSpecificPath.toLocaleLowerCase('pl'))
+        const nameMatches = archivePathsByBaseName.get(basename ?? '') ?? []
+        const matchedPath = directPath || noteSpecificArchivePath || [...nameMatches]
           .sort((first, second) => Number(second.startsWith(noteSpecificAssetPrefix)) - Number(first.startsWith(noteSpecificAssetPrefix)) || Number(/(?:^|\/)(?:assets?|attachments?|media)\//i.test(second)) - Number(/(?:^|\/)(?:assets?|attachments?|media)\//i.test(first)))[0]
         if (matchedPath) referencedFiles.set(matchedPath, [...(referencedFiles.get(matchedPath) ?? []), raw])
       }
@@ -431,13 +668,14 @@ export function parseArchive(bytes: Uint8Array): { notes: Note[]; assets: NoteAs
         const rootTarget = normalizeVaultPath(decoded.startsWith('/') ? decoded.slice(1) : decoded)
         const relativeTarget = normalizeVaultPath(`${baseDirectory}/${decoded}`)
         const candidates = [relativeTarget, rootTarget]
-        let matchingMarkdown = candidates.some(candidate => candidate.toLowerCase().endsWith('.md') && Boolean(files[candidate]) || Boolean(files[`${candidate}.md`]))
-        if (!matchingMarkdown && !/\.[a-z\d]{1,8}$/i.test(rootTarget)) matchingMarkdown = allArchivePaths.some(path => path.toLowerCase().endsWith(`/${rootTarget.toLowerCase()}.md`) || path.toLowerCase() === `${rootTarget.toLowerCase()}.md`)
+        let matchingMarkdown = candidates.some(candidate => archivePathByNormalized.has((candidate.toLowerCase().endsWith('.md') ? candidate : `${candidate}.md`).toLocaleLowerCase('pl')))
+        if (!matchingMarkdown && !/\.[a-z\d]{1,8}$/i.test(rootTarget)) matchingMarkdown = markdownTargetSuffixes.has(`${rootTarget}.md`.toLocaleLowerCase('pl'))
         if (matchingMarkdown) continue
+        const targetBaseName = rootTarget.split('/').at(-1)?.toLocaleLowerCase('pl') ?? ''
         const noteSpecificTarget = `${path.replace(/\.md$/i, '')}/assets/${target.split(/[\\/]/).at(-1) ?? ''}`
-        const matchedPath = candidates.find(candidate => files[candidate] && !candidate.toLowerCase().endsWith('.md'))
-          ?? (files[noteSpecificTarget] ? noteSpecificTarget : undefined)
-          ?? allArchivePaths.filter(path => path.split('/').at(-1)?.toLocaleLowerCase('pl') === rootTarget.split('/').at(-1)?.toLocaleLowerCase('pl') && !path.toLowerCase().endsWith('.md'))
+        const matchedPath = candidates.map(candidate => archivePathByNormalized.get(candidate.toLocaleLowerCase('pl'))).find(candidate => candidate && !candidate.toLowerCase().endsWith('.md'))
+          ?? archivePathByNormalized.get(noteSpecificTarget.toLocaleLowerCase('pl'))
+          ?? [...(archivePathsByBaseName.get(targetBaseName) ?? [])]
             .sort((first, second) => Number(second.startsWith(noteSpecificAssetPrefix)) - Number(first.startsWith(noteSpecificAssetPrefix)) || Number(/(?:^|\/)(?:assets?|attachments?|media)\//i.test(second)) - Number(/(?:^|\/)(?:assets?|attachments?|media)\//i.test(first)))[0]
         if (!matchedPath) continue
         referencedFiles.set(matchedPath, [...(referencedFiles.get(matchedPath) ?? []), raw])
@@ -449,14 +687,18 @@ export function parseArchive(bytes: Uint8Array): { notes: Note[]; assets: NoteAs
       try { versions.push(...archivedNoteVersions(JSON.parse(strFromU8(versionsFile)), note.id)) } catch { /* Ignore an invalid optional history sidecar. */ }
     }
     const importedObsidianFiles = new Map<string, { fileName: string; mimeType: string }>()
-    for (const assetPath of allArchivePaths) {
-      const prefix = `${basePrefix}assets/`
-      const attachmentPrefix = `${basePrefix}attachments/`
-      const isNoteSpecificObsidianAsset = !noTieLayout && assetPath.startsWith(noteSpecificAssetPrefix)
-      const isReferencedObsidianAsset = !noTieLayout && referencedFiles.has(assetPath)
-      const isAdjacentLegacyAsset = !noTieLayout && notesInSameDirectory === 1 && !markdownPaths.includes(assetPath) && assetPath !== path && (assetPath.includes('/') ? assetPath.slice(0, assetPath.lastIndexOf('/')) === baseDirectory : !baseDirectory)
-      const isNoTieAsset = noTieLayout && (assetPath.startsWith(prefix) || assetPath.startsWith(attachmentPrefix) || assetPath.startsWith(basePrefix) && !markdownPaths.includes(assetPath) && assetPath !== path)
-      if (!isNoteSpecificObsidianAsset && !isReferencedObsidianAsset && !isAdjacentLegacyAsset && !isNoTieAsset) continue
+    const assetCandidates = new Set(referencedFiles.keys())
+    const noteSpecificAssetDirectory = noteSpecificAssetPrefix.slice(0, -1)
+    if (noTieLayout) {
+      ;(archivePathsByDirectory.get(`${baseDirectory}/assets`) ?? []).forEach(assetPath => assetCandidates.add(assetPath))
+      ;(archivePathsByDirectory.get(`${baseDirectory}/attachments`) ?? []).forEach(assetPath => assetCandidates.add(assetPath))
+      ;(archivePathsByDirectory.get(baseDirectory) ?? []).forEach(assetPath => assetCandidates.add(assetPath))
+    } else {
+      ;(archivePathsByDirectory.get(noteSpecificAssetDirectory) ?? []).forEach(assetPath => assetCandidates.add(assetPath))
+      if (notesInSameDirectory === 1) (archivePathsByDirectory.get(baseDirectory) ?? []).forEach(assetPath => assetCandidates.add(assetPath))
+    }
+    for (const assetPath of assetCandidates) {
+      if (assetPath.toLowerCase().endsWith('.md') || assetPath === path) continue
       const fileName = assetPath.split('/').at(-1)
       if (!fileName) continue
       if (fileName.toLowerCase().endsWith('.svg')) {
@@ -469,7 +711,14 @@ export function parseArchive(bytes: Uint8Array): { notes: Note[]; assets: NoteAs
       } else {
         const mimeType = attachmentMetadata[fileName]?.mimeType ?? supportedAttachment(fileName)
         if (mimeType) {
-          attachments.push({ ...attachmentMetadata[fileName], id: `${note.id}:${fileName}`, noteId: note.id, fileName, mimeType, dataUrl: bytesToDataUrl(files[assetPath], mimeType), size: files[assetPath].byteLength, contentHash: fileFingerprint(files[assetPath]), transcript: attachmentTranscripts[fileName] })
+          const bytes = files[assetPath]
+          const reportAttachmentProgress = (percent: number, start = 0, span = 100) => {
+            const noteProgress = ((noteIndex + (start + (percent / 100) * span) / 100) / Math.max(1, markdownPaths.length)) * 100
+            onProgress?.({ stage: 'parse', completed: noteIndex, total: markdownPaths.length, current: `${path} · ${fileName}`, percent: Math.floor(noteProgress) })
+          }
+          const dataUrl = await bytesToDataUrlProgressively(bytes, mimeType, percent => reportAttachmentProgress(percent, 0, 50))
+          const contentHash = await fileFingerprintProgressively(bytes, percent => reportAttachmentProgress(percent, 50, 50))
+          attachments.push({ ...attachmentMetadata[fileName], id: `${note.id}:${fileName}`, noteId: note.id, fileName, mimeType, dataUrl, size: bytes.byteLength, contentHash, transcript: attachmentTranscripts[fileName] })
           importedObsidianFiles.set(assetPath, { fileName, mimeType })
           if (!noTieLayout) {
             const referenceNames = referencedFiles.get(assetPath) ?? [assetPath.startsWith(basePrefix) ? assetPath.slice(basePrefix.length) : assetPath]
@@ -490,6 +739,8 @@ export function parseArchive(bytes: Uint8Array): { notes: Note[]; assets: NoteAs
       const replacement = reference.embed && (importedFile.mimeType.startsWith('image/') || importedFile.mimeType === 'image/svg+xml') ? `![${label}](${url})` : `[${label}](${url})`
       note.content = note.content.replaceAll(`${reference.embed ? '!' : ''}[[${reference.raw}]]`, replacement)
     }
+    onProgress?.({ stage: 'parse', completed: noteIndex + 1, total: markdownPaths.length, current: path, percent: Math.round(((noteIndex + 1) / markdownPaths.length) * 100) })
+    if ((noteIndex + 1) % 4 === 0 && noteIndex + 1 < markdownPaths.length) await new Promise<void>(resolve => requestAnimationFrame(() => resolve()))
   }
   if (!notes.length) throw new Error('W paczce nie znaleziono plików Markdown.')
   return { notes, assets, versions, attachments, attachmentHistory, workspace }
@@ -539,9 +790,12 @@ type FilePickerWindow = Window & {
   showSaveFilePicker?: (options?: { suggestedName?: string; types?: { description: string; accept: Record<string, string[]> }[] }) => Promise<{ createWritable(): Promise<WritableFile> }>
 }
 
-export async function exportArchiveToFolder(notes: Note[], assets: NoteAsset[], versions: NoteVersion[] = [], attachments: NoteAttachment[] = [], workspace?: WorkspaceBackup, attachmentHistory: NoteAttachmentHistory[] = []): Promise<string | null> {
-  const archive = buildArchive(notes, assets, versions, attachments, workspace, attachmentHistory)
-  return exportZipToFolder(archive, archiveFileName())
+export async function exportArchiveToFolder(notes: Note[], assets: NoteAsset[], versions: NoteVersion[] = [], attachments: NoteAttachment[] = [], workspace?: WorkspaceBackup, attachmentHistory: NoteAttachmentHistory[] = [], onProgress?: ArchiveProgressHandler): Promise<string | null> {
+  const files = buildArchiveFiles(notes, assets, versions, attachments, workspace, attachmentHistory)
+  const archive = await zipArchiveProgressively(files, onProgress)
+  const fileName = archiveFileName()
+  onProgress?.({ stage: 'save', completed: 0, total: 0, current: fileName, percent: 100 })
+  return exportZipToFolder(archive, fileName)
 }
 
 function obsidianArchiveFileName(): string {
@@ -553,8 +807,11 @@ export function downloadObsidianVault(notes: Note[], assets: NoteAsset[] = [], a
   downloadZipArchive(buildObsidianVaultArchive(notes, assets, attachments), obsidianArchiveFileName())
 }
 
-export async function exportObsidianVaultToFolder(notes: Note[], assets: NoteAsset[] = [], attachments: NoteAttachment[] = []): Promise<string | null> {
-  return exportZipToFolder(buildObsidianVaultArchive(notes, assets, attachments), obsidianArchiveFileName())
+export async function exportObsidianVaultToFolder(notes: Note[], assets: NoteAsset[] = [], attachments: NoteAttachment[] = [], onProgress?: ArchiveProgressHandler): Promise<string | null> {
+  const archive = await zipArchiveProgressively(buildObsidianVaultFiles(notes, assets, attachments), onProgress)
+  const fileName = obsidianArchiveFileName()
+  onProgress?.({ stage: 'save', completed: 0, total: 0, current: fileName, percent: 100 })
+  return exportZipToFolder(archive, fileName)
 }
 
 async function exportZipToFolder(archive: Uint8Array, fileName: string): Promise<string | null> {

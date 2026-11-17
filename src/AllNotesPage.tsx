@@ -1,4 +1,4 @@
-import { useMemo, useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 import type { CSSProperties } from 'react'
 import { BookOpen, CalendarDays, Clock3, FileText, Folder, GripVertical, Paperclip, RotateCcw, Search, SlidersHorizontal, Star, Tag, ArrowDown, ArrowUp } from 'lucide-react'
 import type { Note, NoteAttachment } from './types'
@@ -52,6 +52,7 @@ export function AllNotesPage({ notes, attachments, searchAttachments = attachmen
   const [sortMode, setSortMode] = useState<SortMode>('manual')
   const [favoritesOnly, setFavoritesOnly] = useState(preset === 'favorites')
   const [attachmentsOnly, setAttachmentsOnly] = useState(false)
+  const [noteLimit, setNoteLimit] = useState(100)
 
   const tags = useMemo(() => [...new Set(notes.flatMap(note => note.tags))].sort(collator.compare), [notes])
   const folders = useMemo(() => [...new Set(notes.map(note => note.folder).filter(Boolean))].sort(collator.compare), [notes])
@@ -60,6 +61,7 @@ export function AllNotesPage({ notes, attachments, searchAttachments = attachmen
     for (const attachment of attachments) counts.set(attachment.noteId, (counts.get(attachment.noteId) ?? 0) + 1)
     return counts
   }, [attachments])
+  const noteOrderIndex = useMemo(() => new Map(noteOrder.map((id, index) => [id, index])), [noteOrder])
 
   const filteredNotes = useMemo(() => {
     const results = searchNotes(notes, {
@@ -72,8 +74,7 @@ export function AllNotesPage({ notes, attachments, searchAttachments = attachmen
 
     return results.sort((a, b) => {
       if (sortMode === 'manual') {
-        const order = new Map(noteOrder.map((id, index) => [id, index]))
-        return (order.get(a.id) ?? Number.MAX_SAFE_INTEGER) - (order.get(b.id) ?? Number.MAX_SAFE_INTEGER) || b.updatedAt - a.updatedAt
+        return (noteOrderIndex.get(a.id) ?? Number.MAX_SAFE_INTEGER) - (noteOrderIndex.get(b.id) ?? Number.MAX_SAFE_INTEGER) || b.updatedAt - a.updatedAt
       }
       if (sortMode === 'updated-asc') return a.updatedAt - b.updatedAt
       if (sortMode === 'created-desc') return b.createdAt - a.createdAt
@@ -84,7 +85,10 @@ export function AllNotesPage({ notes, attachments, searchAttachments = attachmen
       if (sortMode === 'folder-desc') return collator.compare(b.folder || 'Poziom główny', a.folder || 'Poziom główny') || collator.compare(a.title, b.title)
       return b.updatedAt - a.updatedAt
     })
-  }, [notes, query, tag, folder, searchAttachments, advancedSearch, favoritesOnly, attachmentsOnly, attachmentCounts, sortMode, noteOrder])
+  }, [notes, query, tag, folder, searchAttachments, advancedSearch, favoritesOnly, attachmentsOnly, attachmentCounts, sortMode, noteOrderIndex])
+
+  useEffect(() => { setNoteLimit(100) }, [query, tag, folder, favoritesOnly, attachmentsOnly, sortMode])
+  const displayedNotes = useMemo(() => filteredNotes.slice(0, noteLimit), [filteredNotes, noteLimit])
 
   const hasFilters = Boolean(query.trim() || tag || folder || favoritesOnly || attachmentsOnly)
   const resetFilters = () => {
@@ -135,7 +139,7 @@ export function AllNotesPage({ notes, attachments, searchAttachments = attachmen
       <span className="all-notes-sort-summary"><Clock3 size={13} />{sortLabels[sortMode]}</span>
     </div>
 
-    {filteredNotes.length ? <div className="all-notes-grid">{filteredNotes.map((note, noteIndex) => {
+    {filteredNotes.length ? <div className="all-notes-grid">{displayedNotes.map((note, noteIndex) => {
       const preview = notePreview(note.content)
       const attachmentCount = attachmentCounts.get(note.id) ?? 0
       const color = getNoteColor(note)
@@ -148,6 +152,6 @@ export function AllNotesPage({ notes, attachments, searchAttachments = attachmen
         <span className="all-notes-card-footer"><span><CalendarDays size={12} />Zmieniono {dateLabel.format(note.updatedAt)}</span>{attachmentCount > 0 && <span><Paperclip size={12} />{attachmentCount}</span>}<FileText size={15} className="all-notes-open-mark" /></span>
         </button>
       </article>
-    })}</div> : <div className="all-notes-empty"><span><Search size={20} /></span><strong>{notes.length ? 'Nie znaleziono pasujących notatek' : 'Twoja biblioteka jest pusta'}</strong><p>{notes.length ? 'Zmień hasło lub usuń część filtrów, aby zobaczyć więcej wyników.' : 'Utwórz pierwszą notatkę, a pojawi się tutaj.'}</p>{hasFilters && <button type="button" className="button secondary" onClick={resetFilters}><RotateCcw size={14} />Wyczyść filtry</button>}</div>}
+    })}{noteLimit < filteredNotes.length && <button type="button" className="all-notes-load-more" onClick={() => setNoteLimit(limit => Math.min(filteredNotes.length, limit + 100))}>Pokaż kolejne {Math.min(100, filteredNotes.length - noteLimit)} · pozostało {filteredNotes.length - noteLimit}</button>}</div> : <div className="all-notes-empty"><span><Search size={20} /></span><strong>{notes.length ? 'Nie znaleziono pasujących notatek' : 'Twoja biblioteka jest pusta'}</strong><p>{notes.length ? 'Zmień hasło lub usuń część filtrów, aby zobaczyć więcej wyników.' : 'Utwórz pierwszą notatkę, a pojawi się tutaj.'}</p>{hasFilters && <button type="button" className="button secondary" onClick={resetFilters}><RotateCcw size={14} />Wyczyść filtry</button>}</div>}
   </section>
 }

@@ -1,5 +1,5 @@
 import { isTauri } from '@tauri-apps/api/core'
-import { documentDir, join } from '@tauri-apps/api/path'
+import { documentDir, join, sep } from '@tauri-apps/api/path'
 import { exists, mkdir, readDir, readFile, readTextFile, remove, rename, stat, writeFile, writeTextFile } from '@tauri-apps/plugin-fs'
 import { markdownToNote, noteToMarkdown, sanitizeSvg } from './content'
 import { fileFingerprint } from './fileFingerprint'
@@ -24,8 +24,24 @@ const MAX_NOTE_VERSIONS = 80
 let databasePromise: Promise<IDBDatabase> | undefined
 let nativeNotesRoot: Promise<string> | undefined
 const nativeNoteDirectories = new Map<string, string>()
+let nativeFolderMarkers: string[] = []
+let nativeFolderMarkersLoaded = false
 const noteVersionQueues = new Map<string, Promise<void>>()
 const attachmentTranscriptQueues = new Map<string, Promise<void>>()
+
+async function mapWithConcurrency<T, R>(items: T[], concurrency: number, map: (item: T, index: number) => Promise<R>): Promise<R[]> {
+  const results = new Array<R>(items.length)
+  let nextIndex = 0
+  const run = async () => {
+    while (true) {
+      const index = nextIndex++
+      if (index >= items.length) return
+      results[index] = await map(items[index], index)
+    }
+  }
+  await Promise.all(Array.from({ length: Math.min(items.length, Math.max(1, concurrency)) }, run))
+  return results
+}
 
 export const usesNativeFiles = isTauri()
 const isAndroidApp = usesNativeFiles && typeof navigator !== 'undefined' && /Android/i.test(navigator.userAgent)
@@ -112,6 +128,11 @@ async function getNativeNotesRoot(): Promise<string> {
   return nativeNotesRoot
 }
 
+function joinNativePath(base: string, ...segments: string[]): string {
+  const separator = sep()
+  return segments.reduce((path, segment) => `${path.replace(/[\\/]+$/g, '')}${separator}${segment}`, base)
+}
+
 async function folderDirectory(folder: string): Promise<string> {
   const segments = folder.split('/').map(part => part.trim()).filter(Boolean).map(safeFilePart)
   return join(await getNativeNotesRoot(), ...segments)
@@ -137,20 +158,31 @@ const FOLDER_MARKER = '.no-tie-folder'
 
 async function collectFolderMarkers(directory: string): Promise<string[]> {
   const folders: string[] = []
-  for (const entry of await readDir(directory)) {
-    if (!entry.isDirectory) continue
-    const path = await join(directory, entry.name)
-    const marker = await join(path, FOLDER_MARKER)
-    if (await exists(marker)) {
-      try { folders.push((await readTextFile(marker)).trim()) } catch { /* ignore malformed folder marker */ }
-    }
-    folders.push(...await collectFolderMarkers(path))
+  const pending = [directory]
+  while (pending.length) {
+    const batch = pending.splice(0, 12)
+    const scanned = await Promise.all(batch.map(async current => {
+      const children: string[] = []
+      const marked: string[] = []
+      for (const entry of await readDir(current)) {
+        if (!entry.isDirectory) continue
+        const path = joinNativePath(current, entry.name)
+        children.push(path)
+        const marker = joinNativePath(path, FOLDER_MARKER)
+        if (await exists(marker)) {
+          try { marked.push((await readTextFile(marker)).trim()) } catch { /* ignore malformed folder marker */ }
+        }
+      }
+      return { children, marked }
+    }))
+    for (const result of scanned) { pending.push(...result.children); folders.push(...result.marked) }
   }
-  return folders.filter(Boolean)
+  return [...new Set(folders.filter(Boolean))]
 }
 
 export async function getFolders(): Promise<string[]> {
   if (!usesNativeFiles) return (await withStore<string[] | undefined>('settings', 'readonly', store => store.get('folders'))) ?? []
+  if (nativeFolderMarkersLoaded) return [...nativeFolderMarkers]
   return collectFolderMarkers(await getNativeNotesRoot())
 }
 
@@ -161,18 +193,28 @@ export async function saveFolders(folders: string[]): Promise<void> {
     return
   }
   const root = await getNativeNotesRoot()
-  const current = await collectFolderMarkers(root)
+  const current = nativeFolderMarkersLoaded ? nativeFolderMarkers : await collectFolderMarkers(root)
+  const currentSet = new Set(current)
+  const normalizedSet = new Set(normalized)
+  if (currentSet.size === normalizedSet.size && [...currentSet].every(folder => normalizedSet.has(folder))) {
+    nativeFolderMarkers = normalized
+    nativeFolderMarkersLoaded = true
+    return
+  }
   for (const folder of current) {
-    if (!normalized.includes(folder)) {
+    if (!normalizedSet.has(folder)) {
       const marker = await join(await folderDirectory(folder), FOLDER_MARKER)
       if (await exists(marker)) await remove(marker)
     }
   }
   for (const folder of normalized) {
+    if (currentSet.has(folder)) continue
     const directory = await folderDirectory(folder)
     await mkdir(directory, { recursive: true })
     await writeTextFile(await join(directory, FOLDER_MARKER), folder)
   }
+  nativeFolderMarkers = normalized
+  nativeFolderMarkersLoaded = true
 }
 
 function normalizeFolderColors(value: unknown): Record<string, string> {
@@ -582,41 +624,69 @@ export async function removeFolderFromDisk(folder: string): Promise<void> {
   if (await exists(directory)) await remove(directory, { recursive: true })
 }
 
-async function collectMarkdownFiles(directory: string): Promise<string[]> {
+async function collectNativeFiles(directory: string): Promise<{ markdownPaths: string[]; folders: string[] }> {
   const paths: string[] = []
-  for (const entry of await readDir(directory)) {
-    const path = await join(directory, entry.name)
-    if (entry.isDirectory) paths.push(...await collectMarkdownFiles(path))
-    else if (entry.isFile && entry.name.toLowerCase().endsWith('.md')) paths.push(path)
+  const folders: string[] = []
+  const pending = [directory]
+  while (pending.length) {
+    const batch = pending.splice(0, 12)
+    const scanned = await Promise.all(batch.map(async current => {
+      const childDirectories: string[] = []
+      const markdown: string[] = []
+      const marked: string[] = []
+      for (const entry of await readDir(current)) {
+        const path = joinNativePath(current, entry.name)
+        if (entry.isDirectory) childDirectories.push(path)
+        else if (entry.isFile && entry.name === FOLDER_MARKER) {
+          try { marked.push((await readTextFile(path)).trim()) } catch { /* Ignore malformed folder markers. */ }
+        }
+        else if (entry.isFile && entry.name.toLowerCase().endsWith('.md')) markdown.push(path)
+      }
+      return { childDirectories, markdown, marked }
+    }))
+    for (const result of scanned) {
+      pending.push(...result.childDirectories)
+      paths.push(...result.markdown)
+      folders.push(...result.marked)
+    }
   }
-  return paths
+  return { markdownPaths: paths.sort((a, b) => a.localeCompare(b, 'pl')), folders: [...new Set(folders.filter(Boolean))] }
 }
 
 async function getNativeNotes(): Promise<Note[]> {
   const root = await getNativeNotesRoot()
-  const files = await collectMarkdownFiles(root)
+  const { markdownPaths: files, folders } = await collectNativeFiles(root)
   const notes: Note[] = []
   const directories = new Map<string, string>()
-  for (const path of files) {
+  const markdownFiles = await mapWithConcurrency(files, 16, async path => {
     try {
-      const markdown = await readTextFile(path)
-      const parentDirectory = path.slice(0, Math.max(path.lastIndexOf('/'), path.lastIndexOf('\\')))
+      return { path, markdown: await readTextFile(path) }
+    } catch {
+      // Keep malformed files on disk; valid notes should still open normally.
+      return null
+    }
+  })
+  for (let offset = 0; offset < markdownFiles.length; offset += 80) {
+    for (const record of markdownFiles.slice(offset, offset + 80)) {
+      if (!record) continue
+      const parentDirectory = record.path.slice(0, Math.max(record.path.lastIndexOf('/'), record.path.lastIndexOf('\\')))
       const fallbackId = parentDirectory.split(/[\\/]/).at(-1) ?? crypto.randomUUID()
-      const note = markdownToNote(markdown, fallbackId)
+      const note = markdownToNote(record.markdown, fallbackId)
       if (directories.has(note.id)) continue
       directories.set(note.id, parentDirectory)
       notes.push(note)
-    } catch {
-      // Keep malformed files on disk; valid notes should still open normally.
     }
+    if (offset + 80 < markdownFiles.length) await new Promise<void>(resolve => setTimeout(resolve, 0))
   }
   nativeNoteDirectories.clear()
   for (const [noteId, directory] of directories) nativeNoteDirectories.set(noteId, directory)
+  nativeFolderMarkers = folders
+  nativeFolderMarkersLoaded = true
   return notes
 }
 
 async function readNativeAssets(noteId: string, directory: string): Promise<NoteAsset[]> {
-  const assetsDirectory = await join(directory, 'assets')
+  const assetsDirectory = joinNativePath(directory, 'assets')
   if (!await exists(assetsDirectory)) return []
   const assets: NoteAsset[] = []
   for (const entry of await readDir(assetsDirectory)) {
@@ -626,7 +696,7 @@ async function readNativeAssets(noteId: string, directory: string): Promise<Note
         id: `${noteId}:${entry.name}`,
         noteId,
         fileName: entry.name,
-        svg: sanitizeSvg(await readTextFile(await join(assetsDirectory, entry.name))),
+        svg: sanitizeSvg(await readTextFile(joinNativePath(assetsDirectory, entry.name))),
       })
     } catch {
       // An invalid SVG remains available as a file but is omitted from the editor.
@@ -822,7 +892,7 @@ export async function removeNote(id: string): Promise<void> {
 
 export async function getAssets(): Promise<NoteAsset[]> {
   if (!usesNativeFiles) return withStore<NoteAsset[]>('assets', 'readonly', store => store.getAll())
-  const assets = await Promise.all([...nativeNoteDirectories.entries()].map(([noteId, directory]) => readNativeAssets(noteId, directory)))
+  const assets = await mapWithConcurrency([...nativeNoteDirectories.entries()], 12, ([noteId, directory]) => readNativeAssets(noteId, directory))
   return assets.flat()
 }
 
@@ -856,7 +926,7 @@ function bytesToBase64(bytes: Uint8Array) {
 }
 
 async function readNativeAttachmentTranscripts(directory: string): Promise<Record<string, string>> {
-  const path = await join(directory, NOTE_ATTACHMENT_TRANSCRIPTS_FILE)
+  const path = joinNativePath(directory, NOTE_ATTACHMENT_TRANSCRIPTS_FILE)
   if (!await exists(path)) return {}
   try {
     const value = JSON.parse(await readTextFile(path)) as unknown
@@ -867,7 +937,7 @@ async function readNativeAttachmentTranscripts(directory: string): Promise<Recor
 
 type AttachmentExtraMetadata = Partial<Pick<NoteAttachment, 'extractedText' | 'transcriptSegments' | 'pdfAnnotations' | 'mimeType' | 'author' | 'documentDate' | 'description'>>
 async function readNativeAttachmentMetadata(directory: string): Promise<Record<string, AttachmentExtraMetadata>> {
-  const path = await join(directory, NOTE_ATTACHMENT_METADATA_FILE)
+  const path = joinNativePath(directory, NOTE_ATTACHMENT_METADATA_FILE)
   if (!await exists(path)) return {}
   try {
     const value = JSON.parse(await readTextFile(path)) as unknown
@@ -917,7 +987,7 @@ function dataUrlBytes(dataUrl: string) {
 }
 
 async function readNativeAttachments(noteId: string, directory: string): Promise<NoteAttachment[]> {
-  const assetsDirectory = await join(directory, 'assets')
+  const assetsDirectory = joinNativePath(directory, 'assets')
   if (!await exists(assetsDirectory)) return []
   const transcripts = await readNativeAttachmentTranscripts(directory)
   const metadata = await readNativeAttachmentMetadata(directory)
@@ -926,7 +996,7 @@ async function readNativeAttachments(noteId: string, directory: string): Promise
     const storedMimeType = metadata[entry.name]?.mimeType ?? attachmentMimeType(entry.name)
     if (!entry.isFile || entry.name.toLowerCase().endsWith('.svg') || !storedMimeType.startsWith('image/') && storedMimeType !== 'application/pdf' && !storedMimeType.startsWith('audio/') && !storedMimeType.startsWith('video/')) continue
     try {
-      const bytes = await readFile(await join(assetsDirectory, entry.name))
+      const bytes = await readFile(joinNativePath(assetsDirectory, entry.name))
       const mimeType = metadata[entry.name]?.mimeType ?? attachmentMimeType(entry.name)
       attachments.push({ ...metadata[entry.name], id: `${noteId}:${entry.name}`, noteId, fileName: entry.name, mimeType, dataUrl: `data:${mimeType};base64,${bytesToBase64(bytes)}`, size: bytes.byteLength, contentHash: fileFingerprint(bytes), transcript: transcripts[entry.name] })
     } catch { /* Skip unreadable user attachments and keep the rest of the note library available. */ }
@@ -936,7 +1006,7 @@ async function readNativeAttachments(noteId: string, directory: string): Promise
 
 export async function getAttachments(): Promise<NoteAttachment[]> {
   if (!usesNativeFiles) return withStore<NoteAttachment[]>('attachments', 'readonly', store => store.getAll())
-  return (await Promise.all([...nativeNoteDirectories.entries()].map(([noteId, directory]) => readNativeAttachments(noteId, directory)))).flat()
+  return (await mapWithConcurrency([...nativeNoteDirectories.entries()], 8, ([noteId, directory]) => readNativeAttachments(noteId, directory))).flat()
 }
 
 export async function getAttachmentsForNote(noteId: string): Promise<NoteAttachment[]> {

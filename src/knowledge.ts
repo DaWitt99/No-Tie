@@ -58,6 +58,7 @@ export function backlinksFor(notes: Note[], note: Note): Note[] {
 }
 
 const taskMetadataPattern = /\s*<!--\s*no-tie-task\s+([^>]*?)\s*-->/i
+const parsedTaskCache = new WeakMap<Note, ParsedTask[]>()
 function token(value: string, key: string) { return value.match(new RegExp(`(?:^|\\s)${key}=([^\\s]+)`))?.[1] ?? '' }
 function parseTaskMetadata(value: string) {
   const dueDate = token(value, 'due')
@@ -77,6 +78,8 @@ function parseTaskMetadata(value: string) {
 
 export function parseTasks(notes: Note[]): ParsedTask[] {
   return notes.flatMap(note => {
+    const cached = parsedTaskCache.get(note)
+    if (cached) return cached
     const tasks: ParsedTask[] = []
     let codeFence = ''
     note.content.split('\n').forEach((line, lineIndex) => {
@@ -92,6 +95,7 @@ export function parseTasks(notes: Note[]): ParsedTask[] {
       const done = match[2].toLowerCase() === 'x' || parsed.status === 'done'
       tasks.push({ noteId: note.id, noteTitle: note.title, lineIndex, text, done, ...parsed, status: done ? 'done' : parsed.status, id: parsed.id || `${note.id}:${lineIndex}` })
     })
+    parsedTaskCache.set(note, tasks)
     return tasks
   })
 }

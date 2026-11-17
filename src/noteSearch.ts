@@ -16,7 +16,11 @@ export function searchNotes(notes: Note[], { query, tag = '', folder = '', attac
   const tagNeedle = normalize(tag)
   const folderNeedle = normalize(folder)
   const attachmentByNote = new Map<string, NoteAttachment[]>()
-  for (const attachment of attachments) attachmentByNote.set(attachment.noteId, [...(attachmentByNote.get(attachment.noteId) ?? []), attachment])
+  for (const attachment of attachments) {
+    const grouped = attachmentByNote.get(attachment.noteId)
+    if (grouped) grouped.push(attachment)
+    else attachmentByNote.set(attachment.noteId, [attachment])
+  }
   const groups = (advanced ? query.split(/\s+OR\s+/i) : [query]).map(rawGroup => {
     const fields: Record<string, string[]> = {}
     const operator = advanced ? /(^|\s)(tag|folder|title|content|created|updated|after|before|has|is):(?:"([^"]*)"|'([^']*)'|(\S+))/gi : /(?!)/g
@@ -37,17 +41,22 @@ export function searchNotes(notes: Note[], { query, tag = '', folder = '', attac
     }
     return { fields, terms }
   }).filter(group => Object.keys(group.fields).length || group.terms.length)
+  const needsTerms = groups.some(group => group.terms.length > 0)
+  const needsTitle = groups.some(group => Boolean(group.fields.title?.length))
+  const needsContent = needsTerms || groups.some(group => Boolean(group.fields.content?.length))
+  const needsFolder = Boolean(folderNeedle) || groups.some(group => Boolean(group.fields.folder?.length))
+  const needsTags = Boolean(tagNeedle) || groups.some(group => Boolean(group.fields.tag?.length))
+  if (!groups.length && !tagNeedle && !folderNeedle) return [...notes].sort((a, b) => b.updatedAt - a.updatedAt)
   return notes.filter(note => {
-    const title = normalize(note.title)
+    const title = needsTitle ? normalize(note.title) : ''
     const noteAttachments = attachmentByNote.get(note.id) ?? []
-    const attachmentText = noteAttachments.map(attachment => `${attachment.fileName} ${attachment.author ?? ''} ${attachment.documentDate ?? ''} ${attachment.description ?? ''} ${attachment.transcript ?? ''} ${attachment.extractedText ?? ''}`).join(' ')
-    const content = normalize(`${note.content} ${attachmentText}`)
-    const noteFolder = normalize(note.folder)
-    const tags = note.tags.map(normalize)
+    const content = needsContent ? normalize(`${note.content} ${noteAttachments.map(attachment => `${attachment.fileName} ${attachment.author ?? ''} ${attachment.documentDate ?? ''} ${attachment.description ?? ''} ${attachment.transcript ?? ''} ${attachment.extractedText ?? ''}`).join(' ')}`) : ''
+    const noteFolder = needsFolder ? normalize(note.folder) : ''
+    const tags = needsTags ? note.tags.map(normalize) : []
     if (tagNeedle && !tags.some(value => value === tagNeedle)) return false
     if (folderNeedle === '__root__' && note.folder) return false
     if (folderNeedle && folderNeedle !== '__root__' && noteFolder !== folderNeedle && !noteFolder.startsWith(`${folderNeedle}/`)) return false
-    const searchable = normalize(`${note.title} ${note.aliases?.join(' ') ?? ''} ${note.content} ${note.folder} ${note.tags.join(' ')}`)
+    const searchable = needsTerms ? normalize(`${note.title} ${note.aliases?.join(' ') ?? ''} ${note.content} ${note.folder} ${note.tags.join(' ')}`) : ''
     const matchesGroup = ({ fields, terms }: typeof groups[number]) => {
       if (!(fields.tag ?? []).every(needle => tags.some(value => value.includes(needle)))) return false
       if (!(fields.folder ?? []).every(needle => noteFolder.includes(needle))) return false
