@@ -1,0 +1,35 @@
+name: Playwright end-to-end
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  chromium:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Pobierz repozytorium
+        uses: actions/checkout@v4
+      - name: Skonfiguruj Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+      - name: Zainstaluj zależności projektu
+        run: npm ci
+      - name: Zainstaluj Chromium i biblioteki systemowe
+        run: npx playwright install --with-deps chromium
+      - name: Sprawdź typy testów
+        run: npm run test:e2e:types
+      - name: Uruchom testy end-to-end
+        run: npm run test:e2e
+      - name: Zachowaj raport po błędzie
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: playwright-results
+          path: |
+            playwright-report/
+            test-results/
+          retention-days: 7

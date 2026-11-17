@@ -4,7 +4,7 @@ import {
   Archive, ArrowLeft, ArrowRight, BarChart3, Bell, BookOpen, BookmarkPlus, Brain, CalendarDays, Check, CheckSquare2, ChevronDown, ChevronUp, Clock3, Code2, Columns3, Command, Copy, Eye, FilePlus2, FileText, Folder, FolderHeart, Heart, History, Import, LayoutTemplate,
   CircleHelp, LockKeyhole, Menu, MessageCircle, MoreVertical, Network, Paperclip, Palette, PanelLeft, Pencil, Plus, Puzzle, Repeat2, Search, Settings2, SlidersHorizontal, Sparkles, Star, Tag, ThumbsDown, ThumbsUp, Trash2, X,
 } from 'lucide-react'
-import { buildArchive, exportArchiveToFolder, parseArchive } from './archive'
+import { buildArchive, exportArchiveToFolder, exportObsidianVaultToFolder, parseArchive } from './archive'
 import { ChatPanel } from './ChatPanel'
 import { markdownToNote, starterAssets, starterNotes } from './content'
 import { NoteHistoryDialog } from './NoteHistoryDialog'
@@ -2944,6 +2944,17 @@ function App() {
     window.setTimeout(() => setToast(''), 2800)
   }
 
+  async function exportObsidianVault() {
+    try {
+      const savedPath = await exportObsidianVaultToFolder(notes, assets, attachments)
+      if (!savedPath) return
+      setToast(`Eksport Obsidiana zapisano jako ZIP: ${savedPath}. Rozpakuj go i otwórz folder w Obsidianie.`)
+    } catch (error) {
+      setToast(error instanceof Error ? error.message : 'Nie udało się przygotować eksportu do Obsidiana.')
+    }
+    window.setTimeout(() => setToast(''), 3200)
+  }
+
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
       const target = event.target
@@ -3008,6 +3019,7 @@ function App() {
           const source = file
           return source.text().then(markdown => {
             const note = markdownToNote(markdown, crypto.randomUUID())
+            note.id = crypto.randomUUID()
             const heading = note.content.match(/^\s*#\s+(.+)$/m)?.[1]?.trim()
             if (!note.title || note.title === 'Importowana notatka') note.title = heading || source.name.replace(/\.(?:md|markdown)$/i, '').replace(/[-_]+/g, ' ')
             note.folder = 'Importowane'
@@ -3256,7 +3268,7 @@ function App() {
             {!showingWorkspacePage && selectedNote && <button className="icon-button note-history-button" onClick={() => void openNoteHistory()} title="Historia wersji notatki" aria-label="Historia wersji notatki"><History size={17} /></button>}
             <details className="topbar-dropdown topbar-dropdown-right" onBlur={event => { if (!event.currentTarget.contains(event.relatedTarget as Node | null)) event.currentTarget.removeAttribute('open') }}>
               <summary className={`topbar-dropdown-trigger ollama-menu-trigger ${showChat ? 'active' : ''}`} aria-label="Menu Ollama" title="Ollama"><MessageCircle size={16} /><span className="topbar-dropdown-label">Ollama</span><ChevronDown size={13} /></summary>
-              <div className="topbar-dropdown-menu" role="group" aria-label="Ollama i operacje na paczce">
+              <div className="topbar-dropdown-menu" role="group" aria-label="Ollama, import i eksport">
                 <button type="button" onClick={event => { toggleChat(); event.currentTarget.closest('details')?.removeAttribute('open') }}><MessageCircle size={15} /><span>{showChat ? 'Ukryj czat Ollama' : 'Pokaż czat Ollama'}</span>{showChat && <Check size={14} className="topbar-menu-check" />}</button>
                 <button type="button" onClick={event => { openOllamaSettings(); event.currentTarget.closest('details')?.removeAttribute('open') }}><Settings2 size={15} /><span>Ustawienia modelu</span></button>
                 <button type="button" onClick={event => { setShowAiWorkspace(true); event.currentTarget.closest('details')?.removeAttribute('open') }}><Sparkles size={15} /><span>Profile i ustawienia AI</span></button>
@@ -3264,6 +3276,9 @@ function App() {
                 <div className="topbar-menu-separator" role="separator" />
                 <button type="button" onClick={event => { event.currentTarget.closest('details')?.removeAttribute('open'); exportNotesArchive() }}><Archive size={15} /><span>Eksportuj paczkę</span></button>
                 <button type="button" onClick={event => { event.currentTarget.closest('details')?.removeAttribute('open'); importInput.current?.click() }}><Import size={15} /><span>Importuj paczkę</span></button>
+                <div className="topbar-menu-separator" role="separator" />
+                <button type="button" disabled={!notes.length} onClick={event => { event.currentTarget.closest('details')?.removeAttribute('open'); void exportObsidianVault() }}><Archive size={15} /><span>Eksportuj vault Obsidiana</span></button>
+                <button type="button" onClick={event => { event.currentTarget.closest('details')?.removeAttribute('open'); importInput.current?.click() }}><Import size={15} /><span>Importuj z Obsidiana (ZIP lub MD)</span></button>
               </div>
             </details>
             <input ref={importInput} type="file" accept=".zip,.md,.markdown,application/zip,text/markdown" hidden onChange={handleImport} />

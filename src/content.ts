@@ -65,16 +65,36 @@ export function markdownToNote(markdown: string, fallbackId: string, now = Date.
   const parsed = match ? parseYaml(match[1]) : {}
   const metadata = typeof parsed === 'object' && parsed !== null ? parsed as Record<string, unknown> : {}
   const body = match ? markdown.slice(match[0].length) : markdown
-  const tags = Array.isArray(metadata.tags) ? metadata.tags.filter((tag): tag is string => typeof tag === 'string') : []
+  const stringList = (value: unknown) => Array.isArray(value)
+    ? value.flatMap(item => typeof item === 'string' ? [item.trim()] : []).filter(Boolean)
+    : typeof value === 'string' && value.trim() ? [value.trim()] : []
+  const tags = [...new Set(stringList(metadata.tags).map(tag => tag.replace(/^#/, '')).filter(Boolean))]
+  const propertyString = (value: unknown): string | undefined => {
+    if (typeof value === 'string') return value
+    if (typeof value === 'number' || typeof value === 'boolean') return String(value)
+    if (value instanceof Date && Number.isFinite(value.getTime())) return value.toISOString().slice(0, 10)
+    if (Array.isArray(value) && value.every(item => ['string', 'number', 'boolean'].includes(typeof item))) return value.map(String).join(', ')
+    return undefined
+  }
+  const reservedProperties = new Set(['id', 'title', 'folder', 'tags', 'favorite', 'createdAt', 'updatedAt', 'color', 'aliases', 'dailyDate', 'properties'])
+  const rootProperties = Object.entries(metadata).filter(([key]) => !reservedProperties.has(key)).flatMap(([key, value]) => {
+    const parsed = propertyString(value)
+    return parsed === undefined ? [] : [[key, parsed] as [string, string]]
+  })
+  const nestedProperties = metadata.properties && typeof metadata.properties === 'object' && !Array.isArray(metadata.properties)
+    ? Object.entries(metadata.properties as Record<string, unknown>).flatMap(([key, value]) => {
+      const parsed = propertyString(value)
+      return parsed === undefined ? [] : [[key, parsed] as [string, string]]
+    })
+    : []
+  const properties = Object.fromEntries([...rootProperties, ...nestedProperties])
   return {
     id: typeof metadata.id === 'string' ? metadata.id : fallbackId,
     title: typeof metadata.title === 'string' ? metadata.title : 'Importowana notatka',
     folder: typeof metadata.folder === 'string' ? metadata.folder : 'Importowane',
     color: typeof metadata.color === 'string' && /^#[\da-f]{6}$/i.test(metadata.color) ? metadata.color : undefined,
-    aliases: Array.isArray(metadata.aliases) ? metadata.aliases.filter((alias): alias is string => typeof alias === 'string').map(alias => alias.trim()).filter(Boolean) : [],
-    properties: metadata.properties && typeof metadata.properties === 'object' && !Array.isArray(metadata.properties)
-      ? Object.fromEntries(Object.entries(metadata.properties as Record<string, unknown>).filter((entry): entry is [string, string] => typeof entry[0] === 'string' && typeof entry[1] === 'string'))
-      : {},
+    aliases: stringList(metadata.aliases),
+    properties,
     tags,
     favorite: metadata.favorite === true,
     createdAt: typeof metadata.createdAt === 'number' ? metadata.createdAt : now,

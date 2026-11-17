@@ -1328,6 +1328,40 @@
 .drawing-connector-label-input { width: 120px; min-width: 60px; height: 27px; padding: 0 7px; border: 1px solid #e4e7ef; border-radius: 5px; color: #58637a; font-size: 9px; }
 .drawing-a11y-report { width: 100%; max-height: 66px; overflow: auto; color: #768097; font-size: 8px; }
 .drawing-a11y-report p { margin: 0 0 3px; }
+.drawing-stylus-controls { align-items: center; }
+.drawing-stylus-controls .line-width-control { flex: 1 1 210px; }
+.drawing-palette-manager { align-items: end; }
+.drawing-palette-draft { align-items: center; gap: 7px; }
+.drawing-custom-palette-row, .drawing-symbol-row { display: flex; width: 100%; min-width: 0; align-items: center; gap: 5px; padding: 3px 0; border-bottom: 1px solid #f0f1f5; }
+.drawing-custom-palette-row > .button { overflow: hidden; max-width: 130px; text-overflow: ellipsis; }
+.drawing-symbol-row > span { overflow: hidden; flex: 1; color: #657089; font-size: 9px; text-overflow: ellipsis; white-space: nowrap; }
+.drawing-library-asset > span { display: flex; align-items: center; gap: 5px; }
+.drawing-library-asset > span small { flex: 0 0 auto; padding: 2px 4px; border-radius: 4px; color: #6875b8; background: #f0f2ff; font-size: 7px; }
+.drawing-chart-source, .drawing-a11y-description { width: 100%; min-width: 0; resize: vertical; padding: 7px; border: 1px solid #e3e6ee; border-radius: 6px; color: #4c566d; background: #fff; font: 9px/1.45 ui-monospace, SFMono-Regular, Menlo, monospace; }
+.drawing-chart-source { min-height: 72px; max-height: 150px; }
+.drawing-chart-table-scroll { width: 100%; max-height: 190px; overflow: auto; border: 1px solid #e9ebf2; border-radius: 6px; background: #fff; }
+.drawing-chart-table { width: max-content; min-width: 100%; border-collapse: separate; border-spacing: 0; color: #657089; font-size: 8px; }
+.drawing-chart-table th, .drawing-chart-table td { min-width: 86px; padding: 3px; border-right: 1px solid #eff0f5; border-bottom: 1px solid #eff0f5; }
+.drawing-chart-table th:first-child { position: sticky; left: 0; z-index: 1; min-width: 45px; width: 45px; background: #fafbfe; }
+.drawing-chart-table thead th { position: sticky; top: 0; z-index: 2; background: #f7f8fc; }
+.drawing-chart-table thead th:first-child { z-index: 3; }
+.drawing-chart-table input { width: 100%; min-width: 72px; height: 25px; padding: 0 5px; border: 1px solid #e7e9f0; border-radius: 4px; color: #4c566d; font-size: 8px; }
+.drawing-a11y-description { font-family: inherit; }
+.drawing-extension-list { display: flex; width: 100%; max-height: 160px; flex-direction: column; overflow: auto; }
+.drawing-extension-row { display: flex; min-width: 0; align-items: center; gap: 6px; padding: 6px 0; border-bottom: 1px solid #eff0f5; }
+.drawing-extension-row > div { display: flex; min-width: 0; flex: 1; flex-direction: column; gap: 2px; }
+.drawing-extension-row strong { color: #56617a; font-size: 9px; }
+.drawing-extension-row small, .drawing-extension-row span { color: #8a91a1; font-size: 8px; line-height: 1.35; }
+.drawing-extension-row span { overflow: hidden; text-overflow: ellipsis; }
+.drawing-a11y-order-list { display: flex; width: 100%; max-height: 130px; flex-direction: column; gap: 3px; overflow: auto; }
+.drawing-a11y-order-row { display: flex; min-width: 0; align-items: center; gap: 3px; padding: 2px; border: 1px solid #edf0f5; border-radius: 5px; }
+.drawing-a11y-order-row > .button:first-child { overflow: hidden; max-width: 38%; text-overflow: ellipsis; }
+.drawing-a11y-order-row input { min-width: 35px; height: 25px; flex: 1; padding: 0 5px; border: 1px solid #e6e9f0; border-radius: 4px; color: #58637a; font-size: 8px; }
+.drawing-a11y-order-row .tool-button { width: 23px; height: 24px; }
+.drawing-checkpoint-diff { grid-column: 1 / -1; }
+.drawing-checkpoint-diff svg { height: 100px; }
+.drawing-feature-panel .drawing-feature-details > summary { color: #6a748b; font-size: 9px; }
+.drawing-panel-status { margin: 5px 2px 0; padding: 5px 7px; border: 1px solid #e8ebf4; border-radius: 6px; background: #fafbfe; }
 .drawing-command-backdrop { position: absolute; z-index: 20; inset: 0; display: grid; place-items: start center; padding: 16vh 16px 16px; background: #17203955; backdrop-filter: blur(3px); }
 .drawing-command-palette { display: flex; width: min(520px, 100%); max-height: min(60vh, 520px); flex-direction: column; gap: 7px; padding: 9px; border: 1px solid #dfe3ed; border-radius: 10px; background: #fff; box-shadow: 0 20px 55px #17203940; }
 .drawing-command-palette input { height: 36px; padding: 0 10px; border: 1px solid #e4e7ef; border-radius: 7px; color: #39445d; font-size: 12px; }
@@ -3202,4 +3236,79 @@
   .task-create-options-grid .task-multi-hint { grid-column: 1; }
   .task-calendar { overflow-x: auto; }
   .task-template-list > article { flex-wrap: wrap; }
+}
+
+/* Keep the task controls in their own columns on tablet widths. */
+@media (min-width: 651px) and (max-width: 900px) {
+  .task-manager-page.task-view-list .task-row {
+    grid-template-columns: 18px minmax(0, 1fr) minmax(82px, 92px) minmax(90px, 100px) minmax(76px, 86px) 30px;
+  }
+  .task-manager-page.task-view-list .task-main { grid-column: 2; grid-row: 1; }
+  .task-manager-page.task-view-list .task-row > input[type="date"] { grid-column: 3; grid-row: 1; width: 100%; padding-inline: 4px; }
+  .task-manager-page.task-view-list .task-row > select:first-of-type { grid-column: 4; grid-row: 1; width: 100%; padding-inline: 4px; }
+  .task-manager-page.task-view-list .task-row > select:last-of-type { grid-column: 5; grid-row: 1; width: 100%; padding-inline: 4px; }
+  .task-manager-page.task-view-list .task-row > .task-timer-button { grid-column: 6; grid-row: 1; }
+}
+
+.task-manager-page .task-board .task-row {
+  grid-template-columns: 18px minmax(0, 1fr);
+  align-items: start;
+}
+.task-manager-page .task-board .task-row > .task-main { grid-column: 2; grid-row: auto; }
+.task-manager-page .task-board .task-row > input[type="date"],
+.task-manager-page .task-board .task-row > select { grid-column: 2; grid-row: auto; width: 100%; min-width: 0; height: 29px; padding-inline: 5px; }
+.task-manager-page .task-board .task-row > .task-timer-button { grid-column: 2; grid-row: auto; justify-self: end; }
+.task-manager-page .task-week-columns .task-row {
+  grid-template-columns: 16px minmax(0, 1fr) 100px;
+  align-items: start;
+}
+.task-manager-page .task-week-columns .task-main { grid-column: 2; grid-row: 1; }
+.task-manager-page .task-week-columns .task-row > input[type="date"] { grid-column: 3; grid-row: 1; width: 100%; padding-inline: 4px; }
+.task-manager-page .task-week-columns .task-row > .task-timer-button { grid-column: 3; grid-row: 2; justify-self: end; }
+
+/* Project cards follow their content instead of stretching into tall empty panels. */
+.project-dashboard-content .project-dashboard-grid {
+  flex: 0 0 auto;
+  align-content: start;
+  grid-auto-rows: max-content;
+}
+
+@media (min-width: 761px) {
+  .create-note-page-layout {
+    flex: 1 1 auto;
+    min-height: 0;
+    grid-template-rows: minmax(0, 1fr);
+    align-items: start;
+  }
+  .create-note-settings-card { align-self: start; }
+  .create-note-preview-panel { min-height: 0; align-self: stretch; }
+  .create-note-preview-content { min-height: 0; max-height: none; }
+}
+
+@media (any-pointer: coarse) and (min-width: 701px) and (max-width: 1024px) {
+  .all-notes-move-button { width: 42px; height: 42px; }
+  .create-note-page-field select,
+  .create-note-default-template { min-height: 42px; }
+  .task-manager-page .task-create-form > input,
+  .task-manager-page .task-create-form > select,
+  .task-manager-page .task-row > input[type="date"],
+  .task-manager-page .task-row > select { min-height: 42px; height: 42px; }
+  .task-manager-page .task-timer-button { width: 42px; height: 42px; }
+  .task-manager-page.task-view-list .task-row { grid-template-columns: 18px minmax(0, 1fr) minmax(82px, 92px) minmax(90px, 100px) minmax(76px, 86px) 42px; }
+  .task-view-switch button,
+  .task-create-options > summary,
+  .project-dashboard-toolbar button,
+  .project-timeline-item > button,
+  .project-dashboard-recent button,
+  .collection-nav,
+  .link-audit-list article > button { min-height: 42px; }
+  .collections-sidebar > form .button,
+  .workspace-layout-dialog > form .button,
+  .workspace-layout-list .button,
+  .task-template-panel .button,
+  .ai-workspace-add-control .button,
+  .ai-workspace-section-heading > .button,
+  .ai-workspace-template-editor .button { min-height: 42px; }
+  .ai-workspace-profile-top .icon-button,
+  .ai-task-queue-controls .icon-button { width: 42px; height: 42px; }
 }

@@ -40,8 +40,17 @@ export function wikiTargets(markdown: string): string[] {
 export function resolveWikiTarget(notes: Note[], target: string): Note | undefined {
   const exactId = notes.find(note => note.id === target)
   if (exactId) return exactId
-  const needle = normalize(target)
+  let decodedTarget = target.trim()
+  try { decodedTarget = decodeURIComponent(decodedTarget) } catch { /* Keep literal spaces and malformed escapes. */ }
+  const withoutHeading = decodedTarget.split(/[＃#^]/, 1)[0].replace(/\\/g, '/').replace(/\.md$/i, '').replace(/^\/+|\/+$/g, '')
+  const needle = normalize(withoutHeading)
+  const baseName = needle.split('/').at(-1) ?? needle
   return notes.find(note => normalize(note.title) === needle || note.aliases?.some(alias => normalize(alias) === needle))
+    ?? notes.find(note => {
+      const notePath = normalize(`${note.folder}/${note.title}`).replace(/^importowane\//, '')
+      return notePath === needle || notePath.endsWith(`/${needle}`)
+    })
+    ?? notes.find(note => normalize(note.title) === baseName || note.aliases?.some(alias => normalize(alias) === baseName))
 }
 
 export function backlinksFor(notes: Note[], note: Note): Note[] {

@@ -44,6 +44,17 @@ npm run dev
 
 Podgląd Vite działa w zwykłej przeglądarce i używa IndexedDB jako trybu deweloperskiego. Do codziennego zapisu w katalogach i plikach uruchamiaj wersję Tauri.
 
+## Testy automatyczne
+
+Testy przeglądarkowe Playwright uruchomisz po jednorazowym pobraniu Chromium, jeśli system nie ma już zainstalowanej jego wersji:
+
+```sh
+npx playwright install chromium
+npm run test:e2e
+```
+
+`npm run test:e2e:ui` otwiera interaktywny runner, `npm run test:e2e:headed` pokazuje przeglądarkę, a `npm run test:e2e:types` sprawdza typy testów. Instrukcje, konfigurację z już uruchomionym serwerem oraz opis pokrycia znajdziesz w [dokumentacji testów](tests/e2e/README.md). GitHub Actions uruchamia testy przy pushu i pull requeście.
+
 ## Licencje
 
 Interfejs i główne zależności używają licencji open source dopuszczających wykorzystanie komercyjne. Przed dystrybucją należy dołączyć wymagane informacje o licencjach zależności.

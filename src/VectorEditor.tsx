@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from 'react'
+import { zipSync } from 'fflate'
 import {
   AlignCenterHorizontal, AlignEndHorizontal, AlignStartHorizontal, ArrowDownWideNarrow, ArrowRight, Check, Circle, Combine,
   ClipboardCopy, ClipboardPaste, Copy, Download, Eye, EyeOff, Grid3X3, Group, History, ImagePlus, Layers,
@@ -48,6 +49,10 @@ type MiniObject = { id: string; box: Box; color: string }
 type EditorPanel = 'canvas' | 'style' | 'layers' | 'workflow'
 type DocumentUnit = 'px' | 'mm' | 'in'
 type EditorGuide = { axis: 'x' | 'y'; value: number; locked?: boolean }
+type SvgLibraryItem = { id: string; name: string; markup: string; kind?: 'component' | 'template'; packageId?: string }
+type SvgPalettePreset = { id: string; name: string; colors: string[] }
+type StylusProfile = { smoothing: number; pressureSensitivity: number }
+type SvgExtensionPackage = { id: string; name: string; category: string; description: string; items: SvgLibraryItem[] }
 type EditorViewOptions = { grid: boolean; gridSize: number; snap: boolean; snapGeometry: boolean; smartGuides: boolean; rulers: boolean; guides: EditorGuide[] }
 
 type TextEdit = { input: HTMLInputElement; x: number; y: number; element?: SVGElement; fontSize: number; keepTool: boolean }
@@ -60,6 +65,146 @@ const HEIGHT = 500
 const SNAP_DISTANCE = 4
 const OBJECT_TAGS = new Set(['g', 'rect', 'circle', 'ellipse', 'line', 'polygon', 'polyline', 'path', 'text', 'image', 'use'])
 const SVG_NS = 'http://www.w3.org/2000/svg'
+const DEFAULT_STYLUS_PROFILE: StylusProfile = { smoothing: .85, pressureSensitivity: 1 }
+
+function readLocalJson<T>(key: string, fallback: T): T {
+  try { return (JSON.parse(localStorage.getItem(key) ?? 'null') as T | null) ?? fallback } catch { return fallback }
+}
+
+function extensionSvg(markup: string): string {
+  return `<svg xmlns="${SVG_NS}" viewBox="0 0 120 80">${markup}</svg>`
+}
+
+const SVG_EXTENSION_CATALOG: SvgExtensionPackage[] = [
+  {
+    id: 'process-flow', name: 'Schematy procesów', category: 'Procesy i przepływy', description: 'Węzły, decyzje i gotowy szablon prostego procesu.',
+    items: [
+      { id: 'process-step', name: 'Krok procesu', kind: 'component', markup: extensionSvg('<rect x="8" y="8" width="104" height="64" rx="12" fill="#eef1ff" stroke="#586fd8" stroke-width="3"/><text x="60" y="45" text-anchor="middle" font-size="12" fill="#26345c">Krok</text>') },
+      { id: 'process-decision', name: 'Decyzja', kind: 'component', markup: extensionSvg('<path d="M60 4 116 40 60 76 4 40Z" fill="#fff3da" stroke="#d58e28" stroke-width="3"/><text x="60" y="44" text-anchor="middle" font-size="11" fill="#63471c">Decyzja</text>') },
+      { id: 'process-template', name: 'Szablon procesu', kind: 'template', markup: extensionSvg('<rect x="5" y="25" width="38" height="28" rx="10" fill="#eaf7f1" stroke="#28836c" stroke-width="2"/><text x="24" y="43" text-anchor="middle" font-size="8">Start</text><path d="M43 39h20m-5-5 5 5-5 5" fill="none" stroke="#65718a" stroke-width="2"/><rect x="63" y="25" width="48" height="28" rx="8" fill="#eef1ff" stroke="#586fd8" stroke-width="2"/><text x="87" y="43" text-anchor="middle" font-size="8">Działanie</text>') },
+    ],
+  },
+  {
+    id: 'network-map', name: 'Sieci i infrastruktura', category: 'Technologia', description: 'Symbole hosta, bazy danych i topologii sieci.',
+    items: [
+      { id: 'network-server', name: 'Serwer', kind: 'component', markup: extensionSvg('<rect x="25" y="8" width="70" height="64" rx="8" fill="#edf5ff" stroke="#4383bd" stroke-width="3"/><path d="M36 25h48M36 40h48M36 55h48" stroke="#4383bd" stroke-width="3"/><circle cx="78" cy="25" r="2" fill="#2b9a83"/><circle cx="78" cy="40" r="2" fill="#2b9a83"/><circle cx="78" cy="55" r="2" fill="#2b9a83"/>') },
+      { id: 'network-database', name: 'Baza danych', kind: 'component', markup: extensionSvg('<ellipse cx="60" cy="18" rx="38" ry="11" fill="#f1edff" stroke="#815cc7" stroke-width="3"/><path d="M22 18v44c0 6 17 11 38 11s38-5 38-11V18M22 40c0 6 17 11 38 11s38-5 38-11" fill="none" stroke="#815cc7" stroke-width="3"/>') },
+    ],
+  },
+  {
+    id: 'electrical-basics', name: 'Schematy elektryczne', category: 'Elektrotechnika', description: 'Podstawowe symbole elementów i prosty szablon obwodu.',
+    items: [
+      { id: 'electrical-resistor', name: 'Rezystor', kind: 'component', markup: extensionSvg('<path d="M5 40h18l8-16 14 32 14-32 14 32 14-32 10 16h12" fill="none" stroke="#3c4b68" stroke-width="3" stroke-linejoin="round"/>') },
+      { id: 'electrical-lamp', name: 'Żarówka', kind: 'component', markup: extensionSvg('<circle cx="60" cy="36" r="23" fill="#fff6d8" stroke="#bd8a24" stroke-width="3"/><path d="m44 20 32 32m0-32L44 52M52 62h16m-14 7h12" stroke="#bd8a24" stroke-width="3"/>') },
+      { id: 'electrical-template', name: 'Szablon obwodu', kind: 'template', markup: extensionSvg('<circle cx="20" cy="40" r="12" fill="#fff6d8" stroke="#bd8a24" stroke-width="2"/><path d="M20 28v-9m-8 0h16m-8 42v9M32 40h20l8-12 12 24 8-12h20" fill="none" stroke="#3c4b68" stroke-width="2.5"/>') },
+    ],
+  },
+]
+
+type ParsedChart = { categories: string[]; series: { name: string; values: (number | null)[] }[] }
+
+function parseCsvMatrix(source: string): { rows: string[][]; delimiter: string } {
+  const text = source.replace(/^\uFEFF/, '')
+  const firstLine = text.split(/\r?\n/, 1)[0] ?? ''
+  const delimiter = [';', '\t', ','].map(value => ({ value, count: firstLine.split(value).length - 1 })).sort((a, b) => b.count - a.count)[0]?.value ?? ','
+  const rows = text.split(/\r?\n/).filter(line => line.trim()).map(line => {
+    const cells: string[] = []
+    let value = ''; let quoted = false
+    for (let index = 0; index < line.length; index++) {
+      const character = line[index]
+      if (character === '"' && line[index + 1] === '"' && quoted) { value += '"'; index++ }
+      else if (character === '"') quoted = !quoted
+      else if (character === delimiter && !quoted) { cells.push(value.trim()); value = '' }
+      else value += character
+    }
+    cells.push(value.trim())
+    return cells
+  })
+  return { rows, delimiter }
+}
+
+function serializeCsvMatrix(rows: string[][], delimiter: string): string {
+  return rows.map(row => row.map(value => {
+    const cell = value ?? ''
+    return cell.includes(delimiter) || cell.includes('"') || /[\r\n]/.test(cell) ? `"${cell.replaceAll('"', '""')}"` : cell
+  }).join(delimiter)).join('\n')
+}
+
+function parseChartCsv(source: string): ParsedChart {
+  const rows = parseCsvMatrix(source).rows
+  if (rows.length < 2 || rows[0].length < 2) throw new Error('Dodaj nagłówek kategorii oraz co najmniej jedną kolumnę liczbową.')
+  const headers = rows[0]
+  const categories: string[] = []
+  const numericRows: (number | null)[][] = []
+  rows.slice(1).forEach(row => {
+    if (!row[0]?.trim()) return
+    const values = headers.slice(1).map((_, index) => {
+      const value = row[index + 1]?.trim()
+      if (!value) return null
+      const parsed = Number(value.replace(',', '.'))
+      return Number.isFinite(parsed) ? parsed : null
+    })
+    if (values.some(value => value !== null)) { categories.push(row[0]); numericRows.push(values) }
+  })
+  const series = headers.slice(1).map((name, column) => ({ name: name || `Seria ${column + 1}`, values: numericRows.map(row => row[column] ?? null) })).filter(item => item.values.some(value => value !== null))
+  if (!categories.length || !series.length) throw new Error('Nie znaleziono wierszy z wartościami liczbowymi.')
+  return { categories, series }
+}
+
+function buildDataChart(csv: string, type: 'bar' | 'line', id: string = crypto.randomUUID(), palette = ['#596fd8', '#e76c75', '#2b9a83', '#f0a84b', '#8a5bc2', '#3e8cc9']): SVGGElement {
+  const data = parseChartCsv(csv)
+  const group = document.createElementNS(SVG_NS, 'g')
+  group.setAttribute('data-object-id', id); group.setAttribute('data-layer-name', type === 'bar' ? 'Wykres słupkowy' : 'Wykres liniowy')
+  group.setAttribute('data-linked-chart', 'true'); group.setAttribute('data-chart-type', type); group.setAttribute('data-chart-csv', csv)
+  group.setAttribute('pointer-events', 'all')
+  const width = 360; const height = 240; const left = 42; const right = 14; const top = 18; const bottom = 42
+  const plotWidth = width - left - right; const plotHeight = height - top - bottom
+  const allValues = data.series.flatMap(series => series.values.filter((value): value is number => value !== null))
+  const min = Math.min(0, ...allValues); const max = Math.max(1, ...allValues); const range = max - min || 1
+  const y = (value: number) => top + plotHeight - (value - min) / range * plotHeight
+  const create = (tag: string, attrs: Record<string, string>, content?: string) => {
+    const element = document.createElementNS(SVG_NS, tag)
+    Object.entries(attrs).forEach(([key, value]) => element.setAttribute(key, value))
+    if (content) element.textContent = content
+    group.append(element); return element
+  }
+  create('path', { d: `M ${left} ${top} V ${top + plotHeight} H ${width - right}`, fill: 'none', stroke: '#8b96ad', 'stroke-width': '1.5' })
+  const colors = palette.length ? palette : ['#596fd8', '#e76c75', '#2b9a83', '#f0a84b', '#8a5bc2', '#3e8cc9']
+  data.categories.forEach((category, index) => {
+    const center = left + (index + .5) * plotWidth / data.categories.length
+    create('text', { x: `${center}`, y: `${height - 14}`, 'text-anchor': 'middle', 'font-size': `${Math.min(11, 120 / data.categories.length)}`, fill: '#536078' }, category.slice(0, 18))
+  })
+  data.series.forEach((series, seriesIndex) => {
+    const color = colors[seriesIndex % colors.length]
+    const points = series.values.map((value, index) => value === null ? null : ({ x: left + (index + .5) * plotWidth / data.categories.length, y: y(value), value })).filter((point): point is { x: number; y: number; value: number } => Boolean(point))
+    if (type === 'line') {
+      if (points.length > 1) create('path', { d: points.map((point, index) => `${index ? 'L' : 'M'} ${point.x} ${point.y}`).join(' '), fill: 'none', stroke: color, 'stroke-width': '3', 'stroke-linecap': 'round', 'stroke-linejoin': 'round' })
+      points.forEach(point => create('circle', { cx: `${point.x}`, cy: `${point.y}`, r: '4', fill: color, stroke: '#fff', 'stroke-width': '1.5' }))
+    } else {
+      const groupWidth = plotWidth / data.categories.length * .76
+      const barWidth = groupWidth / data.series.length
+      points.forEach(point => {
+        const index = Math.round((point.x - left) / plotWidth * data.categories.length - .5)
+        const barX = point.x - groupWidth / 2 + seriesIndex * barWidth
+        const zero = y(0); const topY = Math.min(zero, point.y)
+        create('rect', { x: `${barX}`, y: `${topY}`, width: `${Math.max(1, barWidth - 2)}`, height: `${Math.max(1, Math.abs(zero - point.y))}`, rx: '2', fill: color, 'data-category-index': `${index}` })
+      })
+    }
+  })
+  data.series.forEach((series, index) => {
+    const legendY = 10 + (index % 2) * 12
+    create('circle', { cx: `${left + index * 112}`, cy: `${legendY}`, r: '3', fill: colors[index % colors.length] })
+    create('text', { x: `${left + index * 112 + 6}`, y: `${legendY + 3}`, 'font-size': '8', fill: '#65718a' }, series.name.slice(0, 18))
+  })
+  return group
+}
+
+function downloadBlob(blob: Blob, filename: string) {
+  const url = URL.createObjectURL(blob)
+  const link = document.createElement('a')
+  link.href = url; link.download = filename; link.click()
+  window.setTimeout(() => URL.revokeObjectURL(url), 1200)
+}
 
 function readViewBox(stage: SVGSVGElement): ViewBox {
   const values = (stage.getAttribute('viewBox') ?? `0 0 ${WIDTH} ${HEIGHT}`).split(/[ ,]+/).map(Number)
@@ -115,7 +260,7 @@ function penPath(points: PenNode[]): string {
   return path
 }
 
-function smoothStroke(points: Point[]): string {
+function smoothStroke(points: Point[], smoothing = 1): string {
   if (!points.length) return ''
   if (points.length === 1) return `M ${rounded(points[0].x)} ${rounded(points[0].y)} l 0.1 0`
   let path = `M ${rounded(points[0].x)} ${rounded(points[0].y)}`
@@ -124,18 +269,19 @@ function smoothStroke(points: Point[]): string {
     const start = points[index]
     const end = points[index + 1]
     const next = points[Math.min(points.length - 1, index + 2)]
-    const control1 = { x: start.x + (end.x - previous.x) / 6, y: start.y + (end.y - previous.y) / 6 }
-    const control2 = { x: end.x - (next.x - start.x) / 6, y: end.y - (next.y - start.y) / 6 }
+    const tension = Math.max(0, Math.min(1.5, smoothing)) / 6
+    const control1 = { x: start.x + (end.x - previous.x) * tension, y: start.y + (end.y - previous.y) * tension }
+    const control2 = { x: end.x - (next.x - start.x) * tension, y: end.y - (next.y - start.y) * tension }
     path += ` C ${rounded(control1.x)} ${rounded(control1.y)} ${rounded(control2.x)} ${rounded(control2.y)} ${rounded(end.x)} ${rounded(end.y)}`
   }
   return path
 }
 
-function pressureStroke(points: Point[], width: number): string {
+function pressureStroke(points: Point[], width: number, sensitivity = 1): string {
   if (!points.length) return ''
   const roundedPoint = (value: number) => Number(value.toFixed(2))
   if (points.length === 1) {
-    const pressure = Math.max(.08, Math.min(1, points[0].pressure ?? .5))
+    const pressure = Math.max(.08, Math.min(1, .5 + ((points[0].pressure ?? .5) - .5) * sensitivity))
     const radius = Math.max(.1, width * (.18 + pressure * 1.22) / 2)
     const x = roundedPoint(points[0].x); const y = roundedPoint(points[0].y); const r = roundedPoint(radius)
     return `M ${x - r} ${y} a ${r} ${r} 0 1 0 ${r * 2} 0 a ${r} ${r} 0 1 0 ${-r * 2} 0 Z`
@@ -148,7 +294,7 @@ function pressureStroke(points: Point[], width: number): string {
     const dx = after.x - before.x
     const dy = after.y - before.y
     const length = Math.hypot(dx, dy) || 1
-    const pressure = Math.max(.08, Math.min(1, point.pressure ?? .5))
+    const pressure = Math.max(.08, Math.min(1, .5 + ((point.pressure ?? .5) - .5) * sensitivity))
     const radius = Math.max(.1, width * (.18 + pressure * 1.22) / 2)
     const nx = -dy / length * radius
     const ny = dx / length * radius
@@ -494,6 +640,47 @@ function snapshotContent(stage: Drawing): string {
   const copy = stage.node.cloneNode(true) as SVGSVGElement
   copy.querySelectorAll('[data-editor-ui]').forEach(element => element.remove())
   return copy.innerHTML
+}
+
+function checkpointDiffPreview(currentContent: string, priorContent: string, width: number, height: number): string {
+  const parse = (content: string) => new DOMParser().parseFromString(`<svg xmlns="${SVG_NS}">${content}</svg>`, 'image/svg+xml').documentElement
+  const current = parse(currentContent); const prior = parse(priorContent)
+  const directElements = (root: Element) => Array.from(root.children).filter((element): element is SVGElement => element instanceof SVGElement && OBJECT_TAGS.has(element.tagName.toLowerCase()))
+  const currentObjects = directElements(current); const priorObjects = directElements(prior)
+  const byId = (objects: SVGElement[]) => new Map(objects.map((element, index) => [element.getAttribute('data-object-id') || `old-index-${index}`, element]))
+  const oldById = byId(priorObjects); const newById = byId(currentObjects)
+  const svg = document.createElementNS(SVG_NS, 'svg')
+  svg.setAttribute('xmlns', SVG_NS); svg.setAttribute('width', `${width}`); svg.setAttribute('height', `${height}`); svg.setAttribute('viewBox', `0 0 ${width} ${height}`)
+  const oldDefs = prior.querySelector('defs')
+  const newDefs = current.querySelector('defs')
+  if (newDefs) svg.append(newDefs.cloneNode(true))
+  else if (oldDefs) svg.append(oldDefs.cloneNode(true))
+  currentObjects.forEach((object, index) => {
+    const id = object.getAttribute('data-object-id') || `old-index-${index}`
+    const old = oldById.get(id)
+    const clone = object.cloneNode(true) as SVGElement
+    const state = !old ? 'dodano' : old.outerHTML === object.outerHTML ? 'bez-zmian' : 'zmieniono'
+    clone.setAttribute('data-porownanie', state)
+    if (state === 'bez-zmian') clone.style.setProperty('opacity', '.16', 'important')
+    else {
+      clone.style.setProperty('stroke', state === 'dodano' ? '#188866' : '#d38a18', 'important')
+      clone.style.setProperty('stroke-width', '4', 'important')
+      clone.style.setProperty('stroke-dasharray', state === 'dodano' ? 'none' : '7 4', 'important')
+    }
+    svg.append(clone)
+  })
+  priorObjects.forEach((object, index) => {
+    const id = object.getAttribute('data-object-id') || `old-index-${index}`
+    if (newById.has(id)) return
+    const clone = object.cloneNode(true) as SVGElement
+    clone.setAttribute('data-porownanie', 'usunieto')
+    clone.style.setProperty('opacity', '.75', 'important')
+    clone.style.setProperty('stroke', '#ce4b58', 'important')
+    clone.style.setProperty('stroke-width', '4', 'important')
+    clone.style.setProperty('stroke-dasharray', '5 4', 'important')
+    svg.append(clone)
+  })
+  return sanitizeSvg(new XMLSerializer().serializeToString(svg))
 }
 
 function getBox(element: SVGElement): Box | undefined {
@@ -1171,6 +1358,8 @@ export function VectorEditor({
   const fontWeightRef = useRef('600')
   const textAlignRef = useRef('start')
   const fontItalicRef = useRef(false)
+  const smoothingRef = useRef(DEFAULT_STYLUS_PROFILE.smoothing)
+  const pressureSensitivityRef = useRef(DEFAULT_STYLUS_PROFILE.pressureSensitivity)
   const [activePanel, setActivePanel] = useState<EditorPanel>('canvas')
   const [tool, setTool] = useState<Tool>('select')
   const [shapeId, setShapeId] = useState('flow-process')
@@ -1180,6 +1369,7 @@ export function VectorEditor({
   const [fillColor, setFillColor] = useState('#dfe4ff')
   const [fillEnabled, setFillEnabled] = useState(true)
   const [strokeWidth, setStrokeWidth] = useState(3)
+  const [stylusProfile, setStylusProfile] = useState<StylusProfile>(() => readLocalJson('no-tie-svg-stylus-profile', DEFAULT_STYLUS_PROFILE))
   const [fontSize, setFontSize] = useState(24)
   const [polygonSides, setPolygonSides] = useState(6)
   const [arrowMode, setArrowMode] = useState<ArrowMode>('end')
@@ -1207,7 +1397,8 @@ export function VectorEditor({
   const [checkpoints, setCheckpoints] = useState<Checkpoint[]>([])
   const [miniObjects, setMiniObjects] = useState<MiniObject[]>([])
   const [exportSize, setExportSize] = useState({ width: 800, height: 500 })
-  const [exportFormat, setExportFormat] = useState<'svg' | 'png' | 'sprite'>('svg')
+  const [exportFormat, setExportFormat] = useState<'svg' | 'png' | 'pdf' | 'sprite'>('svg')
+  const [allArtboardsFormat, setAllArtboardsFormat] = useState<'svg' | 'png' | 'pdf'>('png')
   const [exportTransparent, setExportTransparent] = useState(true)
   const [vectorizeDetail, setVectorizeDetail] = useState(32)
   const [artboardPreset, setArtboardPreset] = useState('360x220')
@@ -1249,10 +1440,10 @@ export function VectorEditor({
   const [linkedImageId, setLinkedImageId] = useState('')
   const [compareCheckpointId, setCompareCheckpointId] = useState('')
   const [shapeBuilderOperation, setShapeBuilderOperation] = useState<'union' | 'subtract' | 'intersect' | 'exclude'>('union')
-  const [assetLibrary, setAssetLibrary] = useState<{ id: string; name: string; markup: string }[]>(() => {
+  const [assetLibrary, setAssetLibrary] = useState<SvgLibraryItem[]>(() => {
     try {
       const value = JSON.parse(localStorage.getItem('no-tie-svg-assets') ?? '[]')
-      return Array.isArray(value) ? value.filter(item => item && typeof item.id === 'string' && typeof item.name === 'string' && typeof item.markup === 'string') : []
+      return Array.isArray(value) ? value.filter(item => item && typeof item.id === 'string' && typeof item.name === 'string' && typeof item.markup === 'string').map(item => ({ ...item, kind: item.kind === 'template' ? 'template' as const : 'component' as const })) : []
     } catch { return [] }
   })
   const [assetNameDraft, setAssetNameDraft] = useState('')
@@ -1268,6 +1459,22 @@ export function VectorEditor({
   const [accessibilityReport, setAccessibilityReport] = useState<string[]>([])
   const [optimizationEnabled, setOptimizationEnabled] = useState(true)
   const [artboardExportId, setArtboardExportId] = useState('')
+  const [layoutDirection, setLayoutDirection] = useState<'horizontal' | 'vertical'>('horizontal')
+  const [layoutSpacing, setLayoutSpacing] = useState(56)
+  const [chartCsv, setChartCsv] = useState('Etap,Wartość\nPlan,12\nRealizacja,9\nPozostało,3')
+  const [chartType, setChartType] = useState<'bar' | 'line'>('bar')
+  const chartImportInput = useRef<HTMLInputElement>(null)
+  const extensionImportInput = useRef<HTMLInputElement>(null)
+  const [chartTargetId, setChartTargetId] = useState('')
+  const [documentA11yTitle, setDocumentA11yTitle] = useState(asset?.fileName?.replace(/\.svg$/i, '') ?? 'Schemat')
+  const [documentA11yDescription, setDocumentA11yDescription] = useState('Diagram utworzony w edytorze SVG.')
+  const [paletteNameDraft, setPaletteNameDraft] = useState('')
+  const [paletteDraftColors, setPaletteDraftColors] = useState(['#596fd8', '#e76c75', '#2b9a83', '#f0a84b', '#8a5bc2', '#3e8cc9'])
+  const [activePaletteId, setActivePaletteId] = useState('')
+  const [customPalettes, setCustomPalettes] = useState<SvgPalettePreset[]>(() => readLocalJson('no-tie-svg-palettes', []))
+  const [installedExtensionIds, setInstalledExtensionIds] = useState<string[]>(() => readLocalJson('no-tie-svg-installed-extensions', []))
+  const [extensionPackageName, setExtensionPackageName] = useState('Mój zestaw SVG')
+  const [extensionNotice, setExtensionNotice] = useState('')
   const [offsetDistance, setOffsetDistance] = useState(4)
   const [patternKind, setPatternKind] = useState<'dots' | 'lines' | 'diagonal'>('dots')
   const [optimizationReport, setOptimizationReport] = useState('')
@@ -1311,6 +1518,11 @@ export function VectorEditor({
   useEffect(() => { fontWeightRef.current = fontWeight }, [fontWeight])
   useEffect(() => { textAlignRef.current = textAlign }, [textAlign])
   useEffect(() => { fontItalicRef.current = fontItalic }, [fontItalic])
+  useEffect(() => {
+    smoothingRef.current = stylusProfile.smoothing
+    pressureSensitivityRef.current = stylusProfile.pressureSensitivity
+    try { localStorage.setItem('no-tie-svg-stylus-profile', JSON.stringify(stylusProfile)) } catch { /* The active profile remains available in memory. */ }
+  }, [stylusProfile])
   useEffect(() => { eyedropperRef.current = eyedropper; if (drawing.current) renderOverlay(drawing.current, selectedIdsRef.current) }, [eyedropper])
 
   useEffect(() => {
@@ -1365,6 +1577,8 @@ export function VectorEditor({
   useEffect(() => {
     try { localStorage.setItem('no-tie-svg-assets', JSON.stringify(assetLibrary.slice(-40))) } catch { /* the asset library stays available for this editor session */ }
   }, [assetLibrary])
+  useEffect(() => { try { localStorage.setItem('no-tie-svg-palettes', JSON.stringify(customPalettes.slice(-20))) } catch { /* palettes remain usable for this session */ } }, [customPalettes])
+  useEffect(() => { try { localStorage.setItem('no-tie-svg-installed-extensions', JSON.stringify(installedExtensionIds)) } catch { /* installed packs remain available for this session */ } }, [installedExtensionIds])
 
   const chooseTool = (nextTool: Tool) => {
     if (activePen.current && nextTool !== 'pen') finishPenAction.current()
@@ -1841,7 +2055,7 @@ export function VectorEditor({
           if (currentTool === 'freehand') {
             const pressureSensitive = event.pointerType === 'pen'
             if (pressureSensitive) {
-              created.element.attr({ d: pressureStroke([startPoint], strokeWidthRef.current), fill: strokeColorRef.current, stroke: 'none', 'data-pressure-stroke': 'true' })
+              created.element.attr({ d: pressureStroke([startPoint], strokeWidthRef.current, pressureSensitivityRef.current), fill: strokeColorRef.current, stroke: 'none', 'data-pressure-stroke': 'true' })
             }
             interaction.current = { type: 'freehand', element: created.element, id: created.id, points: [startPoint], keepTool: event.ctrlKey, pressureSensitive }
           } else {
@@ -2012,7 +2226,7 @@ export function VectorEditor({
           const last = current.points.at(-1)!
           if (Math.hypot(samplePoint.x - last.x, samplePoint.y - last.y) >= 1.2 && current.points.length < 1600) current.points.push(samplePoint)
         })
-        current.element.attr('d', current.pressureSensitive ? pressureStroke(current.points, strokeWidthRef.current) : smoothStroke(current.points))
+        current.element.attr('d', current.pressureSensitive ? pressureStroke(current.points, strokeWidthRef.current, pressureSensitivityRef.current) : smoothStroke(current.points, smoothingRef.current))
         const bounds = pointsBounds(current.points)
         renderOverlay(stage, [current.id], { dimensions: bounds })
       } else if (current.type === 'pen-node') {
@@ -2181,7 +2395,7 @@ export function VectorEditor({
         const location = point(event)
         const last = current.points.at(-1)!
         if (Math.hypot(location.x - last.x, location.y - last.y) >= 0.5 && current.points.length < 1600) current.points.push(location)
-        current.element.attr('d', current.pressureSensitive ? pressureStroke(current.points, strokeWidthRef.current) : smoothStroke(current.points))
+        current.element.attr('d', current.pressureSensitive ? pressureStroke(current.points, strokeWidthRef.current, pressureSensitivityRef.current) : smoothStroke(current.points, smoothingRef.current))
         const bounds = pointsBounds(current.points)
         if (smartDrawingRef.current) {
           if (smartShapeIdRef.current !== 'auto') {
@@ -3302,7 +3516,7 @@ export function VectorEditor({
     selected.forEach(element => root.append(element.cloneNode(true)))
     const name = assetNameDraft.trim() || selected[0].getAttribute('data-layer-name') || 'Zasób SVG'
     const markup = sanitizeSvg(new XMLSerializer().serializeToString(root))
-    setAssetLibrary(current => [...current, { id: crypto.randomUUID(), name, markup }].slice(-40))
+    setAssetLibrary(current => [...current, { id: crypto.randomUUID(), name, markup, kind: 'component' as const }].slice(-40))
     setAssetNameDraft('')
     setWorkflowMessage(`Dodano „${name}” do biblioteki zasobów.`)
   }
@@ -3332,6 +3546,18 @@ export function VectorEditor({
       })))
       const group = document.createElementNS(SVG_NS, 'g')
       group.setAttribute('data-object-id', crypto.randomUUID()); group.setAttribute('data-layer-name', assetItem.name)
+      if (assetItem.packageId) {
+        const sourceBox = (parsed.documentElement.getAttribute('viewBox') ?? '').trim().split(/[\s,]+/).map(Number)
+        if (sourceBox.length === 4 && sourceBox.every(Number.isFinite) && sourceBox[2] > 0 && sourceBox[3] > 0) {
+          const [, , sourceWidth, sourceHeight] = sourceBox
+          const scale = Math.max(.01, Math.min(2, 160 / sourceWidth, 100 / sourceHeight))
+          const centerX = viewBoxRef.current.x + viewBoxRef.current.width / 2
+          const centerY = viewBoxRef.current.y + viewBoxRef.current.height / 2
+          const offsetX = centerX - (sourceBox[0] + sourceWidth / 2) * scale
+          const offsetY = centerY - (sourceBox[1] + sourceHeight / 2) * scale
+          group.setAttribute('transform', `translate(${rounded(offsetX)} ${rounded(offsetY)}) scale(${rounded(scale)}) translate(${-sourceBox[0]} ${-sourceBox[1]})`)
+        }
+      }
       definitionCopies.forEach(copy => rootDefs.append(copy))
       objectCopies.forEach(copy => group.append(copy))
       stage.node.append(group); recordHistory(stage); select([group.getAttribute('data-object-id') ?? ''])
@@ -3428,6 +3654,20 @@ export function VectorEditor({
     })
   }
 
+  function saveCustomPalette() {
+    const name = paletteNameDraft.trim()
+    if (!name) return
+    const preset: SvgPalettePreset = { id: crypto.randomUUID(), name, colors: paletteDraftColors.map(color => toHexColor(color) ?? '#596fd8') }
+    setCustomPalettes(current => [...current.filter(item => item.name.toLocaleLowerCase('pl') !== name.toLocaleLowerCase('pl')), preset].slice(-20))
+    setActivePaletteId(preset.id); setPaletteNameDraft('')
+    setWorkflowMessage(`Zapisano paletę „${name}”.`)
+  }
+
+  function removeCustomPalette(id: string) {
+    setCustomPalettes(current => current.filter(item => item.id !== id))
+    if (activePaletteId === id) setActivePaletteId('')
+  }
+
   function saveStylePreset() {
     const element = selectedElements()[0]
     if (!element) return
@@ -3470,6 +3710,69 @@ export function VectorEditor({
       }
     })
     setAccessibilityReport(issues); setAccessibilityOpen(true)
+  }
+
+  function applyAccessibilityExport() {
+    const stage = drawing.current
+    if (!stage) return
+    const title = stage.node.querySelector('title') ?? document.createElementNS(SVG_NS, 'title')
+    const description = stage.node.querySelector('desc') ?? document.createElementNS(SVG_NS, 'desc')
+    title.id ||= `svg-title-${crypto.randomUUID()}`
+    description.id ||= `svg-description-${crypto.randomUUID()}`
+    title.textContent = documentA11yTitle.trim() || 'Schemat SVG'
+    description.textContent = documentA11yDescription.trim() || 'Diagram wektorowy.'
+    if (!title.parentNode) stage.node.prepend(title)
+    if (!description.parentNode) title.after(description)
+    stage.node.setAttribute('role', 'img')
+    stage.node.setAttribute('aria-labelledby', `${title.id} ${description.id}`)
+    stage.node.setAttribute('focusable', 'true')
+    const ordered = directObjects(stage.node)
+      .filter(element => !element.hasAttribute('data-artboard') && !['line'].includes(element.tagName.toLowerCase()))
+      .sort((first, second) => {
+        const firstOrder = Number(first.getAttribute('data-a11y-order'))
+        const secondOrder = Number(second.getAttribute('data-a11y-order'))
+        const firstHasOrder = Number.isFinite(firstOrder) && firstOrder > 0
+        const secondHasOrder = Number.isFinite(secondOrder) && secondOrder > 0
+        if (firstHasOrder && secondHasOrder) return firstOrder - secondOrder
+        if (firstHasOrder) return -1
+        if (secondHasOrder) return 1
+        return 0
+      })
+    ordered.forEach((element, index) => {
+      const objectId = element.getAttribute('data-object-id') ?? `a11y-${index + 1}`
+      if (!element.id) element.id = `svg-object-${objectId.replace(/[^\w-]/g, '-')}`
+      const label = element.getAttribute('aria-label') || element.getAttribute('data-layer-name') || `${element.tagName.toLowerCase()} ${index + 1}`
+      element.setAttribute('role', 'img'); element.setAttribute('aria-label', label)
+      element.setAttribute('tabindex', `${index + 1}`); element.setAttribute('data-a11y-order', `${index + 1}`)
+      const next = ordered[index + 1]
+      if (next) element.setAttribute('aria-flowto', next.id || `svg-object-${(next.getAttribute('data-object-id') ?? '').replace(/[^\w-]/g, '-')}`)
+      else element.removeAttribute('aria-flowto')
+    })
+    recordHistory(stage)
+    setWorkflowMessage(`Przygotowano eksport dostępności: tytuł, opis i kolejność fokusu dla ${ordered.length} elementów.`)
+  }
+
+  function moveAccessibilityFocus(id: string, direction: -1 | 1) {
+    const stage = drawing.current
+    if (!stage) return
+    const ordered = directObjects(stage.node)
+      .filter(element => !element.hasAttribute('data-artboard') && !['line'].includes(element.tagName.toLowerCase()))
+      .sort((first, second) => {
+        const firstOrder = Number(first.getAttribute('data-a11y-order'))
+        const secondOrder = Number(second.getAttribute('data-a11y-order'))
+        const firstHasOrder = Number.isFinite(firstOrder) && firstOrder > 0
+        const secondHasOrder = Number.isFinite(secondOrder) && secondOrder > 0
+        if (firstHasOrder && secondHasOrder) return firstOrder - secondOrder
+        if (firstHasOrder) return -1
+        if (secondHasOrder) return 1
+        return 0
+      })
+    const currentIndex = ordered.findIndex(element => element.getAttribute('data-object-id') === id)
+    const nextIndex = currentIndex + direction
+    if (currentIndex < 0 || nextIndex < 0 || nextIndex >= ordered.length) return
+    ;[ordered[currentIndex], ordered[nextIndex]] = [ordered[nextIndex], ordered[currentIndex]]
+    ordered.forEach((element, index) => element.setAttribute('data-a11y-order', `${index + 1}`))
+    recordHistory(stage)
   }
 
   function optimizeSvgDocument(svg: SVGSVGElement) {
@@ -3546,9 +3849,11 @@ export function VectorEditor({
     if (!stage || !bounds || !originals.length) return
     const defs = stage.node.querySelector('defs') ?? document.createElementNS(SVG_NS, 'defs')
     if (!defs.parentNode) stage.node.prepend(defs)
+    const reusableSymbolCount = defs.querySelectorAll('symbol').length
     const symbol = document.createElementNS(SVG_NS, 'symbol')
     const id = `symbol-${crypto.randomUUID()}`
     symbol.setAttribute('id', id)
+    symbol.setAttribute('data-layer-name', `Komponent ${reusableSymbolCount + 1}`)
     symbol.setAttribute('viewBox', `${bounds.x} ${bounds.y} ${Math.max(bounds.width, 1)} ${Math.max(bounds.height, 1)}`)
     originals.forEach(element => {
       const clone = element.cloneNode(true) as SVGElement
@@ -3560,7 +3865,7 @@ export function VectorEditor({
     const objectId = crypto.randomUUID()
     use.setAttribute('href', `#${id}`)
     use.setAttribute('x', `${bounds.x}`); use.setAttribute('y', `${bounds.y}`); use.setAttribute('width', `${bounds.width}`); use.setAttribute('height', `${bounds.height}`)
-    use.setAttribute('data-object-id', objectId); use.setAttribute('data-layer-name', 'Wystąpienie symbolu'); use.setAttribute('pointer-events', 'all')
+    use.setAttribute('data-object-id', objectId); use.setAttribute('data-layer-name', symbol.getAttribute('data-layer-name') || 'Wystąpienie symbolu'); use.setAttribute('pointer-events', 'all')
     const selected = new Set(originals.map(element => element.getAttribute('data-object-id')).filter((value): value is string => Boolean(value)))
     stage.node.querySelectorAll<SVGLineElement>('line[data-start-target], line[data-end-target]').forEach(line => {
       for (const side of ['start', 'end'] as const) if (selected.has(line.getAttribute(`data-${side}-target`) ?? '')) line.setAttribute(`data-${side}-target`, objectId)
@@ -3584,6 +3889,204 @@ export function VectorEditor({
     stage.node.append(use)
     recordHistory(stage)
     select([id])
+  }
+
+  function updateReusableSymbol(symbolId: string) {
+    const stage = drawing.current
+    const symbol = stage?.node.querySelector<SVGSymbolElement>(`defs symbol#${CSS.escape(symbolId)}`)
+    const originals = selectedElements().filter(element => element.tagName.toLowerCase() !== 'use' && !element.hasAttribute('data-artboard'))
+    const bounds = unionBoxes(originals.map(getBox))
+    if (!stage || !symbol || !originals.length || !bounds) return
+    const copies = originals.map(element => {
+      const clone = element.cloneNode(true) as SVGElement
+      ;[clone, ...Array.from(clone.querySelectorAll('*'))].forEach(node => { node.removeAttribute('data-object-id'); node.removeAttribute('data-group-id'); node.removeAttribute('data-a11y-order') })
+      return clone
+    })
+    symbol.replaceChildren(...copies)
+    symbol.setAttribute('viewBox', `${bounds.x} ${bounds.y} ${Math.max(1, bounds.width)} ${Math.max(1, bounds.height)}`)
+    symbol.setAttribute('data-component-updated-at', new Date().toISOString())
+    recordHistory(stage)
+    setWorkflowMessage(`Wspólny komponent „${symbol.getAttribute('data-layer-name') || symbolId}” został zaktualizowany; wszystkie jego wystąpienia korzystają teraz z nowej definicji.`)
+  }
+
+  function layoutByRelationships() {
+    const stage = drawing.current
+    if (!stage) return
+    const nodes = directObjects(stage.node).filter(element => !element.hasAttribute('data-artboard') && !['line', 'text'].includes(element.tagName.toLowerCase()))
+    const nodeIds = new Set(nodes.map(element => element.getAttribute('data-object-id')).filter((id): id is string => Boolean(id)))
+    const edges = directObjects(stage.node).filter(element => element.tagName.toLowerCase() === 'line').flatMap(line => {
+      const from = line.getAttribute('data-start-target'); const to = line.getAttribute('data-end-target')
+      return from && to && nodeIds.has(from) && nodeIds.has(to) ? [{ from, to }] : []
+    })
+    if (nodes.length < 2 || !edges.length) { setWorkflowMessage('Połącz co najmniej dwie figury strzałkami, aby automatycznie ułożyć diagram.'); return }
+    const ranks = new Map([...nodeIds].map(id => [id, 0]))
+    let cyclic = false
+    for (let pass = 0; pass < nodes.length; pass++) {
+      let changed = false
+      edges.forEach(edge => {
+        const nextRank = (ranks.get(edge.from) ?? 0) + 1
+        if (nextRank > (ranks.get(edge.to) ?? 0)) { ranks.set(edge.to, nextRank); changed = true }
+      })
+      if (!changed) break
+      if (pass === nodes.length - 1) cyclic = true
+    }
+    if (cyclic) { setWorkflowMessage('Diagram zawiera cykl zależności. Przerwij jedną z pętli, aby ułożyć go hierarchicznie.'); return }
+    const levels = new Map<number, SVGElement[]>()
+    nodes.forEach(node => { const rank = ranks.get(node.getAttribute('data-object-id') ?? '') ?? 0; levels.set(rank, [...(levels.get(rank) ?? []), node]) })
+    levels.forEach(level => level.sort((a, b) => {
+      const first = getBox(a); const second = getBox(b)
+      return layoutDirection === 'horizontal' ? (first?.y ?? 0) - (second?.y ?? 0) : (first?.x ?? 0) - (second?.x ?? 0)
+    }))
+    const levelNumbers = [...levels.keys()].sort((a, b) => a - b)
+    const boxByNode = new Map(nodes.map(node => [node, getBox(node)]))
+    const margin = Math.max(28, Math.min(layoutSpacing, 96))
+    let cursor = margin
+    let maximumCrossExtent = margin
+    levelNumbers.forEach(rank => {
+      const level = levels.get(rank) ?? []
+      const mainExtent = Math.max(1, ...level.map(node => layoutDirection === 'horizontal' ? boxByNode.get(node)?.width ?? 1 : boxByNode.get(node)?.height ?? 1))
+      let crossCursor = margin
+      level.forEach(node => {
+        const box = boxByNode.get(node)
+        if (!box) return
+        const x = layoutDirection === 'horizontal' ? cursor : crossCursor
+        const y = layoutDirection === 'horizontal' ? crossCursor : cursor
+        moveElementBy(node, x - box.x, y - box.y)
+        crossCursor += (layoutDirection === 'horizontal' ? box.height : box.width) + margin
+      })
+      maximumCrossExtent = Math.max(maximumCrossExtent, crossCursor)
+      cursor += mainExtent + margin * 1.4
+    })
+    const nextWidth = Math.max(documentSize.width, layoutDirection === 'horizontal' ? cursor : maximumCrossExtent) + margin
+    const nextHeight = Math.max(documentSize.height, layoutDirection === 'vertical' ? cursor : maximumCrossExtent) + margin
+    documentSizeRef.current = { width: nextWidth, height: nextHeight }; documentRatio.current = nextWidth / Math.max(nextHeight, 1)
+    setDocumentSize({ width: nextWidth, height: nextHeight })
+    stage.node.setAttribute('width', `${nextWidth}`); stage.node.setAttribute('height', `${nextHeight}`)
+    changeViewBox({ x: 0, y: 0, width: nextWidth, height: nextHeight })
+    updateConnectors(stage.node); recordHistory(stage)
+    setWorkflowMessage(`Rozmieszczono ${nodes.length} figur według ${edges.length} połączeń.`)
+  }
+
+  async function loadChartCsv(file?: File) {
+    if (!file) return
+    if (!/\.(csv|tsv)$/i.test(file.name) && !/text\/(csv|tab-separated-values)/i.test(file.type)) { setWorkflowMessage('Wybierz plik CSV lub TSV.'); return }
+    try {
+      setChartCsv(await file.text())
+      setWorkflowMessage(`Wczytano dane z pliku ${file.name}. Po edycji źródła wybierz „Odśwież wykres”.`)
+    } catch { setWorkflowMessage('Nie udało się odczytać wybranego pliku danych.') }
+  }
+
+  function updateChartTableCell(rowIndex: number, columnIndex: number, value: string) {
+    const { rows, delimiter } = parseCsvMatrix(chartCsv)
+    while (rows.length <= rowIndex) rows.push([])
+    while (rows[rowIndex].length <= columnIndex) rows[rowIndex].push('')
+    rows[rowIndex][columnIndex] = value
+    setChartCsv(serializeCsvMatrix(rows, delimiter))
+  }
+
+  function addChartTableRow() {
+    const { rows, delimiter } = parseCsvMatrix(chartCsv)
+    if (!rows.length) rows.push(['Etap', 'Wartość'])
+    rows.push(Array.from({ length: Math.max(2, rows[0].length) }, (_item, index) => index === 0 ? `Nowa pozycja ${rows.length}` : ''))
+    setChartCsv(serializeCsvMatrix(rows, delimiter))
+  }
+
+  function addChartTableColumn() {
+    const { rows, delimiter } = parseCsvMatrix(chartCsv)
+    if (!rows.length) rows.push(['Etap', 'Wartość'])
+    rows[0].push(`Seria ${rows[0].length}`)
+    rows.slice(1).forEach(row => row.push(''))
+    setChartCsv(serializeCsvMatrix(rows, delimiter))
+  }
+
+  function removeChartTableRow() {
+    const { rows, delimiter } = parseCsvMatrix(chartCsv)
+    if (rows.length <= 2) return
+    rows.pop()
+    setChartCsv(serializeCsvMatrix(rows, delimiter))
+  }
+
+  function loadExistingChart(id: string) {
+    const chart = drawing.current ? elementsForIds(drawing.current.node, [id])[0] : undefined
+    if (!chart || chart.getAttribute('data-linked-chart') !== 'true') return
+    setChartTargetId(id)
+    setChartCsv(chart.getAttribute('data-chart-csv') ?? '')
+    setChartType(chart.getAttribute('data-chart-type') === 'line' ? 'line' : 'bar')
+    setWorkflowMessage(`Wczytano źródło wykresu „${chart.getAttribute('data-layer-name') || 'Wykres'}”. Zmień tabelę i odśwież wykres.`)
+  }
+
+  function createOrRefreshDataChart() {
+    const stage = drawing.current
+    if (!stage) return
+    try {
+      const previous = chartTargetId ? elementsForIds(stage.node, [chartTargetId]).find(element => element.getAttribute('data-linked-chart') === 'true') : undefined
+      const id = previous?.getAttribute('data-object-id') ?? crypto.randomUUID()
+      const next = buildDataChart(chartCsv, chartType, id, palette)
+      if (previous) {
+        next.setAttribute('transform', previous.getAttribute('transform') ?? '')
+        next.setAttribute('data-layer-name', previous.getAttribute('data-layer-name') || (chartType === 'bar' ? 'Wykres słupkowy' : 'Wykres liniowy'))
+        previous.replaceWith(next)
+      } else {
+        const objects = directObjects(stage.node).map(getBox).filter((box): box is Box => Boolean(box))
+        const right = objects.length ? Math.max(...objects.map(box => box.x + box.width)) + 32 : 40
+        const top = objects.length ? Math.min(40, Math.max(12, ...objects.map(box => box.y))) : 40
+        next.setAttribute('transform', `translate(${rounded(right)} ${rounded(top)})`)
+        stage.node.append(next)
+        setChartTargetId(id)
+      }
+      updateConnectors(stage.node); recordHistory(stage); select([id])
+      setWorkflowMessage(previous ? 'Zaktualizowano wykres z bieżącej tabeli danych.' : 'Dodano wykres. Zachowaj źródło CSV, aby odświeżyć go później.')
+    } catch (error) {
+      setWorkflowMessage(error instanceof Error ? error.message : 'Nie udało się utworzyć wykresu z tych danych.')
+    }
+  }
+
+  function installExtensionPack(extension: SvgExtensionPackage) {
+    if (installedExtensionIds.includes(extension.id)) return
+    const nextItems = extension.items.map(item => ({ ...item, id: `${extension.id}:${item.id}`, packageId: extension.id }))
+    setAssetLibrary(current => [...current.filter(item => item.packageId !== extension.id), ...nextItems].slice(-80))
+    setInstalledExtensionIds(current => [...new Set([...current, extension.id])])
+    setExtensionNotice(`Dodano pakiet „${extension.name}” do biblioteki symboli i szablonów.`)
+  }
+
+  function uninstallExtensionPack(id: string) {
+    const extension = SVG_EXTENSION_CATALOG.find(item => item.id === id)
+    setAssetLibrary(current => current.filter(item => item.packageId !== id))
+    setInstalledExtensionIds(current => current.filter(item => item !== id))
+    setExtensionNotice(`Usunięto pakiet „${extension?.name ?? id}” z biblioteki.`)
+  }
+
+  function exportExtensionPackage() {
+    const pkg = { format: 'no-tie-svg-extension', version: 1, id: crypto.randomUUID(), name: extensionPackageName.trim() || 'Mój zestaw SVG', createdAt: new Date().toISOString(), items: assetLibrary.map(({ id, name, markup, kind }) => ({ id, name, markup, kind })), palettes: customPalettes, styles: stylePresets, namedColors }
+    downloadBlob(new Blob([JSON.stringify(pkg, null, 2)], { type: 'application/json;charset=utf-8' }), `${(pkg.name.toLowerCase().replace(/[^a-z0-9]+/g, '-') || 'zestaw-svg')}.notie-svgpack.json`)
+    setExtensionNotice(`Wyeksportowano zestaw „${pkg.name}”.`)
+  }
+
+  async function importExtensionPackage(file?: File) {
+    if (!file) return
+    try {
+      const value = JSON.parse(await file.text()) as { format?: string; name?: string; id?: string; items?: unknown; palettes?: unknown; styles?: unknown; namedColors?: unknown }
+      if (value.format !== 'no-tie-svg-extension' || !Array.isArray(value.items)) throw new Error('Plik nie jest pakietem rozszerzenia No-Tie SVG.')
+      const id = typeof value.id === 'string' ? value.id : crypto.randomUUID()
+      const items = value.items.filter((item): item is SvgLibraryItem => Boolean(item && typeof item === 'object' && typeof (item as SvgLibraryItem).name === 'string' && typeof (item as SvgLibraryItem).markup === 'string'))
+      if (!items.length) throw new Error('Pakiet nie zawiera prawidłowych symboli ani szablonów.')
+      const safeItems = items.map((item, index) => ({ ...item, id: `${id}:${item.id || index}`, packageId: id, markup: sanitizeSvg(item.markup) }))
+      setAssetLibrary(current => [...current.filter(item => item.packageId !== id), ...safeItems].slice(-80))
+      setInstalledExtensionIds(current => [...new Set([...current, id])])
+      if (Array.isArray(value.palettes)) {
+        const palettes = value.palettes.filter((palette): palette is SvgPalettePreset => Boolean(
+          palette && typeof palette === 'object'
+          && typeof (palette as SvgPalettePreset).id === 'string'
+          && typeof (palette as SvgPalettePreset).name === 'string'
+          && Array.isArray((palette as SvgPalettePreset).colors)
+          && (palette as SvgPalettePreset).colors.length > 0,
+        )).map(palette => ({ ...palette, colors: palette.colors.map(color => typeof color === 'string' ? toHexColor(color) : undefined).filter((color): color is string => Boolean(color)).slice(0, 9) })).filter(palette => palette.colors.length > 0)
+        setCustomPalettes(current => [...current.filter(item => !palettes.some(palette => palette.id === item.id)), ...palettes].slice(-20))
+      }
+      if (Array.isArray(value.styles)) setStylePresets(current => [...current, ...value.styles as typeof current].slice(-20))
+      if (Array.isArray(value.namedColors)) setNamedColors(current => [...current, ...value.namedColors as typeof current].slice(-24))
+      setExtensionNotice(`Zainstalowano ${safeItems.length} elementów z pakietu „${value.name || file.name}”.`)
+    } catch (error) { setExtensionNotice(error instanceof Error ? error.message : 'Nie udało się zainstalować pakietu.') }
   }
 
   function createCheckpoint() {
@@ -3638,18 +4141,18 @@ export function VectorEditor({
     return sanitizeSvg(new XMLSerializer().serializeToString(svg))
   }
 
-  function exportSvgSource(): string | undefined {
+  function exportSvgSource(format: 'svg' | 'png' | 'pdf' | 'sprite' = exportFormat, boardId = artboardExportId, size = exportSize): string | undefined {
     const stage = drawing.current
     if (!stage) return undefined
-    if (exportFormat === 'sprite') return exportSpriteSource()
+    if (format === 'sprite') return exportSpriteSource()
     const copy = stage.node.cloneNode(true) as SVGSVGElement
     copy.querySelectorAll('[data-editor-ui]').forEach(element => element.remove())
-    const removeBackground = fitToContent || (exportFormat === 'png' && exportTransparent)
+    const removeBackground = fitToContent || ((format === 'png' || format === 'pdf') && exportTransparent)
     if (removeBackground) copy.querySelectorAll('[data-background]').forEach(element => element.remove())
     else copy.querySelectorAll('[data-background]').forEach(element => element.removeAttribute('data-background'))
     copy.querySelectorAll('[data-artboard="true"]').forEach(element => element.remove())
-    copy.setAttribute('width', `${exportSize.width}`); copy.setAttribute('height', `${exportSize.height}`)
-    const artboard = artboardExportId ? directObjects(stage.node).find(element => element.getAttribute('data-object-id') === artboardExportId) : undefined
+    copy.setAttribute('width', `${size.width}`); copy.setAttribute('height', `${size.height}`)
+    const artboard = boardId ? directObjects(stage.node).find(element => element.getAttribute('data-object-id') === boardId) : undefined
     const artboardBounds = artboard ? getBox(artboard) : undefined
     if (artboardBounds) copy.setAttribute('viewBox', `${artboardBounds.x} ${artboardBounds.y} ${artboardBounds.width} ${artboardBounds.height}`)
     else if (fitToContent) {
@@ -3665,36 +4168,73 @@ export function VectorEditor({
     return sanitizeSvg(new XMLSerializer().serializeToString(copy))
   }
 
-  async function downloadExport() {
+  async function rasterizeSvg(source: string, format: 'png' | 'pdf', size: { width: number; height: number }): Promise<Blob> {
+    const url = URL.createObjectURL(new Blob([source], { type: 'image/svg+xml;charset=utf-8' }))
     try {
-      const source = exportSvgSource()
-      if (!source) return
-      const filename = `${asset?.fileName?.replace(/\.svg$/i, '') || 'schemat'}${artboardExportId ? '-plansza' : ''}.${exportFormat === 'png' ? 'png' : 'svg'}`
-      if (exportFormat !== 'png') {
-        const url = URL.createObjectURL(new Blob([source], { type: 'image/svg+xml;charset=utf-8' }))
-        const link = document.createElement('a'); link.href = url; link.download = filename; link.click(); window.setTimeout(() => URL.revokeObjectURL(url), 1000)
-        setWorkflowMessage(exportFormat === 'sprite' ? 'Pobrano arkusz sprite SVG.' : 'Pobrano plik SVG.')
-        return
-      }
-      const url = URL.createObjectURL(new Blob([source], { type: 'image/svg+xml;charset=utf-8' }))
-      try {
       const image = new Image()
       image.src = url
       await image.decode()
       const canvas = document.createElement('canvas')
-      canvas.width = exportSize.width; canvas.height = exportSize.height
+      canvas.width = Math.max(1, Math.min(8192, Math.round(size.width)))
+      canvas.height = Math.max(1, Math.min(8192, Math.round(size.height)))
       const context = canvas.getContext('2d')
-      if (!context) return
+      if (!context) throw new Error('Przeglądarka nie udostępniła płótna eksportu.')
       if (!exportTransparent) { context.fillStyle = '#fff'; context.fillRect(0, 0, canvas.width, canvas.height) }
       context.drawImage(image, 0, 0, canvas.width, canvas.height)
-      const png = await new Promise<Blob | null>(resolve => canvas.toBlob(resolve, 'image/png'))
-      if (!png) return
-        const pngUrl = URL.createObjectURL(png); const link = document.createElement('a'); link.href = pngUrl; link.download = filename; link.click(); window.setTimeout(() => URL.revokeObjectURL(pngUrl), 1000)
-        setWorkflowMessage('Pobrano plik PNG.')
-      } finally { window.setTimeout(() => URL.revokeObjectURL(url), 1000) }
+      if (format === 'png') {
+        const blob = await new Promise<Blob | null>(resolve => canvas.toBlob(resolve, 'image/png'))
+        if (!blob) throw new Error('Nie udało się przygotować pliku PNG.')
+        return blob
+      }
+      const { jsPDF } = await import('jspdf')
+      const pageWidth = canvas.width * .75; const pageHeight = canvas.height * .75
+      const pdf = new jsPDF({ unit: 'pt', format: [pageWidth, pageHeight], orientation: pageWidth >= pageHeight ? 'landscape' : 'portrait', compress: true })
+      pdf.addImage(canvas.toDataURL('image/png'), 'PNG', 0, 0, pageWidth, pageHeight, undefined, 'FAST')
+      return pdf.output('blob')
+    } finally { window.setTimeout(() => URL.revokeObjectURL(url), 1000) }
+  }
+
+  async function downloadExport() {
+    try {
+      const source = exportSvgSource(exportFormat)
+      if (!source) return
+      const extension = exportFormat === 'sprite' ? 'svg' : exportFormat
+      const filename = `${asset?.fileName?.replace(/\.svg$/i, '') || 'schemat'}${artboardExportId ? '-plansza' : ''}.${extension}`
+      const blob = exportFormat === 'svg' || exportFormat === 'sprite'
+        ? new Blob([source], { type: 'image/svg+xml;charset=utf-8' })
+        : await rasterizeSvg(source, exportFormat, exportSize)
+      downloadBlob(blob, filename)
+      setWorkflowMessage(exportFormat === 'sprite' ? 'Pobrano arkusz sprite SVG.' : `Pobrano plik ${exportFormat.toUpperCase()} (${exportSize.width} × ${exportSize.height} px).`)
     } catch {
       setWorkflowMessage('Nie udało się przygotować eksportu. Sprawdź rozmiar i zawartość SVG.')
     }
+  }
+
+  async function downloadAllArtboards() {
+    const stage = drawing.current
+    const boards = stage ? directObjects(stage.node).filter(element => element.hasAttribute('data-artboard')) : []
+    if (!stage || !boards.length) { setWorkflowMessage('Dodaj przynajmniej jedną planszę, aby pobrać osobne pliki.'); return }
+    try {
+      const files: Record<string, Uint8Array> = {}
+      for (const [index, board] of boards.entries()) {
+        const id = board.getAttribute('data-object-id') ?? ''
+        const bounds = getBox(board)
+        if (!bounds) continue
+        const scale = Math.min(exportSize.width / bounds.width, exportSize.height / bounds.height)
+        const size = { width: Math.max(1, Math.round(bounds.width * scale)), height: Math.max(1, Math.round(bounds.height * scale)) }
+        const source = exportSvgSource(allArtboardsFormat, id, size)
+        if (!source) continue
+        const baseSlug = (board.getAttribute('data-layer-name') || `plansza-${index + 1}`).normalize('NFKD').replace(/[\u0300-\u036f]/g, '').toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '') || `plansza-${index + 1}`
+        let slug = baseSlug
+        let suffix = 2
+        while (files[`${slug}.${allArtboardsFormat}`]) slug = `${baseSlug}-${suffix++}`
+        const blob = allArtboardsFormat === 'svg' ? new Blob([source], { type: 'image/svg+xml;charset=utf-8' }) : await rasterizeSvg(source, allArtboardsFormat, size)
+        files[`${slug}.${allArtboardsFormat}`] = new Uint8Array(await blob.arrayBuffer())
+      }
+      const zip = zipSync(files, { level: 6 })
+      downloadBlob(new Blob([zip], { type: 'application/zip' }), 'plansze-svg.zip')
+      setWorkflowMessage(`Pobrano ${Object.keys(files).length} osobnych plików ${allArtboardsFormat.toUpperCase()} w archiwum ZIP.`)
+    } catch { setWorkflowMessage('Nie udało się przygotować archiwum plansz.') }
   }
 
   async function importRaster(file?: File) {
@@ -3960,8 +4500,26 @@ export function VectorEditor({
   const linkedImages = drawing.current ? directObjects(drawing.current.node).filter(element => element.tagName.toLowerCase() === 'image' && !/^data:/i.test(element.getAttribute('href') ?? element.getAttribute('xlink:href') ?? '')) : []
   const compareCheckpoint = checkpoints.find(checkpoint => checkpoint.id === compareCheckpointId)
   const checkpointSvgPreview = (content: string) => sanitizeSvg(`<svg xmlns="${SVG_NS}" width="800" height="500" viewBox="0 0 ${documentSize.width} ${documentSize.height}">${content}</svg>`)
+  const checkpointDiffSource = compareCheckpoint && drawing.current
+    ? checkpointDiffPreview(snapshotContent(drawing.current), compareCheckpoint.content, documentSize.width, documentSize.height)
+    : ''
+  const linkedCharts = drawing.current ? directObjects(drawing.current.node).filter(element => element.getAttribute('data-linked-chart') === 'true') : []
+  const chartTableMatrix = parseCsvMatrix(chartCsv).rows
+  const chartTableColumnCount = Math.max(2, ...chartTableMatrix.map(row => row.length))
+  const accessibilityObjects = drawing.current ? directObjects(drawing.current.node)
+    .filter(element => !element.hasAttribute('data-artboard') && element.tagName.toLowerCase() !== 'line')
+    .sort((first, second) => {
+      const firstOrder = Number(first.getAttribute('data-a11y-order'))
+      const secondOrder = Number(second.getAttribute('data-a11y-order'))
+      const firstHasOrder = Number.isFinite(firstOrder) && firstOrder > 0
+      const secondHasOrder = Number.isFinite(secondOrder) && secondOrder > 0
+      if (firstHasOrder && secondHasOrder) return firstOrder - secondOrder
+      if (firstHasOrder) return -1
+      if (secondHasOrder) return 1
+      return 0
+    }) : []
   const zoomPercent = Math.round(documentSize.width / Math.max(viewBox.width, 1) * 100)
-  const palette = ['#596fd8', '#e76c75', '#2b9a83', '#f0a84b', '#222c42', '#8a5bc2', '#3e8cc9', '#ffffff', '#111827']
+  const palette = customPalettes.find(item => item.id === activePaletteId)?.colors ?? ['#596fd8', '#e76c75', '#2b9a83', '#f0a84b', '#222c42', '#8a5bc2', '#3e8cc9', '#ffffff', '#111827']
   const paletteCommands = [
     ...tools.map(item => ({ id: `tool:${item.id}`, label: `Narzędzie: ${item.label}` })),
     { id: 'undo', label: 'Cofnij' }, { id: 'redo', label: 'Ponów' }, { id: 'fit', label: 'Dopasuj cały rysunek' },
@@ -4082,11 +4640,32 @@ export function VectorEditor({
                 </div>
               })}
             </div></details>
+            <details className="drawing-feature-group drawing-feature-group-wide drawing-feature-dropdown"><summary>Pióro i rysik · wygładzanie i nacisk</summary><div className="drawing-feature-group-controls drawing-stylus-controls">
+              <label className="line-width-control"><span>Wygładzanie</span><input type="range" min="0" max="1.5" step="0.05" value={stylusProfile.smoothing} onChange={event => setStylusProfile(current => ({ ...current, smoothing: Number(event.target.value) }))} /><output>{stylusProfile.smoothing.toFixed(2)}</output></label>
+              <label className="line-width-control"><span>Czułość nacisku</span><input type="range" min="0" max="2" step="0.1" value={stylusProfile.pressureSensitivity} onChange={event => setStylusProfile(current => ({ ...current, pressureSensitivity: Number(event.target.value) }))} /><output>{stylusProfile.pressureSensitivity.toFixed(1)}×</output></label>
+              <button className="button secondary compact-feature-button" onClick={() => setStylusProfile(DEFAULT_STYLUS_PROFILE)}>Przywróć profil domyślny</button>
+              <span className="feature-help">Profil zapisuje się lokalnie. Rysik z naciskiem zmienia szerokość kreski; mysz używa stałego nacisku.</span>
+            </div></details>
           </div>}
 
           {activePanel === 'style' && <div className="drawing-feature-groups">
             <details className="drawing-feature-group drawing-feature-dropdown"><summary>Kolor i przezroczystość</summary><div className="drawing-feature-group-controls">
+              <div className="drawing-feature-row drawing-palette-manager">
+                <label className="drawing-select-control"><span>Zestaw kolorów</span><select value={activePaletteId || 'default'} onChange={event => {
+                  const id = event.target.value === 'default' ? '' : event.target.value
+                  setActivePaletteId(id)
+                  const preset = customPalettes.find(item => item.id === id)
+                  if (preset) { setPaletteNameDraft(preset.name); setPaletteDraftColors(preset.colors.slice(0, 6)) }
+                  else { setPaletteNameDraft(''); setPaletteDraftColors(['#596fd8', '#e76c75', '#2b9a83', '#f0a84b', '#8a5bc2', '#3e8cc9']) }
+                }}><option value="default">Domyślna</option>{customPalettes.map(item => <option key={item.id} value={item.id}>{item.name}</option>)}</select></label>
+                {activePaletteId && <button className="button secondary compact-feature-button" onClick={() => removeCustomPalette(activePaletteId)}>Usuń zestaw</button>}
+              </div>
               <div className="drawing-palette" aria-label="Paleta kolorów">{palette.map(color => <button key={color} className="palette-swatch" style={{ backgroundColor: color }} onClick={() => { applyStrokeColor(color); applyFillColor(color) }} title={`Ustaw kolor ${color}`} aria-label={`Ustaw kolor ${color}`} />)}</div>
+              <details className="drawing-feature-details"><summary>Zarządzaj paletami · {customPalettes.length}</summary><div className="drawing-advanced-controls">
+                <div className="drawing-feature-row drawing-palette-draft">{paletteDraftColors.map((color, index) => <label className="color-control" key={index} title={`Kolor ${index + 1}`}><input type="color" value={color} onChange={event => setPaletteDraftColors(current => current.map((item, colorIndex) => colorIndex === index ? event.target.value : item))} aria-label={`Kolor ${index + 1} nowej palety`} /></label>)}</div>
+                <div className="drawing-feature-row"><input className="drawing-inline-input" value={paletteNameDraft} onChange={event => setPaletteNameDraft(event.target.value)} placeholder="Nazwa palety" aria-label="Nazwa palety kolorów" /><button className="button secondary compact-feature-button" onClick={saveCustomPalette} disabled={!paletteNameDraft.trim()}>Zapisz paletę</button></div>
+                {customPalettes.map(item => <div className="drawing-custom-palette-row" key={item.id}><button className="button secondary compact-feature-button" onClick={() => { setActivePaletteId(item.id); setPaletteNameDraft(item.name); setPaletteDraftColors(item.colors.slice(0, 6)) }}>{item.name}</button><div className="drawing-palette" aria-label={`Kolory palety ${item.name}`}>{item.colors.slice(0, 6).map((color, index) => <span key={`${color}-${index}`} className="palette-swatch" style={{ backgroundColor: color }} />)}</div><button className="tool-button" onClick={() => removeCustomPalette(item.id)} aria-label={`Usuń paletę ${item.name}`}><X size={12} /></button></div>)}
+              </div></details>
               <button className={`button secondary compact-feature-button ${eyedropper ? 'feature-active' : ''}`} onClick={() => setEyedropper(value => !value)} title="Kliknij figurę, aby pobrać jej kolor"><Pipette size={14} />Pipeta</button>
               <label className="line-width-control"><span>Przezroczystość</span><input type="range" min="0" max="100" step="1" value={opacity} onChange={event => applyObjectOpacity(Number(event.target.value))} /><output>{opacity}%</output></label>
               <details className="drawing-feature-details"><summary>Kolory nazwane</summary><div className="drawing-advanced-controls">
@@ -4194,6 +4773,12 @@ export function VectorEditor({
                   <button className="button secondary compact-feature-button" onClick={() => alignSelectionToArtboard('bottom')} disabled={!selectedIds.length}>Do dołu</button>
                 </div></details>
               </div></details>
+              <details className="drawing-feature-group drawing-feature-dropdown"><summary>Automatyczny układ diagramu</summary><div className="drawing-feature-group-controls">
+                <label className="drawing-select-control"><span>Kierunek relacji</span><select value={layoutDirection} onChange={event => setLayoutDirection(event.target.value as 'horizontal' | 'vertical')}><option value="horizontal">Od lewej do prawej</option><option value="vertical">Od góry do dołu</option></select></label>
+                <label className="geometry-control"><span>Odstęp</span><input type="number" min="28" max="96" step="4" value={layoutSpacing} onChange={event => setLayoutSpacing(Math.max(28, Math.min(96, Number(event.target.value) || 28)))} /></label>
+                <button className="button secondary compact-feature-button" onClick={layoutByRelationships}>Rozmieść według połączeń</button>
+                <span className="feature-help">Używa strzałek połączonych z figurami jako relacji. Cykl w połączeniach blokuje układ hierarchiczny.</span>
+              </div></details>
               <details className="drawing-feature-group drawing-feature-dropdown"><summary>Grupy i kształty</summary><div className="drawing-feature-group-controls">
                 <button className="button secondary compact-feature-button" onClick={groupSelected} disabled={selectedIds.length < 2} title="Grupuje figury i zachowuje je do osobnej edycji">Połącz w grupę</button>
                 <button className="button secondary compact-feature-button" onClick={() => applyBoolean('union')} disabled={selectedIds.length < 2} title="Tworzy jedną wypełnioną sylwetkę z sumy figur">Suma kształtów</button>
@@ -4218,7 +4803,11 @@ export function VectorEditor({
               <details className="drawing-feature-group drawing-feature-dropdown"><summary>Symbole i skalowanie · {reusableSymbols.length}</summary><div className="drawing-feature-group-controls">
                 <label className="drawing-select-control"><span>Skalowanie grupy</span><select value={groupConstraint} onChange={event => applyGroupConstraint(event.target.value as 'free' | 'aspect')} disabled={!selectedIds.length}><option value="free">Dowolne</option><option value="aspect">Zachowaj proporcje</option></select></label>
                 <button className="button secondary compact-feature-button" onClick={createSymbolFromSelection} disabled={!selectedIds.length}>Zapisz zaznaczenie jako symbol</button>
-                {reusableSymbols.map((symbol, index) => <button key={symbol.id} className="button secondary compact-feature-button" onClick={() => insertSymbol(symbol.id ?? '')} title="Wstaw ponownie edytowalny symbol"><Plus size={12} />Symbol {index + 1}</button>)}
+                {reusableSymbols.map((symbol, index) => {
+                  const id = symbol.id ?? ''
+                  const label = symbol.getAttribute('data-layer-name') || `Komponent ${index + 1}`
+                  return <div className="drawing-symbol-row" key={id}><span>{label}</span><button className="button secondary compact-feature-button" onClick={() => insertSymbol(id)} title="Wstaw ponownie edytowalny symbol"><Plus size={12} />Wstaw</button><button className="button secondary compact-feature-button" onClick={() => updateReusableSymbol(id)} disabled={!selectedIds.length || selectedElements().every(element => element.tagName.toLowerCase() === 'use' || element.hasAttribute('data-artboard'))} title="Zastąp definicję; każde wystąpienie komponentu zostanie zaktualizowane">Aktualizuj</button></div>
+                })}
               </div></details>
             </div>
             <details className="drawing-layer-list-group drawing-feature-dropdown"><summary>Warstwy dokumentu · {layerItems.length}</summary><div className="drawing-layer-list">
@@ -4274,17 +4863,60 @@ export function VectorEditor({
               <details className="drawing-feature-details"><summary>Biblioteka zasobów</summary><div className="drawing-advanced-controls">
                 <div className="drawing-feature-row"><input className="drawing-inline-input" value={assetNameDraft} onChange={event => setAssetNameDraft(event.target.value)} placeholder="Nazwa zaznaczenia" aria-label="Nazwa zapisywanego zasobu" /><button className="button secondary compact-feature-button" onClick={saveSelectionAsAsset} disabled={!selectedIds.length}>Zapisz zaznaczenie</button></div>
                 {!assetLibrary.length && <span className="feature-help">Zapisane symbole można wstawiać w kolejnych dokumentach.</span>}
-                {assetLibrary.map(item => <div className="drawing-library-asset" key={item.id}><span>{item.name}</span><button className="button secondary compact-feature-button" onClick={() => insertLibraryAsset(item.id)}>Wstaw</button><button className="tool-button" onClick={() => setAssetLibrary(current => current.filter(assetItem => assetItem.id !== item.id))} aria-label={`Usuń zasób ${item.name}`}><X size={12} /></button></div>)}
+                {assetLibrary.map(item => <div className="drawing-library-asset" key={item.id}><span><small>{item.kind === 'template' ? 'Szablon' : 'Komponent'}</small>{item.name}</span><button className="button secondary compact-feature-button" onClick={() => insertLibraryAsset(item.id)}>Wstaw</button><button className="tool-button" onClick={() => setAssetLibrary(current => current.filter(assetItem => assetItem.id !== item.id))} aria-label={`Usuń zasób ${item.name}`}><X size={12} /></button></div>)}
               </div></details>
+            </section>
+            <section className="drawing-workflow-card"><h3><Waypoints size={15} />Wykresy z danych</h3>
+              <input ref={chartImportInput} hidden type="file" accept=".csv,.tsv,text/csv,text/tab-separated-values" onChange={event => { void loadChartCsv(event.target.files?.[0]); event.currentTarget.value = '' }} />
+              <div className="drawing-workflow-subgroup"><h4>Źródło</h4>
+                <button className="button secondary compact-feature-button" onClick={() => chartImportInput.current?.click()}>Wczytaj CSV lub TSV</button>
+                <textarea className="drawing-chart-source" value={chartCsv} onChange={event => setChartCsv(event.target.value)} aria-label="Dane źródłowe wykresu w formacie CSV" rows={4} />
+                <details className="drawing-feature-details"><summary>Edytuj dane jako tabelę</summary><div className="drawing-advanced-controls">
+                  <div className="drawing-chart-table-scroll"><table className="drawing-chart-table"><thead><tr><th scope="col" />{Array.from({ length: Math.min(chartTableColumnCount, 12) }, (_item, columnIndex) => <th scope="col" key={columnIndex}><input value={chartTableMatrix[0]?.[columnIndex] ?? ''} onChange={event => updateChartTableCell(0, columnIndex, event.target.value)} aria-label={`Nagłówek kolumny ${columnIndex + 1}`} /></th>)}</tr></thead><tbody>{chartTableMatrix.slice(1, 101).map((row, rowIndex) => <tr key={rowIndex}><th scope="row">{rowIndex + 1}</th>{Array.from({ length: Math.min(chartTableColumnCount, 12) }, (_item, columnIndex) => <td key={columnIndex}><input value={row[columnIndex] ?? ''} onChange={event => updateChartTableCell(rowIndex + 1, columnIndex, event.target.value)} aria-label={`Wiersz ${rowIndex + 1}, kolumna ${columnIndex + 1}`} /></td>)}</tr>)}</tbody></table></div>
+                  <div className="drawing-feature-row"><button className="button secondary compact-feature-button" onClick={addChartTableRow}>Dodaj wiersz</button><button className="button secondary compact-feature-button" onClick={addChartTableColumn}>Dodaj serię danych</button><button className="button secondary compact-feature-button" onClick={removeChartTableRow} disabled={chartTableMatrix.length <= 2}>Usuń ostatni wiersz</button></div>
+                  {(chartTableMatrix.length > 101 || chartTableColumnCount > 12) && <span className="feature-help">W tabeli edytujesz pierwsze 100 wierszy i 12 kolumn; pozostałe dane są dostępne w polu CSV.</span>}
+                  <span className="feature-help">Pierwszy wiersz to nagłówki, pierwsza kolumna to etykiety kategorii. Zmiany odświeżysz przyciskiem „Utwórz” lub „Odśwież wykres”.</span>
+                </div></details>
+                <span className="feature-help">Pierwsza kolumna to etykiety, kolejne kolumny zawierają wartości liczbowe. Edycja źródła nie zmienia wykresu, dopóki go nie odświeżysz.</span>
+              </div>
+              <div className="drawing-workflow-subgroup"><h4>Wykres</h4>
+                <label className="drawing-select-control"><span>Typ</span><select value={chartType} onChange={event => setChartType(event.target.value as 'bar' | 'line')}><option value="bar">Słupkowy</option><option value="line">Liniowy</option></select></label>
+                <label className="drawing-select-control"><span>Edytuj istniejący</span><select value={chartTargetId} onChange={event => { setChartTargetId(event.target.value); if (event.target.value) loadExistingChart(event.target.value) }}><option value="">Nowy wykres</option>{linkedCharts.map((chart, index) => <option key={chart.getAttribute('data-object-id')} value={chart.getAttribute('data-object-id') ?? ''}>{chart.getAttribute('data-layer-name') || `Wykres ${index + 1}`}</option>)}</select></label>
+                <button className="button secondary compact-feature-button" onClick={createOrRefreshDataChart}>{chartTargetId ? 'Odśwież wykres' : 'Utwórz wykres'}</button>
+              </div>
+            </section>
+            <section className="drawing-workflow-card"><h3><Shapes size={15} />Pakiety symboli</h3>
+              <input ref={extensionImportInput} hidden type="file" accept=".json,.notie-svgpack.json,application/json" onChange={event => { void importExtensionPackage(event.target.files?.[0]); event.currentTarget.value = '' }} />
+              <p className="feature-help">Instaluj gotowe zestawy symboli albo wczytaj własny pakiet do biblioteki zasobów.</p>
+              <div className="drawing-extension-list">{SVG_EXTENSION_CATALOG.map(extension => {
+                const installed = installedExtensionIds.includes(extension.id)
+                return <div className="drawing-extension-row" key={extension.id}><div><strong>{extension.name}</strong><small>{extension.category} · {extension.items.length} elementy</small><span>{extension.description}</span></div><button className="button secondary compact-feature-button" onClick={() => installed ? uninstallExtensionPack(extension.id) : installExtensionPack(extension)}>{installed ? 'Usuń' : 'Zainstaluj'}</button></div>
+              })}</div>
+              <div className="drawing-workflow-subgroup"><h4>Pakiet użytkownika</h4>
+                <div className="drawing-feature-row"><input className="drawing-inline-input" value={extensionPackageName} onChange={event => setExtensionPackageName(event.target.value)} aria-label="Nazwa pakietu SVG" placeholder="Nazwa pakietu" /><button className="button secondary compact-feature-button" onClick={exportExtensionPackage}>Eksportuj</button></div>
+                <button className="button secondary compact-feature-button" onClick={() => extensionImportInput.current?.click()}>Zainstaluj pakiet z pliku</button>
+                {extensionNotice && <p className="feature-help" role="status">{extensionNotice}</p>}
+              </div>
             </section>
             <section className="drawing-workflow-card"><h3><History size={15} />Historia i punkty kontrolne</h3>
               <button className="button secondary compact-feature-button" onClick={createCheckpoint}><Plus size={14} />Zapisz punkt kontrolny</button>
               <div className="drawing-checkpoint-list">{checkpoints.map(checkpoint => <div key={checkpoint.id}><button onClick={() => restoreCheckpoint(checkpoint)} title={checkpoint.label}>{checkpoint.label}</button><button className={compareCheckpointId === checkpoint.id ? 'selected' : ''} onClick={() => setCompareCheckpointId(current => current === checkpoint.id ? '' : checkpoint.id)} title="Porównaj zapis z bieżącym rysunkiem">Porównaj</button><button onClick={() => { setCheckpoints(current => current.filter(item => item.id !== checkpoint.id)); if (compareCheckpointId === checkpoint.id) setCompareCheckpointId('') }} aria-label="Usuń punkt kontrolny"><X size={12} /></button></div>)}</div>
-              {compareCheckpoint && <div className="drawing-checkpoint-compare"><figure><figcaption>Obecny rysunek</figcaption><div dangerouslySetInnerHTML={{ __html: checkpointSvgPreview(drawing.current ? snapshotContent(drawing.current) : '') }} /></figure><figure><figcaption>{new Date(compareCheckpoint.createdAt).toLocaleDateString('pl-PL')}</figcaption><div dangerouslySetInnerHTML={{ __html: checkpointSvgPreview(compareCheckpoint.content) }} /></figure></div>}
+              {compareCheckpoint && <div className="drawing-checkpoint-compare"><figure className="drawing-checkpoint-diff"><figcaption>Różnice · zielony: dodano · pomarańczowy: zmieniono · czerwony: usunięto</figcaption><div dangerouslySetInnerHTML={{ __html: checkpointDiffSource }} /></figure><figure><figcaption>Wersja z {new Date(compareCheckpoint.createdAt).toLocaleDateString('pl-PL')}</figcaption><div dangerouslySetInnerHTML={{ __html: checkpointSvgPreview(compareCheckpoint.content) }} /></figure></div>}
             </section>
             <section className="drawing-workflow-card"><h3><Check size={15} />Dostępność</h3>
               <button className="button secondary compact-feature-button" onClick={inspectAccessibility}>Sprawdź opisy i kontrast</button>
               <button className="button secondary compact-feature-button" onClick={addSelectedNodeTitle} disabled={!selectedIds.length}>Dodaj etykiety zaznaczeniu</button>
+              <details className="drawing-feature-details"><summary>Opis eksportu i kolejność fokusu · {accessibilityObjects.length}</summary><div className="drawing-advanced-controls">
+                <label className="drawing-select-control"><span>Tytuł SVG</span><input value={documentA11yTitle} onChange={event => setDocumentA11yTitle(event.target.value)} aria-label="Tytuł dostępnego dokumentu SVG" /></label>
+                <label className="drawing-select-control"><span>Opis SVG</span><textarea className="drawing-a11y-description" value={documentA11yDescription} onChange={event => setDocumentA11yDescription(event.target.value)} aria-label="Opis dostępnego dokumentu SVG" rows={2} /></label>
+                <span className="feature-help">Kolejność wpisów poniżej będzie kolejnością przejścia fokusu w eksporcie.</span>
+                <div className="drawing-a11y-order-list">{accessibilityObjects.map((element, index) => {
+                  const id = element.getAttribute('data-object-id') ?? ''
+                  const name = element.getAttribute('data-layer-name') || `${element.tagName.toLowerCase()} ${index + 1}`
+                  return <div className="drawing-a11y-order-row" key={id}><button className="button secondary compact-feature-button" onClick={() => select([id])} title="Zaznacz element na płótnie">{index + 1}. {name}</button><input aria-label={`Opis dostępności: ${name}`} defaultValue={element.getAttribute('aria-label') || name} onBlur={event => { const value = event.currentTarget.value.trim(); changeLayer(id, item => value ? item.setAttribute('aria-label', value) : item.removeAttribute('aria-label')) }} /><button className="tool-button" disabled={index === 0} onClick={() => moveAccessibilityFocus(id, -1)} aria-label={`Przenieś ${name} wyżej`}>↑</button><button className="tool-button" disabled={index === accessibilityObjects.length - 1} onClick={() => moveAccessibilityFocus(id, 1)} aria-label={`Przenieś ${name} niżej`}>↓</button></div>
+                })}</div>
+                <button className="button secondary compact-feature-button" onClick={applyAccessibilityExport}>Zastosuj opisy i kolejność fokusu do SVG</button>
+              </div></details>
               {accessibilityOpen && <div className="drawing-a11y-report" role="status">{accessibilityReport.length ? accessibilityReport.map((issue, index) => <p key={index}>{issue}</p>) : <p>Nie znaleziono brakujących opisów ani niskiego kontrastu tekstu.</p>}</div>}
             </section>
             <section className="drawing-workflow-card"><h3><History size={15} />Skróty i optymalizacja</h3>
@@ -4299,18 +4931,25 @@ export function VectorEditor({
               </div>
             </section>
             <section className="drawing-workflow-card"><h3><Download size={15} />Eksport</h3>
-              <div className="drawing-workflow-subgroup"><h4>Format i zakres</h4><div className="drawing-feature-row"><label className="drawing-select-control"><span>Format</span><select value={exportFormat} onChange={event => setExportFormat(event.target.value as 'svg' | 'png' | 'sprite')}><option value="svg">SVG</option><option value="sprite">Arkusz sprite SVG</option><option value="png">PNG</option></select></label>
+              <div className="drawing-workflow-subgroup"><h4>Format i zakres</h4><div className="drawing-feature-row"><label className="drawing-select-control"><span>Format</span><select value={exportFormat} onChange={event => setExportFormat(event.target.value as 'svg' | 'png' | 'pdf' | 'sprite')}><option value="svg">SVG</option><option value="sprite">Arkusz sprite SVG</option><option value="png">PNG</option><option value="pdf">PDF</option></select></label>
                 <label className="drawing-select-control"><span>Obszar</span><select value={artboardExportId} onChange={event => chooseArtboardExport(event.target.value)}><option value="">Cały dokument</option>{artboards.map((board, index) => <option key={board.getAttribute('data-object-id')} value={board.getAttribute('data-object-id') ?? ''}>{board.getAttribute('data-layer-name') || `Plansza ${index + 1}`}</option>)}</select></label>
               </div></div>
-              <div className="drawing-workflow-subgroup"><h4>Rozmiar i pobieranie</h4><div className="drawing-feature-row">
-                <label className="geometry-control"><span>Szerokość</span><input type="number" min="1" max="4096" value={exportSize.width} onChange={event => setExportSize(current => ({ ...current, width: Math.max(1, Number(event.target.value) || 1) }))} /></label>
-                <label className="geometry-control"><span>Wysokość</span><input type="number" min="1" max="4096" value={exportSize.height} onChange={event => setExportSize(current => ({ ...current, height: Math.max(1, Number(event.target.value) || 1) }))} /></label>
-                {exportFormat === 'png' && <label className="fill-toggle"><input type="checkbox" checked={exportTransparent} onChange={event => setExportTransparent(event.target.checked)} />Przezroczyste tło</label>}
+              <div className="drawing-workflow-subgroup"><h4>Rozdzielczość i pobieranie</h4><div className="drawing-feature-row">
+                <label className="geometry-control"><span>Szerokość px</span><input type="number" min="1" max="4096" value={exportSize.width} onChange={event => setExportSize(current => ({ ...current, width: Math.max(1, Number(event.target.value) || 1) }))} /></label>
+                <label className="geometry-control"><span>Wysokość px</span><input type="number" min="1" max="4096" value={exportSize.height} onChange={event => setExportSize(current => ({ ...current, height: Math.max(1, Number(event.target.value) || 1) }))} /></label>
+                {(exportFormat === 'png' || exportFormat === 'pdf') && <label className="fill-toggle"><input type="checkbox" checked={exportTransparent} onChange={event => setExportTransparent(event.target.checked)} />Przezroczyste tło</label>}
                 <button className="button secondary compact-feature-button" onClick={() => { void downloadExport() }}><Download size={14} />Pobierz {exportFormat.toUpperCase()}</button>
               </div></div>
+              <details className="drawing-feature-details"><summary>Osobne pliki dla plansz · {artboards.length}</summary><div className="drawing-advanced-controls">
+                <label className="drawing-select-control"><span>Format wszystkich plansz</span><select value={allArtboardsFormat} onChange={event => setAllArtboardsFormat(event.target.value as 'svg' | 'png' | 'pdf')}><option value="svg">SVG</option><option value="png">PNG</option><option value="pdf">PDF</option></select></label>
+                {(allArtboardsFormat === 'png' || allArtboardsFormat === 'pdf') && <label className="fill-toggle"><input type="checkbox" checked={exportTransparent} onChange={event => setExportTransparent(event.target.checked)} />Przezroczyste tło</label>}
+                <span className="feature-help">Każda plansza trafi do osobnego pliku. Ustawione wymiary są maksymalnymi bokami obrazu; proporcje planszy zostaną zachowane. Pliki pobierzesz jako ZIP.</span>
+                <button className="button secondary compact-feature-button" onClick={() => { void downloadAllArtboards() }} disabled={!artboards.length}><Download size={14} />Pobierz {artboards.length} plansz</button>
+              </div></details>
               {workflowMessage && <p className="feature-help" role="status">{workflowMessage}</p>}
             </section>
           </div>}
+          {workflowMessage && activePanel !== 'workflow' && <p className="drawing-panel-status feature-help" role="status">{workflowMessage}</p>}
         </div>
         {commandPaletteOpen && <div className="drawing-command-backdrop" role="presentation" onMouseDown={event => { if (event.target === event.currentTarget) setCommandPaletteOpen(false) }}>
           <section className="drawing-command-palette" role="dialog" aria-modal="true" aria-label="Paleta poleceń SVG">
