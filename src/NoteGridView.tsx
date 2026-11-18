@@ -1,10 +1,10 @@
-import { lazy, Suspense, useState, type WheelEvent as ReactWheelEvent } from 'react'
+import { lazy, Suspense, useDeferredValue, useMemo, useState, type WheelEvent as ReactWheelEvent } from 'react'
 import { Code2, Eye, FileText, Folder, X } from 'lucide-react'
-import { MarkdownSourceEditor } from './MarkdownSourceEditor'
 import type { MarkdownNoteAction } from './MarkdownContextMenu'
 import type { Note, NoteAsset, NoteAttachment } from './types'
 
 const MarkdownEditor = lazy(() => import('./MarkdownEditor').then(module => ({ default: module.MarkdownEditor })))
+const MarkdownSourceEditor = lazy(() => import('./MarkdownSourceEditor').then(module => ({ default: module.MarkdownSourceEditor })))
 
 export function NoteGridView({
   notes,
@@ -40,9 +40,29 @@ export function NoteGridView({
   onOpenAttachment: (fileName: string, sourceNoteId: string, page?: number, fragment?: string) => void
 }) {
   const [search, setSearch] = useState('')
-  const availableNotes = allNotes.filter(note => !notes.some(openNote => openNote.id === note.id))
-  const normalizedSearch = search.trim().toLocaleLowerCase('pl')
-  const filteredNotes = availableNotes.filter(note => `${note.title} ${note.folder}`.toLocaleLowerCase('pl').includes(normalizedSearch))
+  const deferredSearch = useDeferredValue(search)
+  const openNoteIds = useMemo(() => new Set(notes.map(note => note.id)), [notes])
+  const availableNotes = useMemo(() => allNotes.filter(note => !openNoteIds.has(note.id)), [allNotes, openNoteIds])
+  const assetsByNote = useMemo(() => {
+    const grouped = new Map<string, NoteAsset[]>()
+    for (const asset of assets) {
+      let items = grouped.get(asset.noteId)
+      if (!items) grouped.set(asset.noteId, items = [])
+      items.push(asset)
+    }
+    return grouped
+  }, [assets])
+  const attachmentsByNote = useMemo(() => {
+    const grouped = new Map<string, NoteAttachment[]>()
+    for (const attachment of attachments) {
+      let items = grouped.get(attachment.noteId)
+      if (!items) grouped.set(attachment.noteId, items = [])
+      items.push(attachment)
+    }
+    return grouped
+  }, [attachments])
+  const normalizedSearch = deferredSearch.trim().toLocaleLowerCase('pl')
+  const filteredNotes = useMemo(() => availableNotes.filter(note => `${note.title} ${note.folder}`.toLocaleLowerCase('pl').includes(normalizedSearch)), [availableNotes, normalizedSearch])
 
   return <section className="note-grid-view" aria-label="Siatka edycji notatek">
     <div className="note-grid-toolbar">
@@ -68,8 +88,8 @@ export function NoteGridView({
         note={note}
         active={note.id === activeNoteId}
         revision={revision}
-        assets={assets.filter(asset => asset.noteId === note.id)}
-        attachments={attachments.filter(attachment => attachment.noteId === note.id)}
+        assets={assetsByNote.get(note.id) ?? EMPTY_ASSETS}
+        attachments={attachmentsByNote.get(note.id) ?? EMPTY_ATTACHMENTS}
         allAssets={assets}
         allNotes={allNotes}
         onFocus={() => onFocus(note.id)}
@@ -85,6 +105,9 @@ export function NoteGridView({
     </div>
   </section>
 }
+
+const EMPTY_ASSETS: NoteAsset[] = []
+const EMPTY_ATTACHMENTS: NoteAttachment[] = []
 
 function NoteGridCard({
   note,
@@ -143,9 +166,10 @@ function NoteGridCard({
     <div className="note-grid-card-meta"><Folder size={12} /><span>{note.folder || 'Bez folderu'}</span><span aria-hidden="true">·</span><span>{note.tags.length ? note.tags.join(', ') : 'Bez tagów'}</span></div>
     <div className="note-grid-card-editor" onWheel={handleEditorWheel} title="Ctrl + kółko myszy zmienia powiększenie treści">
       <div className="note-grid-card-zoom" style={{ zoom }}>
-        {mode === 'source'
-          ? <MarkdownSourceEditor noteId={note.id} markdown={note.content} onChange={markdown => onPatch({ content: markdown })} onSelectionChange={text => onSelectionChange('source', text)} noteActions={noteActions} onNoteAction={action => onNoteAction(action, 'source')} />
-          : <Suspense fallback={<div className="editor-loading">Otwieram edytor…</div>}><MarkdownEditor key={`${note.id}-${revision}`} noteId={note.id} markdown={note.content} assets={assets} attachments={attachments} revision={revision} onChange={markdown => onPatch({ content: markdown })} onSelectionChange={text => onSelectionChange('rendered', text)} onOpenNote={onOpenNote} onOpenAttachment={onOpenAttachment} notes={allNotes} allAssets={allAssets} noteActions={noteActions} onNoteAction={action => onNoteAction(action, 'rendered')} /></Suspense>}
+        {active ? mode === 'source'
+          ? <Suspense fallback={<div className="editor-loading">Otwieram edytor…</div>}><MarkdownSourceEditor noteId={note.id} markdown={note.content} onChange={markdown => onPatch({ content: markdown })} onSelectionChange={text => onSelectionChange('source', text)} noteActions={noteActions} onNoteAction={action => onNoteAction(action, 'source')} /></Suspense>
+          : <Suspense fallback={<div className="editor-loading">Otwieram edytor…</div>}><MarkdownEditor key={`${note.id}-${revision}`} noteId={note.id} markdown={note.content} assets={assets} attachments={attachments} revision={revision} onChange={markdown => onPatch({ content: markdown })} onSelectionChange={text => onSelectionChange('rendered', text)} onOpenNote={onOpenNote} onOpenAttachment={onOpenAttachment} notes={allNotes} allAssets={allAssets} noteActions={noteActions} onNoteAction={action => onNoteAction(action, 'rendered')} /></Suspense>
+          : <button type="button" className="note-grid-inactive-preview" onClick={onFocus} aria-label={`Ustaw fokus i edytuj ${note.title || 'notatkę'}`}><span>Ustaw fokus, aby edytować tę notatkę</span><pre>{note.content.slice(0, 1400) || 'Pusta notatka'}{note.content.length > 1400 ? '…' : ''}</pre></button>}
       </div>
     </div>
   </article>

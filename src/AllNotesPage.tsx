@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react'
+import { useDeferredValue, useEffect, useMemo, useState } from 'react'
 import type { CSSProperties } from 'react'
 import { BookOpen, CalendarDays, Clock3, FileText, Folder, GripVertical, Paperclip, RotateCcw, Search, SlidersHorizontal, Star, Tag, ArrowDown, ArrowUp } from 'lucide-react'
 import type { Note, NoteAttachment } from './types'
@@ -23,6 +23,7 @@ const collator = new Intl.Collator('pl', { sensitivity: 'base', numeric: true })
 const dateLabel = new Intl.DateTimeFormat('pl-PL', { dateStyle: 'medium' })
 const noteCountLabel = (count: number) => count === 1 ? 'notatka' : count % 10 >= 2 && count % 10 <= 4 && (count % 100 < 12 || count % 100 > 14) ? 'notatki' : 'notatek'
 const entryColorStyle = (color?: string): CSSProperties | undefined => color ? { '--entry-color': color } as CSSProperties : undefined
+const notePreviewCache = new WeakMap<Note, string>()
 
 function notePreview(content: string) {
   return content
@@ -31,6 +32,14 @@ function notePreview(content: string) {
     .replace(/[#>*_`~]/g, ' ')
     .replace(/\s+/g, ' ')
     .trim()
+}
+
+function cachedNotePreview(note: Note) {
+  const cached = notePreviewCache.get(note)
+  if (cached !== undefined) return cached
+  const preview = notePreview(note.content)
+  notePreviewCache.set(note, preview)
+  return preview
 }
 
 export function AllNotesPage({ notes, attachments, searchAttachments = attachments, advancedSearch = true, preset = 'all', initialFolder = '', onFolderChange, noteOrder = [], onReorder, getNoteColor, onOpen }: {
@@ -53,6 +62,7 @@ export function AllNotesPage({ notes, attachments, searchAttachments = attachmen
   const [favoritesOnly, setFavoritesOnly] = useState(preset === 'favorites')
   const [attachmentsOnly, setAttachmentsOnly] = useState(false)
   const [noteLimit, setNoteLimit] = useState(100)
+  const deferredQuery = useDeferredValue(query)
 
   const tags = useMemo(() => [...new Set(notes.flatMap(note => note.tags))].sort(collator.compare), [notes])
   const folders = useMemo(() => [...new Set(notes.map(note => note.folder).filter(Boolean))].sort(collator.compare), [notes])
@@ -65,11 +75,12 @@ export function AllNotesPage({ notes, attachments, searchAttachments = attachmen
 
   const filteredNotes = useMemo(() => {
     const results = searchNotes(notes, {
-      query,
+      query: deferredQuery,
       tag,
       folder,
       attachments: searchAttachments,
       advanced: advancedSearch,
+      sortByUpdated: false,
     }).filter(note => (!favoritesOnly || note.favorite) && (!attachmentsOnly || (attachmentCounts.get(note.id) ?? 0) > 0))
 
     return results.sort((a, b) => {
@@ -85,7 +96,7 @@ export function AllNotesPage({ notes, attachments, searchAttachments = attachmen
       if (sortMode === 'folder-desc') return collator.compare(b.folder || 'Poziom główny', a.folder || 'Poziom główny') || collator.compare(a.title, b.title)
       return b.updatedAt - a.updatedAt
     })
-  }, [notes, query, tag, folder, searchAttachments, advancedSearch, favoritesOnly, attachmentsOnly, attachmentCounts, sortMode, noteOrderIndex])
+  }, [notes, deferredQuery, tag, folder, searchAttachments, advancedSearch, favoritesOnly, attachmentsOnly, attachmentCounts, sortMode, noteOrderIndex])
 
   useEffect(() => { setNoteLimit(100) }, [query, tag, folder, favoritesOnly, attachmentsOnly, sortMode])
   const displayedNotes = useMemo(() => filteredNotes.slice(0, noteLimit), [filteredNotes, noteLimit])
@@ -140,7 +151,7 @@ export function AllNotesPage({ notes, attachments, searchAttachments = attachmen
     </div>
 
     {filteredNotes.length ? <div className="all-notes-grid">{displayedNotes.map((note, noteIndex) => {
-      const preview = notePreview(note.content)
+      const preview = cachedNotePreview(note)
       const attachmentCount = attachmentCounts.get(note.id) ?? 0
       const color = getNoteColor(note)
       return <article draggable={sortMode === 'manual' && Boolean(onReorder)} onDragStart={event => event.dataTransfer.setData('text/no-tie-note-id', note.id)} onDragOver={event => { if (sortMode === 'manual') event.preventDefault() }} onDrop={event => { event.preventDefault(); const sourceId = event.dataTransfer.getData('text/no-tie-note-id'); if (sourceId && sourceId !== note.id) onReorder?.(sourceId, note.id) }} className={`all-notes-card ${color ? 'has-entry-color' : ''}`} style={entryColorStyle(color)} key={note.id}>

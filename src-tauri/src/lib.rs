@@ -1,7 +1,9 @@
 use serde::{Deserialize, Serialize};
 use futures_util::future::{select, Either};
 use std::collections::{HashMap, HashSet};
+use std::fs;
 use std::sync::Mutex;
+use tauri::Manager;
 #[cfg(desktop)]
 use std::io::Write;
 #[cfg(desktop)]
@@ -10,6 +12,86 @@ use tauri_plugin_dialog::DialogExt;
 use tokio::sync::watch;
 #[cfg(mobile)]
 use tauri_plugin_fs::{FsExt, OpenOptions};
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct NativeMarkdownFile {
+    path: String,
+    markdown: String,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct NativeNotesScan {
+    markdown_paths: Vec<NativeMarkdownFile>,
+    folders: Vec<String>,
+    asset_directories: Vec<String>,
+}
+
+#[tauri::command]
+async fn scan_native_notes(app: tauri::AppHandle) -> Result<NativeNotesScan, String> {
+    let root = app
+        .path()
+        .document_dir()
+        .map_err(|error| format!("Nie udało się ustalić folderu dokumentów: {error}"))?
+        .join("No-Tie")
+        .join("Notatki");
+
+    tokio::task::spawn_blocking(move || {
+        let mut pending = vec![root];
+        let mut markdown_paths = Vec::new();
+        let mut folders = Vec::new();
+        let mut asset_directories = Vec::new();
+        while let Some(directory) = pending.pop() {
+            let entries = match fs::read_dir(&directory) {
+                Ok(entries) => entries,
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+                Err(error) => return Err(format!("Nie udało się odczytać katalogu notatek: {error}")),
+            };
+            for entry in entries.flatten() {
+                let path = entry.path();
+                let file_type = match entry.file_type() {
+                    Ok(file_type) => file_type,
+                    Err(_) => continue,
+                };
+                if file_type.is_dir() {
+                    let name = entry.file_name();
+                    let name = name.to_string_lossy();
+                    if name == "assets" {
+                        asset_directories.push(path.to_string_lossy().into_owned());
+                    } else if name != "_kopie-zapasowe" {
+                        pending.push(path);
+                    }
+                } else if file_type.is_file() {
+                    let name = entry.file_name();
+                    if name.to_string_lossy() == ".no-tie-folder" {
+                        if let Ok(folder) = fs::read_to_string(&path) {
+                            let folder = folder.trim();
+                            if !folder.is_empty() {
+                                folders.push(folder.to_owned());
+                            }
+                        }
+                    } else if path.extension().and_then(|extension| extension.to_str()).is_some_and(|extension| extension.eq_ignore_ascii_case("md")) {
+                        if let Ok(markdown) = fs::read_to_string(&path) {
+                            markdown_paths.push(NativeMarkdownFile {
+                                path: path.to_string_lossy().into_owned(),
+                                markdown,
+                            });
+                        }
+                    }
+                }
+            }
+        }
+        markdown_paths.sort_by(|left, right| left.path.cmp(&right.path));
+        folders.sort();
+        folders.dedup();
+        asset_directories.sort();
+        asset_directories.dedup();
+        Ok(NativeNotesScan { markdown_paths, folders, asset_directories })
+    })
+    .await
+    .map_err(|error| format!("Nie udało się zakończyć skanowania notatek: {error}"))?
+}
 
 #[cfg(desktop)]
 #[tauri::command]
@@ -422,6 +504,7 @@ pub fn run() {
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_fs::init())
         .invoke_handler(tauri::generate_handler![
+            scan_native_notes,
             save_archive_file,
             ollama_list_models,
             ollama_embed,
