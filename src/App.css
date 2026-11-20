@@ -1,16 +1,16 @@
 .app-shell {
   display: grid;
-  --tools-panel-width: 228px;
+  --tools-panel-width: 64px;
   --folders-panel-width: 236px;
   --library-panel-width: 314px;
-  grid-template-columns: var(--tools-panel-width) var(--folders-panel-width) var(--library-panel-width) minmax(0, 1fr);
+  grid-template-columns: minmax(0, var(--tools-panel-width)) minmax(0, var(--folders-panel-width)) minmax(0, var(--library-panel-width)) minmax(0, 1fr);
   grid-template-rows: minmax(0, 1fr);
   width: 100%;
   height: 100dvh;
   overflow: hidden;
   background: var(--canvas);
 }
-.app-shell.with-ollama-chat { grid-template-columns: var(--tools-panel-width) var(--folders-panel-width) var(--library-panel-width) minmax(300px, 1fr) minmax(300px, 340px); }
+.app-shell.with-ollama-chat { grid-template-columns: minmax(0, var(--tools-panel-width)) minmax(0, var(--folders-panel-width)) minmax(0, var(--library-panel-width)) minmax(0, 1fr) minmax(0, 340px); }
 .app-shell.sidebar-hidden { --tools-panel-width: 0px; }
 .app-shell.folders-panel-hidden { --folders-panel-width: 0px; }
 .app-shell.library-hidden { --library-panel-width: 0px; }
@@ -1432,13 +1432,13 @@
 .drawer-scrim { display: none; }
 
 @media (max-width: 1400px) {
-  .app-shell { --tools-panel-width: 214px; --folders-panel-width: 220px; --library-panel-width: 280px; }
-  .app-shell.with-ollama-chat { grid-template-columns: var(--tools-panel-width) var(--folders-panel-width) var(--library-panel-width) minmax(250px, 1fr) minmax(250px, 290px); }
+  .app-shell { --tools-panel-width: 64px; --folders-panel-width: clamp(180px, 16vw, 220px); --library-panel-width: clamp(220px, 20vw, 280px); }
+  .app-shell.with-ollama-chat { grid-template-columns: minmax(0, var(--tools-panel-width)) minmax(0, var(--folders-panel-width)) minmax(0, var(--library-panel-width)) minmax(250px, 1fr) minmax(250px, 290px); }
 }
 
 @media (max-width: 1100px) {
-  .app-shell { --tools-panel-width: 180px; --folders-panel-width: 194px; --library-panel-width: 254px; }
-  .app-shell.with-ollama-chat { --tools-panel-width: 156px; --folders-panel-width: 174px; --library-panel-width: 204px; grid-template-columns: var(--tools-panel-width) var(--folders-panel-width) var(--library-panel-width) minmax(220px, 1fr) minmax(250px, 290px); }
+  .app-shell { --tools-panel-width: 64px; --folders-panel-width: 194px; --library-panel-width: 254px; }
+  .app-shell.with-ollama-chat { --folders-panel-width: 174px; --library-panel-width: 204px; grid-template-columns: minmax(0, var(--tools-panel-width)) minmax(0, var(--folders-panel-width)) minmax(0, var(--library-panel-width)) minmax(220px, 1fr) minmax(250px, 290px); }
   .sidebar { padding-right: 11px; padding-left: 11px; }
   .editor-scroll { padding-right: 35px; padding-left: 35px; }
 }
@@ -3368,4 +3368,31 @@
   .ai-workspace-template-editor .button { min-height: 42px; }
   .ai-workspace-profile-top .icon-button,
   .ai-task-queue-controls .icon-button { width: 42px; height: 42px; }
+}
+
+/* Desktop navigation stays as a narrow icon rail so the note library and editor keep room. */
+@media (min-width: 1025px) {
+  .app-shell { --tools-panel-width: 64px; }
+  .sidebar { align-items: center; padding: 14px 7px 12px; }
+  .sidebar-content { align-items: center; }
+  .sidebar .brand-row { justify-content: center; gap: 0; padding: 0; margin: 0 0 14px; }
+  .sidebar .brand-row > span { display: none; }
+  .sidebar .brand-mark { width: 38px; height: 38px; flex-basis: 38px; }
+  .sidebar .new-note-button { width: 42px; min-height: 42px; justify-content: center; gap: 0; padding: 0; margin: 0 auto; }
+  .sidebar .new-note-button > span,
+  .sidebar .new-note-button > kbd,
+  .sidebar .section-label,
+  .sidebar .section-heading { display: none; }
+  .sidebar .sidebar-section { display: flex; width: 100%; flex-direction: column; align-items: center; gap: 3px; padding: 10px 0; margin-top: 10px; border-top: 1px solid #ffffff12; }
+  .sidebar .nav-item { position: relative; display: grid; width: 42px; min-height: 39px; flex: 0 0 39px; place-items: center; gap: 0; padding: 0; margin: 0 auto; overflow: visible; border-radius: 9px; }
+  .sidebar .nav-item > span:not(.nav-count) { display: none; }
+  .sidebar .nav-count { position: absolute; top: -3px; right: -4px; display: grid; min-width: 15px; max-width: 27px; height: 15px; place-items: center; overflow: hidden; margin: 0; padding: 0 3px; border: 1px solid #19243a; border-radius: 999px; color: #e8ecff; background: #465986; font-size: 7px; line-height: 1; text-overflow: clip; white-space: nowrap; }
+  .sidebar .smart-folders-section { max-height: 28dvh; overflow: auto; scrollbar-width: thin; }
+  .sidebar-bottom { width: 100%; }
+  .sidebar-bottom .offline-card,
+  .sidebar-bottom .user-row > .avatar,
+  .sidebar-bottom .user-row > div:nth-child(2) { display: none; }
+  .sidebar-bottom .user-row { justify-content: center; gap: 0; padding: 0; }
+  .sidebar-bottom .user-row-actions { flex-direction: column; gap: 3px; margin: 0; }
+  .sidebar-bottom .sidebar-help-button { width: 38px; height: 38px; flex-basis: 38px; margin: 0; }
 }
