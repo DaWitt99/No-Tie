@@ -1,20 +1,21 @@
 .app-shell {
   display: grid;
-  grid-template-columns: 248px 314px minmax(0, 1fr);
+  --tools-panel-width: 228px;
+  --folders-panel-width: 236px;
+  --library-panel-width: 314px;
+  grid-template-columns: var(--tools-panel-width) var(--folders-panel-width) var(--library-panel-width) minmax(0, 1fr);
   grid-template-rows: minmax(0, 1fr);
   width: 100%;
   height: 100dvh;
   overflow: hidden;
   background: var(--canvas);
 }
-.app-shell.with-ollama-chat { grid-template-columns: 248px 314px minmax(300px, 1fr) minmax(300px, 340px); }
-.app-shell.library-hidden { grid-template-columns: 248px minmax(0, 1fr); }
-.app-shell.with-ollama-chat.library-hidden { grid-template-columns: 248px minmax(0, 1fr) minmax(300px, 340px); }
-.app-shell.sidebar-hidden { grid-template-columns: 314px minmax(0, 1fr); }
-.app-shell.sidebar-hidden.with-ollama-chat { grid-template-columns: 314px minmax(300px, 1fr) minmax(300px, 340px); }
-.app-shell.sidebar-hidden.library-hidden { grid-template-columns: minmax(0, 1fr); }
-.app-shell.sidebar-hidden.with-ollama-chat.library-hidden { grid-template-columns: minmax(300px, 1fr) minmax(300px, 340px); }
+.app-shell.with-ollama-chat { grid-template-columns: var(--tools-panel-width) var(--folders-panel-width) var(--library-panel-width) minmax(300px, 1fr) minmax(300px, 340px); }
+.app-shell.sidebar-hidden { --tools-panel-width: 0px; }
+.app-shell.folders-panel-hidden { --folders-panel-width: 0px; }
+.app-shell.library-hidden { --library-panel-width: 0px; }
 .app-shell.sidebar-hidden .sidebar { display: none; }
+.app-shell.folders-panel-hidden .folder-panel { display: none; }
 @media (min-width: 701px) {
   html.tauri-android .app-shell { padding-top: max(24px, env(safe-area-inset-top, 0px)); }
 }
@@ -29,7 +30,8 @@
   background: #19243a;
   border-right: 1px solid #253149;
 }
-.sidebar-content { display: flex; width: 100%; min-height: 0; flex: 1 1 auto; flex-direction: column; overflow: hidden; }
+.sidebar-content { display: flex; width: 100%; min-height: 0; flex: 1 1 auto; flex-direction: column; overflow-x: hidden; overflow-y: auto; scrollbar-width: thin; }
+.sidebar-bottom { flex: 0 0 auto; }
 .brand-row { display: flex; align-items: center; gap: 10px; padding: 0 8px; margin: 0 0 27px; font-size: 17px; font-weight: 700; letter-spacing: -.4px; }
 .brand-mark { display: grid; place-items: center; width: 32px; height: 32px; flex: 0 0 32px; border-radius: 11px; background: #6579df; color: white; font-size: 17px; font-weight: 800; box-shadow: 0 4px 12px #111a31; }
 .new-note-button { display: flex; align-items: center; gap: 10px; width: 100%; min-height: 42px; padding: 0 11px; border: 1px solid #7182e8; border-radius: 10px; color: #fff; background: linear-gradient(125deg, #687ce7, #586dd7); font-weight: 600; cursor: pointer; box-shadow: 0 6px 14px #111a3133; }
@@ -37,6 +39,15 @@
 .new-note-button kbd { margin-left: auto; color: #d5dcff; font-size: 10px; font-weight: 500; }
 .sidebar-section { margin-top: 27px; }
 .folders-section { display: flex; min-height: 0; flex: 1 1 0; flex-direction: column; overflow: hidden; }
+.folder-panel { display: flex; min-width: 0; min-height: 0; flex-direction: column; overflow: hidden; border-right: 1px solid #253149; color: #e9ecf6; background: #19243a; }
+.folder-panel-heading { display: flex; min-height: 66px; flex: 0 0 auto; align-items: center; justify-content: space-between; gap: 8px; padding: 11px 13px; border-bottom: 1px solid #253149; }
+.folder-panel-heading > div:first-child { min-width: 0; }
+.folder-panel-heading .eyebrow { margin: 0 0 4px; color: #8995b0; font-size: 8px; letter-spacing: 1px; }
+.folder-panel-heading h2 { overflow: hidden; margin: 0; color: #e9ecf6; font-size: 14px; font-weight: 650; letter-spacing: -.2px; text-overflow: ellipsis; white-space: nowrap; }
+.folder-panel-heading-actions { display: flex; flex: 0 0 auto; align-items: center; gap: 3px; }
+.folder-panel-heading .tiny-icon { color: #a5b0c8; }
+.folder-panel-heading .tiny-icon:hover { color: #fff; background: #ffffff14; }
+.folder-panel .folders-section { min-height: 0; flex: 1 1 auto; padding: 8px 9px 10px; }
 .folder-entries { min-height: 0; flex: 1 1 0; overflow-x: hidden; overflow-y: auto; overscroll-behavior: contain; scrollbar-width: none; }
 .folder-entries::-webkit-scrollbar { display: none; }
 .folders-section > .section-heading { position: relative; z-index: 5; flex: 0 0 auto; background: #19243a; }
@@ -54,13 +65,13 @@
 .section-heading { display: flex; align-items: center; justify-content: space-between; padding: 0 10px 9px; }
 .tiny-icon, .notes-list-footer button { display: grid; place-items: center; width: 23px; height: 23px; padding: 0; border: 0; border-radius: 6px; color: #909bb3; background: transparent; cursor: pointer; }
 .tiny-icon:hover, .notes-list-footer button:hover { background: #ffffff14; color: #fff; }
-.folder-item { min-height: 34px; }
+.folder-item { min-height: 29px; gap: 8px; padding: 0 6px; font-size: 10px; }
 .folder-item, .folder-file-item, .note-card { -webkit-user-drag: none; user-select: none; }
 .folder-item, .folder-file-item, .note-card { cursor: grab; }
 .folder-item:active, .folder-file-item:active, .note-card:active { cursor: grabbing; }
 .folder-item svg { width: 15px; }
-.folder-drop-row { position: relative; display: flex; align-items: center; gap: 2px; min-height: 34px; padding-right: 3px; border-radius: 8px; transition: background .15s, box-shadow .15s; }
-.folder-collapse-button { display: grid; flex: 0 0 18px; place-items: center; width: 18px; height: 25px; padding: 0; border: 0; border-radius: 5px; color: #8591ab; background: transparent; cursor: pointer; }
+.folder-drop-row { position: relative; display: flex; align-items: center; gap: 1px; min-height: 29px; padding-right: 2px; border-radius: 7px; transition: background .15s, box-shadow .15s; }
+.folder-collapse-button { display: grid; flex: 0 0 16px; place-items: center; width: 16px; height: 23px; padding: 0; border: 0; border-radius: 5px; color: #8591ab; background: transparent; cursor: pointer; }
 .folder-collapse-button:hover { color: #e9ecf6; background: #ffffff12; }
 .folder-collapse-button svg { transition: transform .15s ease, color .15s ease; }
 .folder-drop-row > .folder-item { flex: 1; min-width: 0; width: auto; }
@@ -76,14 +87,14 @@
 .folder-drop-row.has-entry-color.drop-target-active { background: color-mix(in srgb, #8795ff 28%, var(--entry-color)); }
 .folder-tree-node.drop-target-active { border-radius: 8px; outline: 1px dashed #8795ff; outline-offset: 2px; background: #8795ff0a; }
 .folder-entries.drop-target-active { border-radius: 8px; outline: 1px dashed #8795ff; outline-offset: -2px; background: #8795ff0a; }
-.folder-tree-node, .folder-file-row { content-visibility: auto; contain-intrinsic-size: auto 34px; }
-.folder-file-row { position: relative; display: flex; align-items: center; gap: 2px; min-height: 29px; border-radius: 6px; }
+.folder-tree-node, .folder-file-row { content-visibility: auto; contain-intrinsic-size: auto 29px; }
+.folder-file-row { position: relative; display: flex; align-items: center; gap: 1px; min-height: 25px; border-radius: 6px; }
 .folder-file-row.active { background: #ffffff0d; }
 .folder-file-row.has-entry-color,
 .folder-file-row.has-entry-color.active { background: color-mix(in srgb, var(--entry-color) 22%, #19243a); }
 .folder-file-row.has-entry-color:hover { background: color-mix(in srgb, var(--entry-color) 30%, #19243a); }
 .folder-file-row.has-entry-color.active { box-shadow: inset 2px 0 var(--entry-color); }
-.folder-file-item { display: flex; flex: 1; align-items: center; gap: 8px; min-width: 0; width: auto; min-height: 29px; padding: 0 7px; border: 0; border-radius: 6px; color: #909bb3; background: transparent; text-align: left; font-size: 10px; cursor: grab; }
+.folder-file-item { display: flex; flex: 1; align-items: center; gap: 6px; min-width: 0; width: auto; min-height: 25px; padding: 0 5px; border: 0; border-radius: 5px; color: #909bb3; background: transparent; text-align: left; font-size: 9px; cursor: grab; }
 .folder-file-item svg { flex: 0 0 auto; color: #72809b; }
 .folder-file-item span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .folder-file-item:hover, .folder-file-item.active { color: #e9ecf6; background: transparent; }
@@ -92,10 +103,10 @@
 .folder-file-item.has-entry-color:hover, .folder-file-item.has-entry-color.active { color: #e9ecf6; }
 .folder-file-item.has-entry-color.active svg { color: var(--entry-color); }
 .folder-file-item:active, .folder-drop-row:active { cursor: grabbing; }
-.folder-more-notes { display: block; width: 100%; min-height: 28px; border: 0; color: #aab4c9; background: transparent; text-align: left; font-size: 9px; cursor: pointer; }
+.folder-more-notes { display: block; width: 100%; min-height: 24px; border: 0; color: #aab4c9; background: transparent; text-align: left; font-size: 8px; cursor: pointer; }
 .folder-more-notes:hover { color: #e2e8f7; background: #ffffff0b; }
-.entry-actions { position: relative; z-index: 6; display: grid; flex: 0 0 27px; place-items: center; height: 29px; }
-.entry-more-button { display: grid; place-items: center; width: 25px; height: 25px; padding: 0; border: 0; border-radius: 6px; color: #98a4bf; background: transparent; cursor: pointer; opacity: .8; }
+.entry-actions { position: relative; z-index: 6; display: grid; flex: 0 0 24px; place-items: center; height: 25px; }
+.entry-more-button { display: grid; place-items: center; width: 22px; height: 22px; padding: 0; border: 0; border-radius: 5px; color: #98a4bf; background: transparent; cursor: pointer; opacity: .8; }
 .entry-more-button:hover, .entry-more-button[aria-expanded="true"] { color: #f2f4ff; background: #ffffff17; opacity: 1; }
 .sidebar-context-menu { position: absolute; z-index: 20; top: calc(100% + 2px); right: 0; width: 154px; padding: 5px; border: 1px solid #3b4966; border-radius: 9px; background: #24324c; box-shadow: 0 12px 30px #1018276e; }
 .sidebar-context-menu button { display: flex; align-items: center; gap: 9px; width: 100%; min-height: 32px; padding: 0 9px; border: 0; border-radius: 6px; color: #e0e5f1; background: transparent; text-align: left; font-size: 11px; cursor: pointer; }
@@ -139,6 +150,16 @@
 .list-view-select { display: flex; align-items: center; gap: 5px; color: #8992a5; font-size: 9px; }
 .list-view-select select { max-width: 112px; padding: 5px 6px; border: 1px solid #e1e5ef; border-radius: 7px; color: #59657c; background: white; font-size: 9px; }
 .note-list { flex: 1; min-height: 0; overflow: auto; padding: 0 12px 16px; }
+.virtualized-row { box-sizing: border-box; min-width: 0; padding-bottom: 8px; }
+.virtualized-row .note-card-select-row { height: 100%; margin: 0; }
+.virtualized-row .note-card { height: 100%; overflow: hidden; }
+.virtualized-spacer { width: 1px; pointer-events: none; }
+.folder-entries > .virtualized-row { padding-bottom: 0; }
+.virtualized-grid-spacer { grid-column: 1 / -1; width: 1px; pointer-events: none; }
+.virtualized-grid-cell { min-width: 0; height: 222px; }
+.virtualized-grid-cell > .all-notes-card { height: 100%; min-height: 0; }
+.search-index-status { display: flex; align-items: center; gap: 6px; padding: 0 15px 7px; color: #8792a7; font-size: 9px; }
+.search-index-status svg { color: #7180d2; animation: spin .9s linear infinite; }
 .note-list-load-more { display: block; width: 100%; min-height: 38px; margin: 8px 0; border: 1px solid #e5e8ef; border-radius: 8px; color: #68748d; background: #fff; font: inherit; font-size: 10px; cursor: pointer; }
 .note-list-load-more:hover { border-color: #cbd2ec; color: #5268ca; background: #f7f8ff; }
 .note-card-select-row { display: flex; min-width: 0; align-items: center; gap: 7px; margin: 0 0 8px; }
@@ -1410,15 +1431,14 @@
 .advanced-modal-footer p { max-width: 72%; line-height: 1.5; }
 .drawer-scrim { display: none; }
 
+@media (max-width: 1400px) {
+  .app-shell { --tools-panel-width: 214px; --folders-panel-width: 220px; --library-panel-width: 280px; }
+  .app-shell.with-ollama-chat { grid-template-columns: var(--tools-panel-width) var(--folders-panel-width) var(--library-panel-width) minmax(250px, 1fr) minmax(250px, 290px); }
+}
+
 @media (max-width: 1100px) {
-  .app-shell { grid-template-columns: 218px 290px minmax(0, 1fr); }
-  .app-shell.with-ollama-chat { grid-template-columns: 180px 205px minmax(220px, 1fr) 250px; }
-  .app-shell.library-hidden { grid-template-columns: 218px minmax(0, 1fr); }
-  .app-shell.with-ollama-chat.library-hidden { grid-template-columns: 180px minmax(220px, 1fr) 250px; }
-  .app-shell.sidebar-hidden { grid-template-columns: 290px minmax(0, 1fr); }
-  .app-shell.sidebar-hidden.with-ollama-chat { grid-template-columns: 205px minmax(220px, 1fr) 250px; }
-  .app-shell.sidebar-hidden.library-hidden { grid-template-columns: minmax(0, 1fr); }
-  .app-shell.sidebar-hidden.with-ollama-chat.library-hidden { grid-template-columns: minmax(220px, 1fr) 250px; }
+  .app-shell { --tools-panel-width: 180px; --folders-panel-width: 194px; --library-panel-width: 254px; }
+  .app-shell.with-ollama-chat { --tools-panel-width: 156px; --folders-panel-width: 174px; --library-panel-width: 204px; grid-template-columns: var(--tools-panel-width) var(--folders-panel-width) var(--library-panel-width) minmax(220px, 1fr) minmax(250px, 290px); }
   .sidebar { padding-right: 11px; padding-left: 11px; }
   .editor-scroll { padding-right: 35px; padding-left: 35px; }
 }
@@ -1434,14 +1454,6 @@
   .drawing-minimap { width: 98px; }
 }
 @media (max-width: 840px) and (min-width: 701px) {
-  .app-shell { grid-template-columns: minmax(180px, 205px) minmax(220px, 270px) minmax(0, 1fr); }
-  .app-shell.with-ollama-chat { grid-template-columns: 165px minmax(125px, 1fr) minmax(150px, 1fr) 205px; }
-  .app-shell.library-hidden { grid-template-columns: minmax(180px, 205px) minmax(0, 1fr); }
-  .app-shell.with-ollama-chat.library-hidden { grid-template-columns: 165px minmax(160px, 1fr) 205px; }
-  .app-shell.sidebar-hidden { grid-template-columns: minmax(220px, 270px) minmax(0, 1fr); }
-  .app-shell.sidebar-hidden.with-ollama-chat { grid-template-columns: minmax(125px, 1fr) minmax(150px, 1fr) 205px; }
-  .app-shell.sidebar-hidden.library-hidden { grid-template-columns: minmax(0, 1fr); }
-  .app-shell.sidebar-hidden.with-ollama-chat.library-hidden { grid-template-columns: minmax(160px, 1fr) 205px; }
   .sidebar { padding: 16px 9px 11px; }
   .brand-row { padding: 0 5px; margin-bottom: 17px; font-size: 15px; }
   .new-note-button { min-height: 38px; }
@@ -1449,7 +1461,8 @@
   .nav-item { gap: 8px; min-height: 33px; padding: 0 7px; font-size: 10px; }
   .nav-count { font-size: 9px; }
   .section-label { font-size: 9px; }
-  .folder-file-item { gap: 6px; padding-right: 4px; padding-left: 5px; font-size: 9px; }
+  .folder-panel .folders-section { padding-right: 5px; padding-left: 5px; }
+  .folder-file-item { gap: 5px; padding-right: 4px; padding-left: 4px; font-size: 9px; }
   .entry-actions { flex-basis: 23px; }
   .sidebar-bottom .offline-card { padding: 8px 7px; }
   .offline-card strong, .user-row strong { font-size: 10px; }
@@ -1469,9 +1482,10 @@
 @media (max-width: 700px) {
   .app-shell { display: block; min-height: 0; }
   .app-shell.with-ollama-chat { display: block; }
-  .sidebar, .notes-panel { display: none; }
-  .sidebar.mobile-visible, .notes-panel.mobile-visible { position: fixed; z-index: 61; inset: 0 auto 0 0; display: flex; width: min(330px, 88vw); height: 100dvh; box-shadow: 16px 0 50px #18223b2a; }
+  .sidebar, .folder-panel, .notes-panel { display: none; }
+  .sidebar.mobile-visible, .folder-panel.mobile-visible, .notes-panel.mobile-visible { position: fixed; z-index: 61; inset: 0 auto 0 0; display: flex; width: min(330px, 88vw); height: 100dvh; box-shadow: 16px 0 50px #18223b2a; }
   .app-shell.sidebar-hidden .sidebar.mobile-visible { display: flex; }
+  .folder-panel.mobile-visible { z-index: 61; width: min(330px, 88vw); }
   .notes-panel.mobile-visible { z-index: 61; background: #fbfbfd; }
   .mobile-close { display: grid; }
   .mobile-actions { display: flex; align-items: center; gap: 2px; }
@@ -2787,7 +2801,7 @@
 .all-notes-results-heading > div > span { color: #939bad; font-size: 9px; }
 .all-notes-sort-summary { display: inline-flex; align-items: center; gap: 6px; color: #939bad; font-size: 9px; }
 .all-notes-sort-summary svg { color: #929dbc; }
-.all-notes-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(min(100%, 250px), 1fr)); align-content: start; gap: 12px; }
+.all-notes-grid { display: grid; min-height: 220px; max-height: min(66dvh, 820px); flex: 1 1 auto; grid-auto-rows: auto; align-content: start; gap: 0 12px; overflow: auto; overscroll-behavior: contain; padding: 1px; scrollbar-gutter: stable; }
 .all-notes-load-more { min-height: 120px; border: 1px dashed #d8deea; border-radius: 12px; color: #6e7b96; background: #ffffff85; font: inherit; font-size: 11px; cursor: pointer; }
 .all-notes-load-more:hover { border-color: #aebbf0; color: #5066c7; background: #f9faff; }
 .all-notes-card { display: flex; min-width: 0; min-height: 178px; flex-direction: column; align-items: stretch; padding: 13px; border: 1px solid #e8ebf2; border-radius: 12px; background: #fff; box-shadow: 0 2px 9px #1e2b4607; text-align: left; cursor: pointer; transition: border-color .16s, box-shadow .16s, transform .16s; }
@@ -2825,7 +2839,7 @@
   .all-notes-filter-controls { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .all-notes-sort { grid-column: 1 / -1; }
   .all-notes-sort-summary { display: none; }
-  .all-notes-grid { grid-template-columns: minmax(0, 1fr); gap: 9px; }
+  .all-notes-grid { max-height: min(52dvh, 600px); grid-template-columns: minmax(0, 1fr); gap: 0 9px; }
   .all-notes-card { min-height: 160px; }
 }
 
@@ -2890,10 +2904,13 @@
   .app-shell.sidebar-hidden.library-hidden,
   .app-shell.sidebar-hidden.with-ollama-chat.library-hidden { display: block; min-height: 0; }
   .sidebar,
+  .folder-panel,
   .notes-panel { display: none; }
   .sidebar.mobile-visible,
+  .folder-panel.mobile-visible,
   .notes-panel.mobile-visible { position: fixed; z-index: 61; inset: env(safe-area-inset-top, 0px) auto env(safe-area-inset-bottom, 0px) 0; display: flex; width: min(380px, 86vw); height: auto; box-shadow: 16px 0 50px #18223b2a; }
   .app-shell.sidebar-hidden .sidebar.mobile-visible { display: flex; }
+  .folder-panel.mobile-visible { width: min(380px, 86vw); }
   .notes-panel.mobile-visible { z-index: 61; width: min(420px, 90vw); background: #fbfbfd; }
   .mobile-close { display: grid; }
   .mobile-actions { display: flex; flex: 0 0 auto; align-items: center; gap: 3px; }
@@ -2996,6 +3013,7 @@
 
 .app-shell.note-focus-mode { grid-template-columns: minmax(0, 1fr) !important; }
 .app-shell.note-focus-mode .sidebar,
+.app-shell.note-focus-mode .folder-panel,
 .app-shell.note-focus-mode .notes-panel,
 .app-shell.note-focus-mode .topbar,
 .app-shell.note-focus-mode .editor-footer,

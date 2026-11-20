@@ -2,7 +2,8 @@ import { useDeferredValue, useEffect, useMemo, useState } from 'react'
 import type { CSSProperties } from 'react'
 import { BookOpen, CalendarDays, Clock3, FileText, Folder, GripVertical, Paperclip, RotateCcw, Search, SlidersHorizontal, Star, Tag, ArrowDown, ArrowUp } from 'lucide-react'
 import type { Note, NoteAttachment } from './types'
-import { searchNotes } from './noteSearch'
+import { searchNotes, searchQueryNeedsContent } from './noteSearch'
+import { VirtualizedGrid } from './VirtualizedGrid'
 
 type SortMode = 'manual' | 'updated-desc' | 'updated-asc' | 'created-desc' | 'created-asc' | 'title-asc' | 'title-desc' | 'folder-asc' | 'folder-desc'
 export type AllNotesPreset = 'all' | 'favorites' | 'recent'
@@ -24,6 +25,7 @@ const dateLabel = new Intl.DateTimeFormat('pl-PL', { dateStyle: 'medium' })
 const noteCountLabel = (count: number) => count === 1 ? 'notatka' : count % 10 >= 2 && count % 10 <= 4 && (count % 100 < 12 || count % 100 > 14) ? 'notatki' : 'notatek'
 const entryColorStyle = (color?: string): CSSProperties | undefined => color ? { '--entry-color': color } as CSSProperties : undefined
 const notePreviewCache = new WeakMap<Note, string>()
+const externalNotePreviewCache = new WeakMap<Note, { content: string; preview: string }>()
 
 function notePreview(content: string) {
   return content
@@ -34,7 +36,15 @@ function notePreview(content: string) {
     .trim()
 }
 
-function cachedNotePreview(note: Note) {
+function cachedNotePreview(note: Note, contentByNote?: ReadonlyMap<string, string>) {
+  const externalContent = contentByNote?.get(note.id)
+  if (externalContent !== undefined) {
+    const cachedExternal = externalNotePreviewCache.get(note)
+    if (cachedExternal?.content === externalContent) return cachedExternal.preview
+    const preview = notePreview(externalContent)
+    externalNotePreviewCache.set(note, { content: externalContent, preview })
+    return preview
+  }
   const cached = notePreviewCache.get(note)
   if (cached !== undefined) return cached
   const preview = notePreview(note.content)
@@ -42,10 +52,14 @@ function cachedNotePreview(note: Note) {
   return preview
 }
 
-export function AllNotesPage({ notes, attachments, searchAttachments = attachments, advancedSearch = true, preset = 'all', initialFolder = '', onFolderChange, noteOrder = [], onReorder, getNoteColor, onOpen }: {
+export function AllNotesPage({ notes, attachments, searchAttachments = attachments, contentByNote, normalizedContentByNote, onSearchContentChange, onVisibleNotes, advancedSearch = true, preset = 'all', initialFolder = '', onFolderChange, noteOrder = [], onReorder, getNoteColor, onOpen }: {
   notes: Note[]
   attachments: NoteAttachment[]
   searchAttachments?: NoteAttachment[]
+  contentByNote?: ReadonlyMap<string, string>
+  normalizedContentByNote?: ReadonlyMap<string, string>
+  onSearchContentChange?: (needsContent: boolean) => void
+  onVisibleNotes?: (notes: Note[]) => void
   advancedSearch?: boolean
   preset?: AllNotesPreset
   initialFolder?: string
@@ -61,8 +75,12 @@ export function AllNotesPage({ notes, attachments, searchAttachments = attachmen
   const [sortMode, setSortMode] = useState<SortMode>('manual')
   const [favoritesOnly, setFavoritesOnly] = useState(preset === 'favorites')
   const [attachmentsOnly, setAttachmentsOnly] = useState(false)
-  const [noteLimit, setNoteLimit] = useState(100)
   const deferredQuery = useDeferredValue(query)
+
+  useEffect(() => {
+    onSearchContentChange?.(searchQueryNeedsContent(deferredQuery, advancedSearch))
+    return () => onSearchContentChange?.(false)
+  }, [deferredQuery, advancedSearch, onSearchContentChange])
 
   const tags = useMemo(() => [...new Set(notes.flatMap(note => note.tags))].sort(collator.compare), [notes])
   const folders = useMemo(() => [...new Set(notes.map(note => note.folder).filter(Boolean))].sort(collator.compare), [notes])
@@ -79,6 +97,8 @@ export function AllNotesPage({ notes, attachments, searchAttachments = attachmen
       tag,
       folder,
       attachments: searchAttachments,
+      contentByNote,
+      normalizedContentByNote,
       advanced: advancedSearch,
       sortByUpdated: false,
     }).filter(note => (!favoritesOnly || note.favorite) && (!attachmentsOnly || (attachmentCounts.get(note.id) ?? 0) > 0))
@@ -96,10 +116,7 @@ export function AllNotesPage({ notes, attachments, searchAttachments = attachmen
       if (sortMode === 'folder-desc') return collator.compare(b.folder || 'Poziom główny', a.folder || 'Poziom główny') || collator.compare(a.title, b.title)
       return b.updatedAt - a.updatedAt
     })
-  }, [notes, deferredQuery, tag, folder, searchAttachments, advancedSearch, favoritesOnly, attachmentsOnly, attachmentCounts, sortMode, noteOrderIndex])
-
-  useEffect(() => { setNoteLimit(100) }, [query, tag, folder, favoritesOnly, attachmentsOnly, sortMode])
-  const displayedNotes = useMemo(() => filteredNotes.slice(0, noteLimit), [filteredNotes, noteLimit])
+  }, [notes, deferredQuery, tag, folder, searchAttachments, contentByNote, normalizedContentByNote, advancedSearch, favoritesOnly, attachmentsOnly, attachmentCounts, sortMode, noteOrderIndex])
 
   const hasFilters = Boolean(query.trim() || tag || folder || favoritesOnly || attachmentsOnly)
   const resetFilters = () => {
@@ -150,11 +167,16 @@ export function AllNotesPage({ notes, attachments, searchAttachments = attachmen
       <span className="all-notes-sort-summary"><Clock3 size={13} />{sortLabels[sortMode]}</span>
     </div>
 
-    {filteredNotes.length ? <div className="all-notes-grid">{displayedNotes.map((note, noteIndex) => {
-      const preview = cachedNotePreview(note)
+    {filteredNotes.length ? <VirtualizedGrid
+      className="all-notes-grid"
+      items={filteredNotes}
+      keyOf={note => note.id}
+      onItemsRendered={(start, end) => onVisibleNotes?.(filteredNotes.slice(start, end))}
+      renderItem={(note, noteIndex) => {
+      const preview = cachedNotePreview(note, contentByNote)
       const attachmentCount = attachmentCounts.get(note.id) ?? 0
       const color = getNoteColor(note)
-      return <article draggable={sortMode === 'manual' && Boolean(onReorder)} onDragStart={event => event.dataTransfer.setData('text/no-tie-note-id', note.id)} onDragOver={event => { if (sortMode === 'manual') event.preventDefault() }} onDrop={event => { event.preventDefault(); const sourceId = event.dataTransfer.getData('text/no-tie-note-id'); if (sourceId && sourceId !== note.id) onReorder?.(sourceId, note.id) }} className={`all-notes-card ${color ? 'has-entry-color' : ''}`} style={entryColorStyle(color)} key={note.id}>
+      return <article draggable={sortMode === 'manual' && Boolean(onReorder)} onDragStart={event => event.dataTransfer.setData('text/no-tie-note-id', note.id)} onDragOver={event => { if (sortMode === 'manual') event.preventDefault() }} onDrop={event => { event.preventDefault(); const sourceId = event.dataTransfer.getData('text/no-tie-note-id'); if (sourceId && sourceId !== note.id) onReorder?.(sourceId, note.id) }} className={`all-notes-card ${color ? 'has-entry-color' : ''}`} style={entryColorStyle(color)}>
         <div className="all-notes-card-top"><span className="all-notes-card-folder"><Folder size={13} />{note.folder || 'Poziom główny'}</span><span className="all-notes-card-top-actions">{sortMode === 'manual' && <><GripVertical size={14} className="all-notes-drag-handle" aria-hidden="true" /><button type="button" className="all-notes-move-button" title="Przenieś wyżej" aria-label={`Przenieś notatkę ${note.title} wyżej`} disabled={!noteIndex} onClick={() => onReorder?.(note.id, filteredNotes[noteIndex - 1]!.id)}><ArrowUp size={13} /></button><button type="button" className="all-notes-move-button" title="Przenieś niżej" aria-label={`Przenieś notatkę ${note.title} niżej`} disabled={noteIndex === filteredNotes.length - 1} onClick={() => onReorder?.(note.id, filteredNotes[noteIndex + 1]!.id)}><ArrowDown size={13} /></button></>}{note.favorite && <Star className="all-notes-card-star" size={15} fill="currentColor" aria-label="Ulubiona notatka" />}</span></div>
         <button type="button" className="all-notes-card-open" onClick={() => onOpen(note.id)}>
         <strong className="all-notes-card-title">{note.title || 'Bez tytułu'}</strong>
@@ -163,6 +185,7 @@ export function AllNotesPage({ notes, attachments, searchAttachments = attachmen
         <span className="all-notes-card-footer"><span><CalendarDays size={12} />Zmieniono {dateLabel.format(note.updatedAt)}</span>{attachmentCount > 0 && <span><Paperclip size={12} />{attachmentCount}</span>}<FileText size={15} className="all-notes-open-mark" /></span>
         </button>
       </article>
-    })}{noteLimit < filteredNotes.length && <button type="button" className="all-notes-load-more" onClick={() => setNoteLimit(limit => Math.min(filteredNotes.length, limit + 100))}>Pokaż kolejne {Math.min(100, filteredNotes.length - noteLimit)} · pozostało {filteredNotes.length - noteLimit}</button>}</div> : <div className="all-notes-empty"><span><Search size={20} /></span><strong>{notes.length ? 'Nie znaleziono pasujących notatek' : 'Twoja biblioteka jest pusta'}</strong><p>{notes.length ? 'Zmień hasło lub usuń część filtrów, aby zobaczyć więcej wyników.' : 'Utwórz pierwszą notatkę, a pojawi się tutaj.'}</p>{hasFilters && <button type="button" className="button secondary" onClick={resetFilters}><RotateCcw size={14} />Wyczyść filtry</button>}</div>}
+    }}
+    /> : <div className="all-notes-empty"><span><Search size={20} /></span><strong>{notes.length ? 'Nie znaleziono pasujących notatek' : 'Twoja biblioteka jest pusta'}</strong><p>{notes.length ? 'Zmień hasło lub usuń część filtrów, aby zobaczyć więcej wyników.' : 'Utwórz pierwszą notatkę, a pojawi się tutaj.'}</p>{hasFilters && <button type="button" className="button secondary" onClick={resetFilters}><RotateCcw size={14} />Wyczyść filtry</button>}</div>}
   </section>
 }

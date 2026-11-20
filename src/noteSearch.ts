@@ -5,6 +5,8 @@ export type NoteSearchFilters = {
   tag?: string
   folder?: string
   attachments?: NoteAttachment[]
+  contentByNote?: ReadonlyMap<string, string>
+  normalizedContentByNote?: ReadonlyMap<string, string>
   advanced?: boolean
   sortByUpdated?: boolean
 }
@@ -20,6 +22,11 @@ type IndexedNote = {
   created?: string
   updated?: string
   attachmentContent: WeakMap<NoteAttachment[], string>
+  externalRawContent?: string
+  normalizedExternalContent?: string
+  combinedSourceBody?: string
+  combinedAttachmentContent?: string
+  combinedContent?: string
 }
 
 const EMPTY_ATTACHMENTS: NoteAttachment[] = []
@@ -30,6 +37,10 @@ const MAX_QUERY_CACHE = 128
 
 function normalize(value: string) {
   return value.normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLocaleLowerCase('pl').trim()
+}
+
+export function normalizeSearchText(value: string) {
+  return normalize(value)
 }
 
 function getNoteIndex(note: Note): IndexedNote {
@@ -43,7 +54,16 @@ function getNoteIndex(note: Note): IndexedNote {
 }
 
 function getTitle(note: Note, index: IndexedNote) { return index.title ??= normalize(note.title) }
-function getContent(note: Note, index: IndexedNote) { return index.content ??= normalize(note.content) }
+function getContent(note: Note, index: IndexedNote, contentByNote?: ReadonlyMap<string, string>, normalizedContentByNote?: ReadonlyMap<string, string>) {
+  const externalContent = contentByNote?.get(note.id)
+  if (externalContent === undefined) return index.content ??= normalize(note.content)
+  const normalizedExternal = normalizedContentByNote?.get(note.id)
+  if (index.externalRawContent !== externalContent || (normalizedExternal !== undefined && index.normalizedExternalContent !== normalizedExternal)) {
+    index.externalRawContent = externalContent
+    index.normalizedExternalContent = normalizedExternal ?? normalize(externalContent)
+  }
+  return index.normalizedExternalContent ?? ''
+}
 function getFolder(note: Note, index: IndexedNote) { return index.folder ??= normalize(note.folder) }
 function getTags(note: Note, index: IndexedNote) { return index.tags ??= note.tags.map(normalize) }
 function getAliases(note: Note, index: IndexedNote) { return index.aliases ??= normalize(note.aliases?.join(' ') ?? '') }
@@ -99,7 +119,11 @@ function getSearchGroups(query: string, advanced: boolean): SearchGroup[] {
   return groups
 }
 
-export function searchNotes(notes: Note[], { query, tag = '', folder = '', attachments = EMPTY_ATTACHMENTS, advanced = true, sortByUpdated = true }: NoteSearchFilters): Note[] {
+export function searchQueryNeedsContent(query: string, advanced = true): boolean {
+  return getSearchGroups(query, advanced).some(group => group.terms.length > 0 || Boolean(group.fields.content?.length))
+}
+
+export function searchNotes(notes: Note[], { query, tag = '', folder = '', attachments = EMPTY_ATTACHMENTS, contentByNote, normalizedContentByNote, advanced = true, sortByUpdated = true }: NoteSearchFilters): Note[] {
   const tagNeedle = normalize(tag)
   const folderNeedle = normalize(folder)
   const groups = getSearchGroups(query, advanced)
@@ -118,18 +142,29 @@ export function searchNotes(notes: Note[], { query, tag = '', folder = '', attac
     }
 
     let content = ''
+    const noteContent = getContent(note, index, contentByNote, normalizedContentByNote)
     if (needsContent && attachmentIndex) {
-      let combined = index.attachmentContent.get(attachments)
-      if (combined === undefined) {
-        const attachmentText = attachmentIndex.content.get(note.id) ?? ''
-        combined = normalize(`${note.content} ${attachmentText}`)
-        index.attachmentContent.set(attachments, combined)
+      const attachmentText = attachmentIndex.content.get(note.id) ?? ''
+      let combined: string | undefined
+      if (contentByNote) {
+        if (index.combinedSourceBody !== noteContent || index.combinedAttachmentContent !== attachmentText) {
+          index.combinedSourceBody = noteContent
+          index.combinedAttachmentContent = attachmentText
+          index.combinedContent = normalize(`${noteContent} ${attachmentText}`)
+        }
+        combined = index.combinedContent
+      } else {
+        combined = index.attachmentContent.get(attachments)
+        if (combined === undefined) {
+          combined = normalize(`${noteContent} ${attachmentText}`)
+          index.attachmentContent.set(attachments, combined)
+        }
       }
-      content = combined
-    } else if (needsContent) content = getContent(note, index)
+      content = combined ?? ''
+    } else if (needsContent) content = noteContent
     const hasTerm = (value: string) => getTitle(note, index).includes(value)
       || getAliases(note, index).includes(value)
-      || (needsContent ? content : getContent(note, index)).includes(value)
+      || (needsContent ? content : noteContent).includes(value)
       || getFolder(note, index).includes(value)
       || getTags(note, index).some(tagValue => tagValue.includes(value))
     const matchesGroup = ({ fields, terms }: SearchGroup) => {

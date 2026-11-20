@@ -6,7 +6,7 @@ import { fileFingerprint } from './fileFingerprint'
 import { DEFAULT_AI_PREFERENCES, isFlashcardStudyMode, type AiPreferences, type Flashcard, type FlashcardTrashEntry, type Note, type NoteAsset, type NoteAttachment, type NoteAttachmentHistory, type NoteAttachmentReference, type NoteCollection, type NoteTemplate, type NoteVersion, type OrganizationSettings, type ReviewSession, type ReviewSessionStatus, type SavedSearch, type SavedWorkspaceLayout, type TrashEntry } from './types'
 
 const DATABASE = 'no-tie-notes'
-const DATABASE_VERSION = 4
+const DATABASE_VERSION = 5
 const NATIVE_NOTES_FOLDER = 'Notatki'
 const FOLDER_COLORS_FILE = '.no-tie-folder-colors.json'
 const REVIEW_SESSIONS_FILE = '.no-tie-review-sessions.json'
@@ -16,6 +16,7 @@ const NOTE_TEMPLATES_FILE = '.no-tie-templates.json'
 const NOTE_ATTACHMENT_HISTORY_FILE = '.no-tie-attachment-history.json'
 const NOTE_ATTACHMENT_TRANSCRIPTS_FILE = '.no-tie-attachment-transcripts.json'
 const NOTE_ATTACHMENT_METADATA_FILE = '.no-tie-attachment-metadata.json'
+const NOTE_HEADER_INDEX_FILE = '.no-tie-note-index.json'
 const ORGANIZATION_SETTINGS_FILE = '.no-tie-organization-settings.json'
 const ADVANCED_DATA_FILE = '.no-tie-advanced.json'
 const AUTO_BACKUP_FOLDER = '_kopie-zapasowe'
@@ -30,6 +31,11 @@ let nativeNotesScanPromise: Promise<Note[]> | undefined
 let nativeFolderMarkers: string[] = []
 const noteVersionQueues = new Map<string, Promise<void>>()
 const attachmentTranscriptQueues = new Map<string, Promise<void>>()
+const nativeNoteFilePaths = new Map<string, string>()
+
+function noteHeader(note: Note): Note {
+  return { ...note, content: '', contentLoaded: false }
+}
 
 async function mapWithConcurrency<T, R>(items: T[], concurrency: number, map: (item: T, index: number) => Promise<R>): Promise<R[]> {
   const results = new Array<R>(items.length)
@@ -59,6 +65,17 @@ function openDatabase(): Promise<IDBDatabase> {
       if (!database.objectStoreNames.contains('notes')) {
         database.createObjectStore('notes', { keyPath: 'id' })
       }
+      if (!database.objectStoreNames.contains('noteHeaders')) {
+        const headers = database.createObjectStore('noteHeaders', { keyPath: 'id' })
+        const cursor = request.transaction?.objectStore('notes').openCursor()
+        if (cursor) cursor.onsuccess = () => {
+          const item = cursor.result
+          if (!item) return
+          const note = item.value as Note
+          headers.put(noteHeader(note))
+          item.continue()
+        }
+      }
       if (!database.objectStoreNames.contains('assets')) {
         const assets = database.createObjectStore('assets', { keyPath: 'id' })
         assets.createIndex('noteId', 'noteId', { unique: false })
@@ -81,7 +98,7 @@ function openDatabase(): Promise<IDBDatabase> {
 }
 
 async function withStore<T>(
-  storeName: 'notes' | 'assets' | 'settings' | 'noteVersions' | 'attachments',
+  storeName: 'notes' | 'noteHeaders' | 'assets' | 'settings' | 'noteVersions' | 'attachments',
   mode: IDBTransactionMode,
   action: (store: IDBObjectStore) => IDBRequest<T>,
 ): Promise<T> {
@@ -600,7 +617,10 @@ export async function removeFolderFromDisk(folder: string): Promise<void> {
   if (await exists(directory)) await remove(directory, { recursive: true })
   const prefix = `${directory.replace(/[\\/]+$/g, '')}${sep()}`
   for (const [noteId, noteDirectory] of nativeNoteDirectories) {
-    if (noteDirectory === directory || noteDirectory.startsWith(prefix)) nativeNoteDirectories.delete(noteId)
+    if (noteDirectory === directory || noteDirectory.startsWith(prefix)) {
+      nativeNoteDirectories.delete(noteId)
+      nativeNoteFilePaths.delete(noteId)
+    }
   }
   for (const assetsDirectory of nativeAssetDirectories) {
     if (assetsDirectory === directory || assetsDirectory.startsWith(prefix)) nativeAssetDirectories.delete(assetsDirectory)
@@ -608,16 +628,23 @@ export async function removeFolderFromDisk(folder: string): Promise<void> {
   nativeFolderMarkers = nativeFolderMarkers.filter(path => path !== folder && !path.startsWith(`${folder}/`))
 }
 
-async function collectNativeFiles(directory: string): Promise<{ markdownPaths: string[]; markdownContents?: Map<string, string>; folders: string[]; assetDirectories: string[] }> {
+function markdownHeader(markdown: string): string {
+  const match = markdown.match(/^---\s*\r?\n[\s\S]*?\r?\n---\s*(?:\r?\n|$)/)
+  return match?.[0] ?? ''
+}
+
+type NativeMarkdownHeader = { path: string; markdown?: string; modifiedAt?: number; size?: number }
+type NativeHeaderCacheEntry = { modifiedAt: number; size: number; note: Note }
+
+async function collectNativeFiles(directory: string): Promise<{ markdownPaths: NativeMarkdownHeader[]; folders: string[]; assetDirectories: string[] }> {
   try {
-    const scan = await invoke<{ markdownPaths: { path: string; markdown: string }[]; folders: string[]; assetDirectories: string[] }>('scan_native_notes')
+    const scan = await invoke<{ markdownPaths: NativeMarkdownHeader[]; folders: string[]; assetDirectories: string[] }>('scan_native_notes')
     if (Array.isArray(scan.markdownPaths) && Array.isArray(scan.folders) && Array.isArray(scan.assetDirectories)) {
       const nativeHasData = scan.markdownPaths.length || scan.folders.length || scan.assetDirectories.length
       const pluginHasData = nativeHasData || (await readDir(directory)).length === 0
       if (pluginHasData) {
         return {
-          markdownPaths: scan.markdownPaths.map(file => file.path),
-          markdownContents: new Map(scan.markdownPaths.map(file => [file.path, file.markdown])),
+          markdownPaths: scan.markdownPaths,
           folders: scan.folders,
           assetDirectories: scan.assetDirectories,
         }
@@ -627,7 +654,7 @@ async function collectNativeFiles(directory: string): Promise<{ markdownPaths: s
     // Older shells and mobile builds can use the filesystem plugin fallback below.
   }
 
-  const paths: string[] = []
+  const paths: NativeMarkdownHeader[] = []
   const folders: string[] = []
   const assetDirectories: string[] = []
   const pending = [directory]
@@ -635,7 +662,7 @@ async function collectNativeFiles(directory: string): Promise<{ markdownPaths: s
     const batch = pending.splice(0, 12)
     const scanned = await Promise.all(batch.map(async current => {
       const childDirectories: string[] = []
-      const markdown: string[] = []
+      const markdown: NativeMarkdownHeader[] = []
       const marked: string[] = []
       for (const entry of await readDir(current)) {
         const path = joinNativePath(current, entry.name)
@@ -645,7 +672,7 @@ async function collectNativeFiles(directory: string): Promise<{ markdownPaths: s
         else if (entry.isFile && entry.name === FOLDER_MARKER) {
           try { marked.push((await readTextFile(path)).trim()) } catch { /* Ignore malformed folder markers. */ }
         }
-        else if (entry.isFile && entry.name.toLowerCase().endsWith('.md')) markdown.push(path)
+        else if (entry.isFile && entry.name.toLowerCase().endsWith('.md')) markdown.push({ path })
       }
       return { childDirectories, markdown, marked }
     }))
@@ -656,8 +683,7 @@ async function collectNativeFiles(directory: string): Promise<{ markdownPaths: s
     }
   }
   return {
-    markdownPaths: paths.sort((a, b) => a.localeCompare(b, 'pl')),
-    markdownContents: undefined,
+    markdownPaths: paths.sort((a, b) => a.path.localeCompare(b.path, 'pl')),
     folders: [...new Set(folders.filter(Boolean))],
     assetDirectories,
   }
@@ -665,34 +691,57 @@ async function collectNativeFiles(directory: string): Promise<{ markdownPaths: s
 
 async function loadNativeNotes(): Promise<Note[]> {
   const root = await getNativeNotesRoot()
-  const { markdownPaths: files, markdownContents, folders, assetDirectories } = await collectNativeFiles(root)
-  const orderedFiles = [...files].sort((a, b) => a.localeCompare(b, 'pl'))
+  const { markdownPaths: files, folders, assetDirectories } = await collectNativeFiles(root)
+  const orderedFiles = [...files].sort((a, b) => a.path.localeCompare(b.path, 'pl'))
+  const cachePath = await join(root, NOTE_HEADER_INDEX_FILE)
+  let cachedEntries: Record<string, NativeHeaderCacheEntry> = {}
+  try {
+    if (await exists(cachePath)) cachedEntries = JSON.parse(await readTextFile(cachePath)) as Record<string, NativeHeaderCacheEntry>
+  } catch { /* A bad cache is rebuilt from note headers. */ }
   const notes: Note[] = []
   const directories = new Map<string, string>()
-  const markdownFiles = markdownContents
-    ? orderedFiles.map(path => ({ path, markdown: markdownContents.get(path) ?? '' }))
-    : await mapWithConcurrency(orderedFiles, 16, async path => {
-      try {
-        return { path, markdown: await readTextFile(path) }
-      } catch {
-        // Keep malformed files on disk; valid notes should still open normally.
-        return null
-      }
-    })
-  for (let offset = 0; offset < markdownFiles.length; offset += 80) {
-    for (const record of markdownFiles.slice(offset, offset + 80)) {
-      if (!record) continue
-      const parentDirectory = record.path.slice(0, Math.max(record.path.lastIndexOf('/'), record.path.lastIndexOf('\\')))
-      const fallbackId = parentDirectory.split(/[\\/]/).at(-1) ?? crypto.randomUUID()
-      const note = markdownToNote(record.markdown, fallbackId)
-      if (directories.has(note.id)) continue
-      directories.set(note.id, parentDirectory)
-      notes.push(note)
+  const noteFilePaths = new Map<string, string>()
+  const nextCache: Record<string, NativeHeaderCacheEntry> = {}
+  let cacheChanged = Object.keys(cachedEntries).length !== orderedFiles.length
+  const parsedFiles = await mapWithConcurrency(orderedFiles, 16, async file => {
+    const cached = cachedEntries[file.path]
+    if (cached && file.modifiedAt && cached.modifiedAt === file.modifiedAt && cached.size === file.size) {
+      nextCache[file.path] = cached
+      return { file, note: { ...cached.note, content: '', contentLoaded: false } }
     }
-    if (offset + 80 < markdownFiles.length) await new Promise<void>(resolve => setTimeout(resolve, 0))
+    try {
+      const markdown = file.markdown ?? markdownHeader(await readTextFile(file.path))
+      const parentDirectory = file.path.slice(0, Math.max(file.path.lastIndexOf('/'), file.path.lastIndexOf('\\')))
+      const fallbackId = parentDirectory.split(/[\\/]/).at(-1) ?? crypto.randomUUID()
+      const note = markdownToNote(markdown, fallbackId)
+      if (!markdown) note.title = fallbackId.replace(/[-_]+/g, ' ') || note.title
+      note.content = ''
+      note.contentLoaded = false
+      if (file.modifiedAt && typeof file.size === 'number') nextCache[file.path] = { modifiedAt: file.modifiedAt, size: file.size, note }
+      cacheChanged = true
+      return { file, note }
+    } catch {
+      // Keep malformed files on disk; valid notes should still open normally.
+      return null
+    }
+  })
+  for (const result of parsedFiles) {
+    if (!result) continue
+    const { file, note } = result
+    const parentDirectory = file.path.slice(0, Math.max(file.path.lastIndexOf('/'), file.path.lastIndexOf('\\')))
+    if (directories.has(note.id)) continue
+    directories.set(note.id, parentDirectory)
+    noteFilePaths.set(note.id, file.path)
+    notes.push(note)
+  }
+  if (!cacheChanged && Object.keys(cachedEntries).some(path => !nextCache[path])) cacheChanged = true
+  if (cacheChanged) {
+    try { await writeTextFile(cachePath, JSON.stringify(nextCache)) } catch { /* The cache is optional; notes remain available. */ }
   }
   nativeNoteDirectories.clear()
   for (const [noteId, directory] of directories) nativeNoteDirectories.set(noteId, directory)
+  nativeNoteFilePaths.clear()
+  for (const [noteId, path] of noteFilePaths) nativeNoteFilePaths.set(noteId, path)
   nativeAssetDirectories.clear()
   for (const directory of assetDirectories) nativeAssetDirectories.add(directory)
   nativeFolderMarkers = folders
@@ -700,7 +749,7 @@ async function loadNativeNotes(): Promise<Note[]> {
   return notes
 }
 
-async function getNativeNotes(): Promise<Note[]> {
+async function getNativeNoteHeaders(): Promise<Note[]> {
   if (!nativeNotesScanPromise) {
     nativeNotesScanPromise = loadNativeNotes().finally(() => { nativeNotesScanPromise = undefined })
   }
@@ -709,7 +758,7 @@ async function getNativeNotes(): Promise<Note[]> {
 
 async function ensureNativeNoteIndex(): Promise<void> {
   if (nativeNoteIndexLoaded) return
-  await getNativeNotes()
+  await getNativeNoteHeaders()
 }
 
 async function readNativeAssets(noteId: string, directory: string): Promise<NoteAsset[]> {
@@ -733,7 +782,26 @@ async function readNativeAssets(noteId: string, directory: string): Promise<Note
 }
 
 export async function getNotes(): Promise<Note[]> {
-  return usesNativeFiles ? getNativeNotes() : withStore<Note[]>('notes', 'readonly', store => store.getAll())
+  if (!usesNativeFiles) return withStore<Note[]>('notes', 'readonly', store => store.getAll())
+  const headers = await getNativeNoteHeaders()
+  return Promise.all(headers.map(async note => ({ ...note, content: await loadNoteContent(note.id), contentLoaded: true })))
+}
+
+export async function getNoteHeaders(): Promise<Note[]> {
+  if (usesNativeFiles) return getNativeNoteHeaders()
+  return withStore<Note[]>('noteHeaders', 'readonly', store => store.getAll())
+}
+
+export async function loadNoteContent(noteId: string): Promise<string> {
+  if (!usesNativeFiles) {
+    const note = await withStore<Note | undefined>('notes', 'readonly', store => store.get(noteId))
+    return note?.content ?? ''
+  }
+  await ensureNativeNoteIndex()
+  const path = nativeNoteFilePaths.get(noteId)
+  if (!path) return ''
+  const markdown = await readTextFile(path)
+  return markdownToNote(markdown, noteId).content
 }
 
 export async function hasInitialized(): Promise<boolean> {
@@ -747,10 +815,33 @@ export async function markInitialized(): Promise<void> {
 }
 
 export async function saveNote(note: Note): Promise<IDBValidKey | void> {
-  if (!usesNativeFiles) return withStore<IDBValidKey>('notes', 'readwrite', store => store.put(note))
+  if (!usesNativeFiles) {
+    const database = await openDatabase()
+    return new Promise((resolve, reject) => {
+      const transaction = database.transaction(['notes', 'noteHeaders'], 'readwrite')
+      const notes = transaction.objectStore('notes')
+      const headers = transaction.objectStore('noteHeaders')
+      let key: IDBValidKey | undefined
+      const request = notes.get(note.id)
+      request.onsuccess = () => {
+        const previous = request.result as Note | undefined
+        const stored = { ...note, content: note.contentLoaded === false && previous ? previous.content : note.content }
+        delete stored.contentLoaded
+        const put = notes.put(stored)
+        put.onsuccess = () => { key = put.result }
+        headers.put(noteHeader(stored))
+      }
+      request.onerror = () => reject(request.error)
+      transaction.oncomplete = () => resolve(key)
+      transaction.onerror = () => reject(transaction.error)
+      transaction.onabort = () => reject(transaction.error)
+    })
+  }
 
   const newDirectory = await noteDirectory(note)
   const oldDirectory = nativeNoteDirectories.get(note.id)
+  const content = note.contentLoaded === false ? await loadNoteContent(note.id) : note.content
+  const noteToSave = { ...note, content }
   await mkdir(newDirectory.slice(0, Math.max(newDirectory.lastIndexOf('/'), newDirectory.lastIndexOf('\\'))), { recursive: true })
   if (oldDirectory && oldDirectory !== newDirectory && await exists(oldDirectory)) {
     if (await exists(newDirectory)) throw new Error(`Katalog notatki „${note.title}” już istnieje.`)
@@ -761,8 +852,10 @@ export async function saveNote(note: Note): Promise<IDBValidKey | void> {
   } else {
     await mkdir(newDirectory, { recursive: true })
   }
-  await writeTextFile(await join(newDirectory, 'notatka.md'), noteToMarkdown(note))
+  const path = await join(newDirectory, 'notatka.md')
+  await writeTextFile(path, noteToMarkdown(noteToSave))
   nativeNoteDirectories.set(note.id, newDirectory)
+  nativeNoteFilePaths.set(note.id, path)
 }
 
 function normalizeNoteVersions(value: unknown, noteId: string): NoteVersion[] {
@@ -849,9 +942,9 @@ export async function saveNoteVersion(note: Note): Promise<void> {
       await writeTextFile(await join(directory, NOTE_VERSIONS_FILE), JSON.stringify(next, null, 2))
       return
     }
-    const database = await openDatabase()
+    const versionDatabase = await openDatabase()
     await new Promise<void>((resolve, reject) => {
-      const transaction = database.transaction('noteVersions', 'readwrite')
+      const transaction = versionDatabase.transaction('noteVersions', 'readwrite')
       const store = transaction.objectStore('noteVersions')
       const retained = new Set(next.map(item => item.id))
       store.put(version)
@@ -900,12 +993,20 @@ export async function saveNoteVersions(noteId: string, importedVersions: NoteVer
 
 export async function removeNote(id: string): Promise<void> {
   if (!usesNativeFiles) {
-    await withStore<undefined>('notes', 'readwrite', store => store.delete(id))
-    const versions = await readNoteVersions(id)
-    if (!versions.length) return
     const database = await openDatabase()
     await new Promise<void>((resolve, reject) => {
-      const transaction = database.transaction('noteVersions', 'readwrite')
+      const transaction = database.transaction(['notes', 'noteHeaders'], 'readwrite')
+      transaction.objectStore('notes').delete(id)
+      transaction.objectStore('noteHeaders').delete(id)
+      transaction.oncomplete = () => resolve()
+      transaction.onerror = () => reject(transaction.error)
+      transaction.onabort = () => reject(transaction.error)
+    })
+    const versions = await readNoteVersions(id)
+    if (!versions.length) return
+    const versionDatabase = await openDatabase()
+    await new Promise<void>((resolve, reject) => {
+      const transaction = versionDatabase.transaction('noteVersions', 'readwrite')
       const store = transaction.objectStore('noteVersions')
       versions.forEach(version => store.delete(version.id))
       transaction.oncomplete = () => resolve()
@@ -917,6 +1018,7 @@ export async function removeNote(id: string): Promise<void> {
   const directory = nativeNoteDirectories.get(id)
   if (directory && await exists(directory)) await remove(directory, { recursive: true })
   nativeNoteDirectories.delete(id)
+  nativeNoteFilePaths.delete(id)
   nativeAssetDirectories.delete(directory ? joinNativePath(directory, 'assets') : '')
 }
 

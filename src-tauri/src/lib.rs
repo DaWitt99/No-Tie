@@ -1,7 +1,8 @@
 use serde::{Deserialize, Serialize};
 use futures_util::future::{select, Either};
 use std::collections::{HashMap, HashSet};
-use std::fs;
+use std::fs::{self, File};
+use std::io::{BufRead, BufReader};
 use std::sync::Mutex;
 use tauri::Manager;
 #[cfg(desktop)]
@@ -18,6 +19,8 @@ use tauri_plugin_fs::{FsExt, OpenOptions};
 struct NativeMarkdownFile {
     path: String,
     markdown: String,
+    modified_at: u64,
+    size: u64,
 }
 
 #[derive(Serialize)]
@@ -72,10 +75,20 @@ async fn scan_native_notes(app: tauri::AppHandle) -> Result<NativeNotesScan, Str
                             }
                         }
                     } else if path.extension().and_then(|extension| extension.to_str()).is_some_and(|extension| extension.eq_ignore_ascii_case("md")) {
-                        if let Ok(markdown) = fs::read_to_string(&path) {
+                        if let Ok(markdown) = read_markdown_header(&path) {
+                            let metadata = match entry.metadata() {
+                                Ok(metadata) => metadata,
+                                Err(_) => continue,
+                            };
+                            let modified_at = metadata.modified().ok()
+                                .and_then(|value| value.duration_since(std::time::UNIX_EPOCH).ok())
+                                .map(|value| value.as_millis().min(u64::MAX as u128) as u64)
+                                .unwrap_or(0);
                             markdown_paths.push(NativeMarkdownFile {
                                 path: path.to_string_lossy().into_owned(),
                                 markdown,
+                                modified_at,
+                                size: metadata.len(),
                             });
                         }
                     }
@@ -91,6 +104,30 @@ async fn scan_native_notes(app: tauri::AppHandle) -> Result<NativeNotesScan, Str
     })
     .await
     .map_err(|error| format!("Nie udało się zakończyć skanowania notatek: {error}"))?
+}
+
+fn read_markdown_header(path: &std::path::Path) -> std::io::Result<String> {
+    let mut reader = BufReader::new(File::open(path)?);
+    let mut first_line = String::new();
+    reader.read_line(&mut first_line)?;
+    if first_line.trim_end_matches(&['\r', '\n'][..]) != "---" {
+        return Ok(String::new());
+    }
+
+    let mut header = first_line;
+    let mut line = String::new();
+    loop {
+        line.clear();
+        if reader.read_line(&mut line)? == 0 {
+            break;
+        }
+        let is_end = line.trim_end_matches(&['\r', '\n'][..]) == "---";
+        header.push_str(&line);
+        if is_end {
+            break;
+        }
+    }
+    Ok(header)
 }
 
 #[cfg(desktop)]
