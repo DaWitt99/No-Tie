@@ -1,5 +1,5 @@
 export type ShapePath = { d: string; fill?: 'none' }
-export type ShapeDefinition = { id: string; label: string; category: 'Schemat blokowy' | 'Elektryczne' | 'Rysunek techniczny'; paths: ShapePath[] }
+export type ShapeDefinition = { id: string; label: string; category: 'Podstawowe' | 'Schemat blokowy' | 'Elektryczne' | 'Rysunek techniczny'; paths: ShapePath[] }
 
 const outline = (d: string): ShapePath => ({ d })
 const stroke = (d: string): ShapePath => ({ d, fill: 'none' })
@@ -14,6 +14,17 @@ function gearPath(teeth = 12): string {
 }
 
 export const shapeLibrary: ShapeDefinition[] = [
+  { id: 'basic-rectangle', label: 'Prostokąt', category: 'Podstawowe', paths: [outline('M 5 5 H 95 V 95 H 5 Z')] },
+  { id: 'basic-rounded-rectangle', label: 'Zaokrąglony prostokąt', category: 'Podstawowe', paths: [outline('M 16 5 H 84 Q 95 5 95 16 V 84 Q 95 95 84 95 H 16 Q 5 95 5 84 V 16 Q 5 5 16 5 Z')] },
+  { id: 'basic-ellipse', label: 'Elipsa', category: 'Podstawowe', paths: [outline('M 50 5 A 45 45 0 1 0 50 95 A 45 45 0 1 0 50 5 Z')] },
+  { id: 'basic-line', label: 'Linia', category: 'Podstawowe', paths: [stroke('M 5 50 H 95')] },
+  { id: 'basic-arrow', label: 'Strzałka', category: 'Podstawowe', paths: [stroke('M 5 50 H 95 M 71 27 L 95 50 L 71 73')] },
+  { id: 'basic-triangle', label: 'Trójkąt', category: 'Podstawowe', paths: [outline('M 50 6 L 95 92 H 5 Z')] },
+  { id: 'basic-diamond', label: 'Romb', category: 'Podstawowe', paths: [outline('M 50 5 L 95 50 L 50 95 L 5 50 Z')] },
+  { id: 'basic-pentagon', label: 'Pięciokąt', category: 'Podstawowe', paths: [outline('M 50 5 L 96 39 L 78 94 H 22 L 4 39 Z')] },
+  { id: 'basic-hexagon', label: 'Sześciokąt', category: 'Podstawowe', paths: [outline('M 25 5 H 75 L 96 50 L 75 95 H 25 L 4 50 Z')] },
+  { id: 'basic-octagon', label: 'Ośmiokąt', category: 'Podstawowe', paths: [outline('M 30 5 H 70 L 95 30 V 70 L 70 95 H 30 L 5 70 V 30 Z')] },
+
   { id: 'flow-process', label: 'Proces', category: 'Schemat blokowy', paths: [outline('M 10 14 H 90 V 86 H 10 Z')] },
   { id: 'flow-decision', label: 'Decyzja', category: 'Schemat blokowy', paths: [outline('M 50 6 L 94 50 L 50 94 L 6 50 Z')] },
   { id: 'flow-io', label: 'Wejście / wyjście', category: 'Schemat blokowy', paths: [outline('M 23 14 H 94 L 77 86 H 6 Z')] },
@@ -58,6 +69,6 @@ export const shapeLibrary: ShapeDefinition[] = [
   { id: 'tech-dimension', label: 'Linia wymiarowa', category: 'Rysunek techniczny', paths: [stroke('M 18 22 V 78 M 82 22 V 78 M 18 50 H 82'), outline('M 8 50 L 22 43 V 57 Z M 92 50 L 78 43 V 57 Z')] },
 ]
 
-export const shapeById = (id: string) => shapeLibrary.find(shape => shape.id === id) ?? shapeLibrary[0]
+export const shapeById = (id: string) => shapeLibrary.find(shape => shape.id === id) ?? shapeLibrary.find(shape => shape.id === 'flow-process') ?? shapeLibrary[0]
 
-export const shapeCategories = ['Schemat blokowy', 'Elektryczne', 'Rysunek techniczny'] as const
+export const shapeCategories = ['Podstawowe', 'Schemat blokowy', 'Elektryczne', 'Rysunek techniczny'] as const

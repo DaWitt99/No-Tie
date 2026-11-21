@@ -1,10 +1,9 @@
 import { useEffect, useRef, useState, type CSSProperties } from 'react'
-import { zipSync } from 'fflate'
 import {
-  AlignCenterHorizontal, AlignEndHorizontal, AlignStartHorizontal, ArrowDownWideNarrow, ArrowRight, Check, Circle, Combine, Eraser,
+  AlignCenterHorizontal, AlignEndHorizontal, AlignStartHorizontal, ArrowDownWideNarrow, ArrowRight, Check, Combine, Eraser,
   ClipboardCopy, ClipboardPaste, Copy, Download, Eye, EyeOff, Grid3X3, Group, History, ImagePlus, Layers,
-  Lasso, Lock, MessageSquare, Minus, MousePointer2, Palette, Pencil, Pipette, Plus, RectangleHorizontal,
-  RectangleVertical, Redo2, RotateCw, Ruler, Shapes, Trash2, Triangle, Type, Undo2, Ungroup, Unlock, Waypoints, X,
+  Hand, Lasso, Lock, MessageSquare, Minus, MousePointer2, Palette, Pencil, Pipette, Plus, RectangleHorizontal,
+  Redo2, RotateCw, Ruler, Shapes, Trash2, Type, Undo2, Ungroup, Unlock, Waypoints, X,
 } from 'lucide-react'
 import { SVG, type Svg } from '@svgdotjs/svg.js'
 import type { NoteAsset } from './types'
@@ -12,7 +11,7 @@ import { sanitizeSvg } from './content'
 import { shapeById, shapeCategories, shapeLibrary } from './shapeLibrary'
 import { findGeometrySnap, lassoIntersectsBox, outlineOpenStroke, reversePathData } from './svgEditorGeometry'
 
-type Tool = 'select' | 'lasso' | 'eraser' | 'shapeBuilder' | 'rect' | 'roundRect' | 'ellipse' | 'line' | 'arrow' | 'polygon' | 'freehand' | 'text' | 'pen'
+type Tool = 'select' | 'pan' | 'lasso' | 'eraser' | 'shapeBuilder' | 'rect' | 'roundRect' | 'ellipse' | 'line' | 'arrow' | 'polygon' | 'freehand' | 'text' | 'pen'
 type ArrowMode = 'end' | 'start' | 'both' | 'none'
 type Box = { x: number; y: number; width: number; height: number }
 type ViewBox = Box
@@ -54,10 +53,9 @@ type SvgLibraryItem = { id: string; name: string; markup: string; kind?: 'compon
 type SvgPalettePreset = { id: string; name: string; colors: string[] }
 type StylusProfile = { smoothing: number; pressureSensitivity: number; tiltSensitivity: number; palmRejection: boolean }
 type BrushPreset = { id: string; name: string; color: string; width: number; smoothing: number; pressureSensitivity: number; tiltSensitivity: number }
-type SvgExtensionPackage = { id: string; name: string; category: string; description: string; items: SvgLibraryItem[] }
 type EditorViewOptions = { grid: boolean; gridSize: number; snap: boolean; snapGeometry: boolean; smartGuides: boolean; rulers: boolean; guides: EditorGuide[] }
 
-type TextEdit = { input: HTMLInputElement; x: number; y: number; element?: SVGElement; fontSize: number; keepTool: boolean }
+type TextEdit = { input: HTMLInputElement; x: number; y: number; element?: SVGElement; fontSize: number; keepTool: boolean; parent?: SVGElement; parentId?: string }
 type Drawing = Svg
 type PenNode = Point & { incoming?: Point; outgoing?: Point; mode?: 'smooth' | 'corner' | 'symmetric' }
 type ActivePen = { id: string; element: SVGPathElement; points: PenNode[] }
@@ -66,6 +64,8 @@ const WIDTH = 800
 const HEIGHT = 500
 const SNAP_DISTANCE = 4
 const MAX_FREEHAND_POINTS = 1600
+const MIN_VIEW_EXTENT = .02
+const MAX_VIEW_EXTENT = 10_000_000
 const OBJECT_TAGS = new Set(['g', 'rect', 'circle', 'ellipse', 'line', 'polygon', 'polyline', 'path', 'text', 'image', 'use'])
 const SVG_NS = 'http://www.w3.org/2000/svg'
 const DEFAULT_STYLUS_PROFILE: StylusProfile = { smoothing: .85, pressureSensitivity: 1, tiltSensitivity: 1, palmRejection: true }
@@ -76,134 +76,6 @@ const BUILTIN_BRUSH_PRESETS: BrushPreset[] = [
 
 function readLocalJson<T>(key: string, fallback: T): T {
   try { return (JSON.parse(localStorage.getItem(key) ?? 'null') as T | null) ?? fallback } catch { return fallback }
-}
-
-function extensionSvg(markup: string): string {
-  return `<svg xmlns="${SVG_NS}" viewBox="0 0 120 80">${markup}</svg>`
-}
-
-const SVG_EXTENSION_CATALOG: SvgExtensionPackage[] = [
-  {
-    id: 'process-flow', name: 'Schematy procesów', category: 'Procesy i przepływy', description: 'Węzły, decyzje i gotowy szablon prostego procesu.',
-    items: [
-      { id: 'process-step', name: 'Krok procesu', kind: 'component', markup: extensionSvg('<rect x="8" y="8" width="104" height="64" rx="12" fill="#eef1ff" stroke="#586fd8" stroke-width="3"/><text x="60" y="45" text-anchor="middle" font-size="12" fill="#26345c">Krok</text>') },
-      { id: 'process-decision', name: 'Decyzja', kind: 'component', markup: extensionSvg('<path d="M60 4 116 40 60 76 4 40Z" fill="#fff3da" stroke="#d58e28" stroke-width="3"/><text x="60" y="44" text-anchor="middle" font-size="11" fill="#63471c">Decyzja</text>') },
-      { id: 'process-template', name: 'Szablon procesu', kind: 'template', markup: extensionSvg('<rect x="5" y="25" width="38" height="28" rx="10" fill="#eaf7f1" stroke="#28836c" stroke-width="2"/><text x="24" y="43" text-anchor="middle" font-size="8">Start</text><path d="M43 39h20m-5-5 5 5-5 5" fill="none" stroke="#65718a" stroke-width="2"/><rect x="63" y="25" width="48" height="28" rx="8" fill="#eef1ff" stroke="#586fd8" stroke-width="2"/><text x="87" y="43" text-anchor="middle" font-size="8">Działanie</text>') },
-    ],
-  },
-  {
-    id: 'network-map', name: 'Sieci i infrastruktura', category: 'Technologia', description: 'Symbole hosta, bazy danych i topologii sieci.',
-    items: [
-      { id: 'network-server', name: 'Serwer', kind: 'component', markup: extensionSvg('<rect x="25" y="8" width="70" height="64" rx="8" fill="#edf5ff" stroke="#4383bd" stroke-width="3"/><path d="M36 25h48M36 40h48M36 55h48" stroke="#4383bd" stroke-width="3"/><circle cx="78" cy="25" r="2" fill="#2b9a83"/><circle cx="78" cy="40" r="2" fill="#2b9a83"/><circle cx="78" cy="55" r="2" fill="#2b9a83"/>') },
-      { id: 'network-database', name: 'Baza danych', kind: 'component', markup: extensionSvg('<ellipse cx="60" cy="18" rx="38" ry="11" fill="#f1edff" stroke="#815cc7" stroke-width="3"/><path d="M22 18v44c0 6 17 11 38 11s38-5 38-11V18M22 40c0 6 17 11 38 11s38-5 38-11" fill="none" stroke="#815cc7" stroke-width="3"/>') },
-    ],
-  },
-  {
-    id: 'electrical-basics', name: 'Schematy elektryczne', category: 'Elektrotechnika', description: 'Podstawowe symbole elementów i prosty szablon obwodu.',
-    items: [
-      { id: 'electrical-resistor', name: 'Rezystor', kind: 'component', markup: extensionSvg('<path d="M5 40h18l8-16 14 32 14-32 14 32 14-32 10 16h12" fill="none" stroke="#3c4b68" stroke-width="3" stroke-linejoin="round"/>') },
-      { id: 'electrical-lamp', name: 'Żarówka', kind: 'component', markup: extensionSvg('<circle cx="60" cy="36" r="23" fill="#fff6d8" stroke="#bd8a24" stroke-width="3"/><path d="m44 20 32 32m0-32L44 52M52 62h16m-14 7h12" stroke="#bd8a24" stroke-width="3"/>') },
-      { id: 'electrical-template', name: 'Szablon obwodu', kind: 'template', markup: extensionSvg('<circle cx="20" cy="40" r="12" fill="#fff6d8" stroke="#bd8a24" stroke-width="2"/><path d="M20 28v-9m-8 0h16m-8 42v9M32 40h20l8-12 12 24 8-12h20" fill="none" stroke="#3c4b68" stroke-width="2.5"/>') },
-    ],
-  },
-]
-
-type ParsedChart = { categories: string[]; series: { name: string; values: (number | null)[] }[] }
-
-function parseCsvMatrix(source: string): { rows: string[][]; delimiter: string } {
-  const text = source.replace(/^\uFEFF/, '')
-  const firstLine = text.split(/\r?\n/, 1)[0] ?? ''
-  const delimiter = [';', '\t', ','].map(value => ({ value, count: firstLine.split(value).length - 1 })).sort((a, b) => b.count - a.count)[0]?.value ?? ','
-  const rows = text.split(/\r?\n/).filter(line => line.trim()).map(line => {
-    const cells: string[] = []
-    let value = ''; let quoted = false
-    for (let index = 0; index < line.length; index++) {
-      const character = line[index]
-      if (character === '"' && line[index + 1] === '"' && quoted) { value += '"'; index++ }
-      else if (character === '"') quoted = !quoted
-      else if (character === delimiter && !quoted) { cells.push(value.trim()); value = '' }
-      else value += character
-    }
-    cells.push(value.trim())
-    return cells
-  })
-  return { rows, delimiter }
-}
-
-function serializeCsvMatrix(rows: string[][], delimiter: string): string {
-  return rows.map(row => row.map(value => {
-    const cell = value ?? ''
-    return cell.includes(delimiter) || cell.includes('"') || /[\r\n]/.test(cell) ? `"${cell.replaceAll('"', '""')}"` : cell
-  }).join(delimiter)).join('\n')
-}
-
-function parseChartCsv(source: string): ParsedChart {
-  const rows = parseCsvMatrix(source).rows
-  if (rows.length < 2 || rows[0].length < 2) throw new Error('Dodaj nagłówek kategorii oraz co najmniej jedną kolumnę liczbową.')
-  const headers = rows[0]
-  const categories: string[] = []
-  const numericRows: (number | null)[][] = []
-  rows.slice(1).forEach(row => {
-    if (!row[0]?.trim()) return
-    const values = headers.slice(1).map((_, index) => {
-      const value = row[index + 1]?.trim()
-      if (!value) return null
-      const parsed = Number(value.replace(',', '.'))
-      return Number.isFinite(parsed) ? parsed : null
-    })
-    if (values.some(value => value !== null)) { categories.push(row[0]); numericRows.push(values) }
-  })
-  const series = headers.slice(1).map((name, column) => ({ name: name || `Seria ${column + 1}`, values: numericRows.map(row => row[column] ?? null) })).filter(item => item.values.some(value => value !== null))
-  if (!categories.length || !series.length) throw new Error('Nie znaleziono wierszy z wartościami liczbowymi.')
-  return { categories, series }
-}
-
-function buildDataChart(csv: string, type: 'bar' | 'line', id: string = crypto.randomUUID(), palette = ['#596fd8', '#e76c75', '#2b9a83', '#f0a84b', '#8a5bc2', '#3e8cc9']): SVGGElement {
-  const data = parseChartCsv(csv)
-  const group = document.createElementNS(SVG_NS, 'g')
-  group.setAttribute('data-object-id', id); group.setAttribute('data-layer-name', type === 'bar' ? 'Wykres słupkowy' : 'Wykres liniowy')
-  group.setAttribute('data-linked-chart', 'true'); group.setAttribute('data-chart-type', type); group.setAttribute('data-chart-csv', csv)
-  group.setAttribute('pointer-events', 'all')
-  const width = 360; const height = 240; const left = 42; const right = 14; const top = 18; const bottom = 42
-  const plotWidth = width - left - right; const plotHeight = height - top - bottom
-  const allValues = data.series.flatMap(series => series.values.filter((value): value is number => value !== null))
-  const min = Math.min(0, ...allValues); const max = Math.max(1, ...allValues); const range = max - min || 1
-  const y = (value: number) => top + plotHeight - (value - min) / range * plotHeight
-  const create = (tag: string, attrs: Record<string, string>, content?: string) => {
-    const element = document.createElementNS(SVG_NS, tag)
-    Object.entries(attrs).forEach(([key, value]) => element.setAttribute(key, value))
-    if (content) element.textContent = content
-    group.append(element); return element
-  }
-  create('path', { d: `M ${left} ${top} V ${top + plotHeight} H ${width - right}`, fill: 'none', stroke: '#8b96ad', 'stroke-width': '1.5' })
-  const colors = palette.length ? palette : ['#596fd8', '#e76c75', '#2b9a83', '#f0a84b', '#8a5bc2', '#3e8cc9']
-  data.categories.forEach((category, index) => {
-    const center = left + (index + .5) * plotWidth / data.categories.length
-    create('text', { x: `${center}`, y: `${height - 14}`, 'text-anchor': 'middle', 'font-size': `${Math.min(11, 120 / data.categories.length)}`, fill: '#536078' }, category.slice(0, 18))
-  })
-  data.series.forEach((series, seriesIndex) => {
-    const color = colors[seriesIndex % colors.length]
-    const points = series.values.map((value, index) => value === null ? null : ({ x: left + (index + .5) * plotWidth / data.categories.length, y: y(value), value })).filter((point): point is { x: number; y: number; value: number } => Boolean(point))
-    if (type === 'line') {
-      if (points.length > 1) create('path', { d: points.map((point, index) => `${index ? 'L' : 'M'} ${point.x} ${point.y}`).join(' '), fill: 'none', stroke: color, 'stroke-width': '3', 'stroke-linecap': 'round', 'stroke-linejoin': 'round' })
-      points.forEach(point => create('circle', { cx: `${point.x}`, cy: `${point.y}`, r: '4', fill: color, stroke: '#fff', 'stroke-width': '1.5' }))
-    } else {
-      const groupWidth = plotWidth / data.categories.length * .76
-      const barWidth = groupWidth / data.series.length
-      points.forEach(point => {
-        const index = Math.round((point.x - left) / plotWidth * data.categories.length - .5)
-        const barX = point.x - groupWidth / 2 + seriesIndex * barWidth
-        const zero = y(0); const topY = Math.min(zero, point.y)
-        create('rect', { x: `${barX}`, y: `${topY}`, width: `${Math.max(1, barWidth - 2)}`, height: `${Math.max(1, Math.abs(zero - point.y))}`, rx: '2', fill: color, 'data-category-index': `${index}` })
-      })
-    }
-  })
-  data.series.forEach((series, index) => {
-    const legendY = 10 + (index % 2) * 12
-    create('circle', { cx: `${left + index * 112}`, cy: `${legendY}`, r: '3', fill: colors[index % colors.length] })
-    create('text', { x: `${left + index * 112 + 6}`, y: `${legendY + 3}`, 'font-size': '8', fill: '#65718a' }, series.name.slice(0, 18))
-  })
-  return group
 }
 
 function downloadBlob(blob: Blob, filename: string) {
@@ -755,6 +627,14 @@ function unionBoxes(boxes: (Box | undefined)[]): Box | undefined {
   return { x, y, width: right - x, height: bottom - y }
 }
 
+function extendsDocument(bounds: Box | undefined, size: { width: number; height: number }): boolean {
+  if (!bounds) return false
+  const tolerance = .5
+  return bounds.x < -tolerance || bounds.y < -tolerance
+    || bounds.x + bounds.width > size.width + tolerance
+    || bounds.y + bounds.height > size.height + tolerance
+}
+
 function directObjects(stage: SVGSVGElement): SVGElement[] {
   const children = Array.from(stage.children).filter((child): child is SVGElement => child instanceof SVGElement)
   const background = children.find(child => {
@@ -866,7 +746,7 @@ function updateConnectors(stage: SVGSVGElement) {
     }
     if (start) setLineEndpoint(line, 'start', start)
     if (end) setLineEndpoint(line, 'end', end)
-    const lineId = line.getAttribute('data-object-id')
+    const lineId = line.getAttribute('data-object-id') ?? line.parentElement?.closest('[data-object-id]')?.getAttribute('data-object-id')
     const routeEnabled = line.getAttribute('data-auto-route') === 'true'
     const routeStyle = line.getAttribute('data-route-style') ?? 'orthogonal'
     const hasLabel = Boolean(line.getAttribute('data-connector-label')?.trim())
@@ -1174,9 +1054,12 @@ function renderOverlay(stage: Drawing, ids: string[], options: OverlayOptions = 
     }
   }
   const activeTool = stage.node.getAttribute('data-active-tool')
-  const selectedLines = elementsForIds(stage.node, ids).filter(element => element.tagName.toLowerCase() === 'line')
-  const showAllAnchors = activeTool === 'line' || activeTool === 'arrow' || selectedLines.length > 0
-  const anchorElements = (showAllAnchors ? directObjects(stage.node) : elementsForIds(stage.node, ids))
+  const selectedLines = elementsForIds(stage.node, ids).flatMap(element => {
+    if (element.tagName.toLowerCase() === 'line') return [element as SVGLineElement]
+    return Array.from(element.children).filter(child => child.tagName.toLowerCase() === 'line') as SVGLineElement[]
+  })
+  const showTargetAnchors = stage.node.hasAttribute('data-connector-dragging')
+  const anchorElements = (showTargetAnchors ? directObjects(stage.node) : elementsForIds(stage.node, ids))
     .filter(element => !['line', 'text'].includes(element.tagName.toLowerCase()))
   for (const element of anchorElements) {
     const id = element.getAttribute('data-object-id')
@@ -1197,8 +1080,10 @@ function renderOverlay(stage: Drawing, ids: string[], options: OverlayOptions = 
       for (const side of ['start', 'end'] as const) {
         const x = Number(line.getAttribute(side === 'start' ? 'x1' : 'x2'))
         const y = Number(line.getAttribute(side === 'start' ? 'y1' : 'y2'))
+        const lineId = line.getAttribute('data-object-id') ?? line.parentElement?.closest('[data-object-id]')?.getAttribute('data-object-id')
+        if (!lineId) continue
         layer.circle(12).center(x, y).fill('#fff').stroke({ color: '#25a68a', width: 2 })
-          .attr({ 'data-connector-handle': id, 'data-connector-side': side, 'pointer-events': 'all', cursor: 'crosshair' })
+          .attr({ 'data-connector-handle': lineId, 'data-connector-side': side, 'pointer-events': 'all', cursor: 'crosshair' })
       }
     }
   }
@@ -1402,6 +1287,7 @@ export function VectorEditor({
   const eraserModeRef = useRef<'partial' | 'whole'>('partial')
   const [activePanel, setActivePanel] = useState<EditorPanel>('canvas')
   const [shapeLibraryOpen, setShapeLibraryOpen] = useState(false)
+  const [infiniteCanvas, setInfiniteCanvas] = useState(false)
   const [tool, setTool] = useState<Tool>('select')
   const [smartShapeId, setSmartShapeId] = useState('auto')
   const [smartDrawing, setSmartDrawing] = useState(true)
@@ -1446,11 +1332,9 @@ export function VectorEditor({
   const [checkpoints, setCheckpoints] = useState<Checkpoint[]>([])
   const [miniObjects, setMiniObjects] = useState<MiniObject[]>([])
   const [exportSize, setExportSize] = useState({ width: 800, height: 500 })
-  const [exportFormat, setExportFormat] = useState<'svg' | 'png' | 'pdf' | 'sprite'>('svg')
-  const [allArtboardsFormat, setAllArtboardsFormat] = useState<'svg' | 'png' | 'pdf'>('png')
+  const [exportFormat, setExportFormat] = useState<'svg' | 'png' | 'pdf'>('svg')
   const [exportTransparent, setExportTransparent] = useState(true)
   const [vectorizeDetail, setVectorizeDetail] = useState(32)
-  const [artboardPreset, setArtboardPreset] = useState('360x220')
   const [workflowMessage, setWorkflowMessage] = useState('')
   const [showMinimap, setShowMinimap] = useState(true)
   const [viewBox, setViewBox] = useState<ViewBox>(viewBoxRef.current)
@@ -1507,23 +1391,14 @@ export function VectorEditor({
   const [commandQuery, setCommandQuery] = useState('')
   const [accessibilityReport, setAccessibilityReport] = useState<string[]>([])
   const [optimizationEnabled, setOptimizationEnabled] = useState(true)
-  const [artboardExportId, setArtboardExportId] = useState('')
   const [layoutDirection, setLayoutDirection] = useState<'horizontal' | 'vertical'>('horizontal')
   const [layoutSpacing, setLayoutSpacing] = useState(56)
-  const [chartCsv, setChartCsv] = useState('Etap,Wartość\nPlan,12\nRealizacja,9\nPozostało,3')
-  const [chartType, setChartType] = useState<'bar' | 'line'>('bar')
-  const chartImportInput = useRef<HTMLInputElement>(null)
-  const extensionImportInput = useRef<HTMLInputElement>(null)
-  const [chartTargetId, setChartTargetId] = useState('')
   const [documentA11yTitle, setDocumentA11yTitle] = useState(asset?.fileName?.replace(/\.svg$/i, '') ?? 'Schemat')
   const [documentA11yDescription, setDocumentA11yDescription] = useState('Diagram utworzony w edytorze SVG.')
   const [paletteNameDraft, setPaletteNameDraft] = useState('')
   const [paletteDraftColors, setPaletteDraftColors] = useState(['#596fd8', '#e76c75', '#2b9a83', '#f0a84b', '#8a5bc2', '#3e8cc9'])
   const [activePaletteId, setActivePaletteId] = useState('')
   const [customPalettes, setCustomPalettes] = useState<SvgPalettePreset[]>(() => readLocalJson('no-tie-svg-palettes', []))
-  const [installedExtensionIds, setInstalledExtensionIds] = useState<string[]>(() => readLocalJson('no-tie-svg-installed-extensions', []))
-  const [extensionPackageName, setExtensionPackageName] = useState('Mój zestaw SVG')
-  const [extensionNotice, setExtensionNotice] = useState('')
   const [offsetDistance, setOffsetDistance] = useState(4)
   const [patternKind, setPatternKind] = useState<'dots' | 'lines' | 'diagonal'>('dots')
   const [optimizationReport, setOptimizationReport] = useState('')
@@ -1633,7 +1508,6 @@ export function VectorEditor({
     try { localStorage.setItem('no-tie-svg-assets', JSON.stringify(assetLibrary.slice(-40))) } catch { /* the asset library stays available for this editor session */ }
   }, [assetLibrary])
   useEffect(() => { try { localStorage.setItem('no-tie-svg-palettes', JSON.stringify(customPalettes.slice(-20))) } catch { /* palettes remain usable for this session */ } }, [customPalettes])
-  useEffect(() => { try { localStorage.setItem('no-tie-svg-installed-extensions', JSON.stringify(installedExtensionIds)) } catch { /* installed packs remain available for this session */ } }, [installedExtensionIds])
 
   const chooseTool = (nextTool: Tool) => {
     if (activePen.current && nextTool !== 'pen') finishPenAction.current()
@@ -1655,7 +1529,7 @@ export function VectorEditor({
 
   function zoomAtCenter(scale: number) {
     const current = viewBoxRef.current
-    const width = Math.max(documentSize.width / 20, Math.min(documentSize.width * 20, current.width * scale))
+    const width = Math.max(MIN_VIEW_EXTENT, Math.min(MAX_VIEW_EXTENT, current.width * scale))
     const height = width * current.height / current.width
     const centerX = current.x + current.width / 2
     const centerY = current.y + current.height / 2
@@ -1835,7 +1709,7 @@ export function VectorEditor({
 
   useEffect(() => {
     if (!mount.current) return
-    const stage = SVG().addTo(mount.current).size('100%', '100%').viewbox(0, 0, WIDTH, HEIGHT).attr({ preserveAspectRatio: 'none', tabindex: 0, 'data-active-tool': 'select' })
+    const stage = SVG().addTo(mount.current).size('100%', '100%').viewbox(0, 0, WIDTH, HEIGHT).attr({ preserveAspectRatio: 'none', tabindex: 0, 'data-active-tool': 'select', 'data-editor-infinite-canvas': `${infiniteCanvas}` })
     if (asset?.svg) {
       try {
         const parsed = new DOMParser().parseFromString(sanitizeSvg(asset.svg), 'image/svg+xml')
@@ -2027,17 +1901,20 @@ export function VectorEditor({
       return changed
     }
 
-    const beginTextEdit = (location: { x: number; y: number }, existing?: SVGElement, keepTool = false) => {
+    const beginTextEdit = (location: { x: number; y: number }, existing?: SVGElement, keepTool = false, parent?: SVGElement) => {
       textEdit.current?.input.remove()
       const container = mount.current
       if (!container) return
       const bounds = stage.node.getBoundingClientRect()
       const existingBox = existing ? getBox(existing) : undefined
-      const x = existingBox?.x ?? location.x
-      const y = existingBox?.y ?? location.y
-      const size = Number(existing?.getAttribute('font-size')) || fontSizeRef.current
+      const parentBox = parent ? getBox(parent) : undefined
+      const x = parentBox ? parentBox.x + parentBox.width / 2 : existingBox?.x ?? location.x
+      const y = parentBox ? parentBox.y + parentBox.height / 2 : existingBox?.y ?? location.y
+      const size = Number(existing?.getAttribute('font-size')) || (parentBox
+        ? Math.max(8, Math.min(fontSizeRef.current, parentBox.width / 6, parentBox.height * .45))
+        : fontSizeRef.current)
       const input = document.createElement('input')
-      input.className = 'canvas-text-input'
+      input.className = `canvas-text-input${parent ? ' canvas-child-text-input' : ''}`
       input.type = 'text'
       input.value = existing?.textContent ?? ''
       input.placeholder = 'Wpisz tekst…'
@@ -2047,8 +1924,9 @@ export function VectorEditor({
       input.style.top = `${(y - visible.y) * bounds.height / visible.height}px`
       input.style.fontSize = `${size * bounds.width / visible.width}px`
       input.style.color = existing?.getAttribute('fill') ?? strokeColorRef.current
+      if (parentBox) input.style.width = `${Math.max(44, Math.min(320, parentBox.width * bounds.width / visible.width * .86))}px`
       container.append(input)
-      textEdit.current = { input, x, y, element: existing, fontSize: size, keepTool }
+      textEdit.current = { input, x, y, element: existing, fontSize: size, keepTool, parent, parentId: parent?.getAttribute('data-object-id') ?? undefined }
 
       const cancel = () => {
         if (textEdit.current?.input !== input) return
@@ -2059,9 +1937,52 @@ export function VectorEditor({
         const editing = textEdit.current
         if (!editing || editing.input !== input) return
         const value = input.value.trim()
+        let changed = false
         if (editing.element) {
           if (value) editing.element.textContent = value
           else editing.element.remove()
+          changed = true
+        } else if (editing.parent && value) {
+          let textParent = editing.parent
+          let objectId = editing.parentId ?? textParent.getAttribute('data-object-id') ?? crypto.randomUUID()
+          if (textParent.tagName.toLowerCase() !== 'g') {
+            const wrapper = document.createElementNS(SVG_NS, 'g')
+            const carriedAttributes = [
+              'data-object-id', 'data-layer-name', 'data-layer-locked', 'data-group-id', 'data-layout-constraint', 'data-connector-port', 'aria-label', 'role', 'tabindex',
+              'fill', 'fill-opacity', 'fill-rule', 'stroke', 'stroke-width', 'stroke-linecap', 'stroke-linejoin', 'stroke-dasharray', 'stroke-dashoffset', 'stroke-opacity', 'opacity',
+              'visibility', 'display', 'paint-order', 'shape-rendering', 'vector-effect',
+            ]
+            carriedAttributes.forEach(name => {
+              const attribute = textParent.getAttribute(name)
+              if (attribute !== null) { wrapper.setAttribute(name, attribute); textParent.removeAttribute(name) }
+            })
+            wrapper.setAttribute('data-object-id', objectId)
+            textParent.replaceWith(wrapper)
+            wrapper.append(textParent)
+            textParent = wrapper
+          }
+          const stageMatrix = stage.node.getScreenCTM()
+          const parentMatrix = (textParent as SVGGraphicsElement).getScreenCTM()
+          const localPoint = stageMatrix && parentMatrix
+            ? new DOMPoint(editing.x, editing.y).matrixTransform(stageMatrix).matrixTransform(parentMatrix.inverse())
+            : new DOMPoint(editing.x, editing.y)
+          const child = document.createElementNS(SVG_NS, 'text')
+          child.textContent = value
+          child.setAttribute('x', rounded(localPoint.x))
+          child.setAttribute('y', rounded(localPoint.y))
+          child.setAttribute('text-anchor', 'middle')
+          child.setAttribute('dominant-baseline', 'middle')
+          child.setAttribute('font-family', fontFamilyRef.current)
+          child.setAttribute('font-size', `${editing.fontSize}`)
+          child.setAttribute('font-weight', fontWeightRef.current)
+          child.setAttribute('fill', strokeColorRef.current)
+          child.setAttribute('pointer-events', 'all')
+          if (fontItalicRef.current) child.setAttribute('font-style', 'italic')
+          textParent.append(child)
+          select([objectId])
+          updateConnectors(stage.node)
+          if (!editing.keepTool) chooseTool('select')
+          changed = true
         } else if (value) {
           const created = stage.text(value).move(editing.x, editing.y).font({ family: fontFamilyRef.current, size: editing.fontSize, weight: fontWeightRef.current }).fill(strokeColorRef.current)
           created.attr({ 'text-anchor': textAlignRef.current })
@@ -2070,11 +1991,14 @@ export function VectorEditor({
           created.attr({ 'data-object-id': id, 'pointer-events': 'all' })
           select([id])
           if (!editing.keepTool) chooseTool('select')
+          changed = true
         }
         textEdit.current = null
         input.remove()
-        recordHistory(stage)
-        renderOverlay(stage, selectedIdsRef.current)
+        if (changed) {
+          recordHistory(stage)
+          renderOverlay(stage, selectedIdsRef.current)
+        }
       }
       input.addEventListener('keydown', event => {
         if (event.key === 'Enter') {
@@ -2141,7 +2065,7 @@ export function VectorEditor({
       if (!allowTextDoubleClick) event.preventDefault()
       stage.node.focus({ preventScroll: true })
       const penPan = event.pointerType === 'pen' && event.button === 2
-      const wantsPan = event.button === 1 || spacePanRef.current || penPan
+      const wantsPan = currentTool === 'pan' || event.button === 1 || spacePanRef.current || penPan
       const location = point(event, !wantsPan && currentTool !== 'lasso')
       if (wantsPan) {
         stage.node.setPointerCapture(event.pointerId)
@@ -2256,6 +2180,10 @@ export function VectorEditor({
           } else {
             if (anchor && anchorPoint) created.element.attr({ 'data-start-target': anchor.id, 'data-start-anchor': anchor.anchor })
             interaction.current = { type: 'draw', tool: currentTool, element: created.element, id: created.id, x: startPoint.x, y: startPoint.y, keepTool: event.ctrlKey, startTarget: anchor?.id, startAnchor: anchor?.anchor }
+            if ((currentTool === 'line' || currentTool === 'arrow') && anchor && anchorPoint) {
+              stage.node.setAttribute('data-connector-dragging', 'true')
+              renderOverlay(stage, selectedIdsRef.current)
+            }
           }
         }
         return
@@ -2303,7 +2231,10 @@ export function VectorEditor({
 
       const connectorHandle = findConnectorHandle(event.target)
       if (connectorHandle) {
-        const line = elementsForIds(stage.node, [connectorHandle.id]).find(element => element.tagName.toLowerCase() === 'line') as SVGLineElement | undefined
+        const selectedObject = elementsForIds(stage.node, [connectorHandle.id])[0]
+        const line = selectedObject?.tagName.toLowerCase() === 'line'
+          ? selectedObject as SVGLineElement
+          : selectedObject?.querySelector(':scope > line') as SVGLineElement | null ?? undefined
         if (line) {
           select([connectorHandle.id])
           stage.node.setAttribute('data-connector-dragging', 'true')
@@ -2650,6 +2581,7 @@ export function VectorEditor({
           }
           updateConnectors(stage.node)
         }
+        stage.node.removeAttribute('data-connector-dragging')
         recordHistory(stage)
         select([current.id])
         if (!current.keepTool) chooseTool('select')
@@ -2756,10 +2688,17 @@ export function VectorEditor({
       }
       const target = findObjectTarget(stage.node, event.target)
         ?? findObjectTarget(stage.node, document.elementFromPoint(event.clientX, event.clientY))
-      if (target?.tagName.toLowerCase() === 'text') {
+      const clickedText = event.target instanceof Element ? event.target.closest('text') as SVGElement | null : null
+      if (clickedText) {
+        event.preventDefault()
+        const bounds = getBox(clickedText)
+        if (bounds) beginTextEdit({ x: bounds.x, y: bounds.y }, clickedText, event.ctrlKey)
+        return
+      }
+      if (target && target.tagName.toLowerCase() !== 'text' && target.getAttribute('data-layer-locked') !== 'true') {
         event.preventDefault()
         const bounds = getBox(target)
-        if (bounds) beginTextEdit({ x: bounds.x, y: bounds.y }, target, event.ctrlKey)
+        if (bounds) beginTextEdit({ x: bounds.x, y: bounds.y }, undefined, event.ctrlKey, target)
       }
     }
 
@@ -2773,7 +2712,7 @@ export function VectorEditor({
       const anchorX = current.x + ratioX * current.width
       const anchorY = current.y + ratioY * current.height
       const scale = event.deltaY < 0 ? .88 : 1.14
-      const width = Math.max(documentSizeRef.current.width / 20, Math.min(documentSizeRef.current.width * 20, current.width * scale))
+      const width = Math.max(MIN_VIEW_EXTENT, Math.min(MAX_VIEW_EXTENT, current.width * scale))
       const height = width * current.height / current.width
       changeViewBox({ x: anchorX - ratioX * width, y: anchorY - ratioY * height, width, height })
     }
@@ -2815,6 +2754,10 @@ export function VectorEditor({
       drawing.current = null
     }
   }, [asset?.id, asset?.svg])
+
+  useEffect(() => {
+    drawing.current?.node.setAttribute('data-editor-infinite-canvas', `${infiniteCanvas}`)
+  }, [infiniteCanvas])
 
   useEffect(() => {
     drawing.current?.node.setAttribute('data-active-tool', tool)
@@ -3086,14 +3029,13 @@ export function VectorEditor({
     const stage = drawing.current
     if (!stage) return
     const viewport = viewBoxRef.current
-    const width = Math.min(140, viewport.width * .42)
-    const height = Math.min(110, viewport.height * .42)
+    const size = Math.min(120, viewport.width * .35, viewport.height * .35)
     const id = crypto.randomUUID()
     const group = createLibraryShapeNode(shapeId, {
-      x: viewport.x + (viewport.width - width) / 2,
-      y: viewport.y + (viewport.height - height) / 2,
-      width,
-      height,
+      x: viewport.x + (viewport.width - size) / 2,
+      y: viewport.y + (viewport.height - size) / 2,
+      width: size,
+      height: size,
     }, undefined, id)
     group.setAttribute('fill', fillEnabledRef.current ? fillColorRef.current : 'none')
     group.setAttribute('stroke', strokeColorRef.current)
@@ -3182,28 +3124,6 @@ export function VectorEditor({
       const position = horizontal
         ? alignment === 'left' ? keyBox.x : alignment === 'centerX' ? target - box.width / 2 : target - box.width
         : alignment === 'top' ? keyBox.y : alignment === 'centerY' ? target - box.height / 2 : target - box.height
-      moveElementBy(element, horizontal ? position - box.x : 0, horizontal ? 0 : position - box.y)
-    })
-    updateConnectors(stage.node); recordHistory(stage); select(ids)
-  }
-
-  function alignSelectionToArtboard(alignment: 'left' | 'centerX' | 'right' | 'top' | 'centerY' | 'bottom') {
-    const stage = drawing.current
-    const ids = selectedIdsRef.current
-    if (!stage || !ids.length) return
-    const board = elementsForIds(stage.node, ids).find(element => element.hasAttribute('data-artboard'))
-    const bounds = board ? getBox(board) : { x: 0, y: 0, width: documentSizeRef.current.width, height: documentSizeRef.current.height }
-    if (!bounds) return
-    const horizontal = ['left', 'centerX', 'right'].includes(alignment)
-    const target = horizontal
-      ? alignment === 'left' ? bounds.x : alignment === 'centerX' ? bounds.x + bounds.width / 2 : bounds.x + bounds.width
-      : alignment === 'top' ? bounds.y : alignment === 'centerY' ? bounds.y + bounds.height / 2 : bounds.y + bounds.height
-    elementsForIds(stage.node, ids).filter(element => element !== board).forEach(element => {
-      const box = getBox(element)
-      if (!box) return
-      const position = horizontal
-        ? alignment === 'left' ? target : alignment === 'centerX' ? target - box.width / 2 : target - box.width
-        : alignment === 'top' ? target : alignment === 'centerY' ? target - box.height / 2 : target - box.height
       moveElementBy(element, horizontal ? position - box.x : 0, horizontal ? 0 : position - box.y)
     })
     updateConnectors(stage.node); recordHistory(stage); select(ids)
@@ -3985,7 +3905,7 @@ export function VectorEditor({
     stage.node.setAttribute('aria-labelledby', `${title.id} ${description.id}`)
     stage.node.setAttribute('focusable', 'true')
     const ordered = directObjects(stage.node)
-      .filter(element => !element.hasAttribute('data-artboard') && !['line'].includes(element.tagName.toLowerCase()))
+      .filter(element => !['line'].includes(element.tagName.toLowerCase()))
       .sort((first, second) => {
         const firstOrder = Number(first.getAttribute('data-a11y-order'))
         const secondOrder = Number(second.getAttribute('data-a11y-order'))
@@ -4014,7 +3934,7 @@ export function VectorEditor({
     const stage = drawing.current
     if (!stage) return
     const ordered = directObjects(stage.node)
-      .filter(element => !element.hasAttribute('data-artboard') && !['line'].includes(element.tagName.toLowerCase()))
+      .filter(element => !['line'].includes(element.tagName.toLowerCase()))
       .sort((first, second) => {
         const firstOrder = Number(first.getAttribute('data-a11y-order'))
         const secondOrder = Number(second.getAttribute('data-a11y-order'))
@@ -4039,7 +3959,7 @@ export function VectorEditor({
       for (const match of attribute.value.matchAll(/url\(#([^)]+)\)/g)) references.add(match[1])
       if (['href', 'xlink:href'].includes(attribute.name.toLowerCase()) && attribute.value.startsWith('#')) references.add(attribute.value.slice(1))
     }))
-    svg.querySelectorAll('defs [id]').forEach(element => { if (!references.has(element.id) && !(element.tagName.toLowerCase() === 'symbol' && element.id.startsWith('sprite-'))) element.remove() })
+    svg.querySelectorAll('defs [id]').forEach(element => { if (!references.has(element.id)) element.remove() })
     svg.querySelectorAll('path[d]').forEach(element => element.setAttribute('d', element.getAttribute('d')!.replace(/(-?\d*\.\d{3,})/g, value => `${Number(Number(value).toFixed(2))}`)))
     svg.querySelectorAll('g').forEach(group => { if (!group.children.length && !group.textContent?.trim()) group.remove() })
     svg.querySelectorAll('[data-editor-ui]').forEach(element => element.remove())
@@ -4051,48 +3971,6 @@ export function VectorEditor({
     optimizeSvgDocument(stage.node)
     recordHistory(stage)
     setOptimizationReport(`Usunięto nieużywane definicje i zaokrąglono współrzędne ścieżek. Pozostało ${stage.node.querySelectorAll('defs > *').length} definicji.`)
-  }
-
-  function addArtboard() {
-    const stage = drawing.current
-    if (!stage) return
-    const [width, height] = artboardPreset.split('x').map(Number)
-    const count = directObjects(stage.node).filter(element => element.hasAttribute('data-artboard')).length
-    const columns = Math.max(1, Math.floor((documentSize.width - 20) / (width + 20)))
-    const x = 20 + (count % columns) * (width + 20)
-    const y = 20 + Math.floor(count / columns) * (height + 20)
-    if (y + height > documentSize.height) changeDocumentDimension('height', displayedDimension(y + height + 20))
-    if (x + width > documentSize.width) changeDocumentDimension('width', displayedDimension(x + width + 20))
-    const board = stage.rect(width, height).move(x, y).fill('#ffffff').stroke({ color: '#aeb7cb', width: 1, dasharray: '7 5' })
-    const id = crypto.randomUUID()
-    board.attr({ 'data-object-id': id, 'data-artboard': 'true', 'data-layer-name': `Plansza ${count + 1}`, 'data-layer-locked': 'true', 'pointer-events': 'all' })
-    const firstOther = directObjects(stage.node).find(element => element !== board.node)
-    if (firstOther) stage.node.insertBefore(board.node, firstOther)
-    recordHistory(stage)
-    setArtboardExportId(id)
-    select([id])
-  }
-
-  function duplicateArtboard(id: string) {
-    const stage = drawing.current
-    const board = stage ? elementsForIds(stage.node, [id])[0] : undefined
-    const box = board ? getBox(board) : undefined
-    if (!stage || !board || !box) return
-    const clone = board.cloneNode(true) as SVGElement
-    const newId = crypto.randomUUID()
-    clone.setAttribute('data-object-id', newId); clone.setAttribute('data-layer-name', `${board.getAttribute('data-layer-name') || 'Plansza'} — kopia`)
-    moveElementBy(clone, box.width + 20, 0)
-    stage.node.insertBefore(clone, board.nextSibling)
-    if (box.x + box.width * 2 + 20 > documentSize.width) changeDocumentDimension('width', displayedDimension(box.x + box.width * 2 + 20))
-    recordHistory(stage); select([newId]); setArtboardExportId(newId)
-  }
-
-  function chooseArtboardExport(id: string) {
-    setArtboardExportId(id)
-    if (!id) { setExportSize({ width: Math.round(documentSize.width), height: Math.round(documentSize.height) }); return }
-    const board = id && drawing.current ? elementsForIds(drawing.current.node, [id])[0] : undefined
-    const box = board ? getBox(board) : undefined
-    if (box) setExportSize({ width: Math.max(1, Math.round(box.width)), height: Math.max(1, Math.round(box.height)) })
   }
 
   function addGuide(axis: 'x' | 'y') {
@@ -4152,7 +4030,7 @@ export function VectorEditor({
   function updateReusableSymbol(symbolId: string) {
     const stage = drawing.current
     const symbol = stage?.node.querySelector<SVGSymbolElement>(`defs symbol#${CSS.escape(symbolId)}`)
-    const originals = selectedElements().filter(element => element.tagName.toLowerCase() !== 'use' && !element.hasAttribute('data-artboard'))
+    const originals = selectedElements().filter(element => element.tagName.toLowerCase() !== 'use')
     const bounds = unionBoxes(originals.map(getBox))
     if (!stage || !symbol || !originals.length || !bounds) return
     const copies = originals.map(element => {
@@ -4170,7 +4048,7 @@ export function VectorEditor({
   function layoutByRelationships() {
     const stage = drawing.current
     if (!stage) return
-    const nodes = directObjects(stage.node).filter(element => !element.hasAttribute('data-artboard') && !['line', 'text'].includes(element.tagName.toLowerCase()))
+    const nodes = directObjects(stage.node).filter(element => !['line', 'text'].includes(element.tagName.toLowerCase()))
     const nodeIds = new Set(nodes.map(element => element.getAttribute('data-object-id')).filter((id): id is string => Boolean(id)))
     const edges = directObjects(stage.node).filter(element => element.tagName.toLowerCase() === 'line').flatMap(line => {
       const from = line.getAttribute('data-start-target'); const to = line.getAttribute('data-end-target')
@@ -4225,128 +4103,6 @@ export function VectorEditor({
     setWorkflowMessage(`Rozmieszczono ${nodes.length} figur według ${edges.length} połączeń.`)
   }
 
-  async function loadChartCsv(file?: File) {
-    if (!file) return
-    if (!/\.(csv|tsv)$/i.test(file.name) && !/text\/(csv|tab-separated-values)/i.test(file.type)) { setWorkflowMessage('Wybierz plik CSV lub TSV.'); return }
-    try {
-      setChartCsv(await file.text())
-      setWorkflowMessage(`Wczytano dane z pliku ${file.name}. Po edycji źródła wybierz „Odśwież wykres”.`)
-    } catch { setWorkflowMessage('Nie udało się odczytać wybranego pliku danych.') }
-  }
-
-  function updateChartTableCell(rowIndex: number, columnIndex: number, value: string) {
-    const { rows, delimiter } = parseCsvMatrix(chartCsv)
-    while (rows.length <= rowIndex) rows.push([])
-    while (rows[rowIndex].length <= columnIndex) rows[rowIndex].push('')
-    rows[rowIndex][columnIndex] = value
-    setChartCsv(serializeCsvMatrix(rows, delimiter))
-  }
-
-  function addChartTableRow() {
-    const { rows, delimiter } = parseCsvMatrix(chartCsv)
-    if (!rows.length) rows.push(['Etap', 'Wartość'])
-    rows.push(Array.from({ length: Math.max(2, rows[0].length) }, (_item, index) => index === 0 ? `Nowa pozycja ${rows.length}` : ''))
-    setChartCsv(serializeCsvMatrix(rows, delimiter))
-  }
-
-  function addChartTableColumn() {
-    const { rows, delimiter } = parseCsvMatrix(chartCsv)
-    if (!rows.length) rows.push(['Etap', 'Wartość'])
-    rows[0].push(`Seria ${rows[0].length}`)
-    rows.slice(1).forEach(row => row.push(''))
-    setChartCsv(serializeCsvMatrix(rows, delimiter))
-  }
-
-  function removeChartTableRow() {
-    const { rows, delimiter } = parseCsvMatrix(chartCsv)
-    if (rows.length <= 2) return
-    rows.pop()
-    setChartCsv(serializeCsvMatrix(rows, delimiter))
-  }
-
-  function loadExistingChart(id: string) {
-    const chart = drawing.current ? elementsForIds(drawing.current.node, [id])[0] : undefined
-    if (!chart || chart.getAttribute('data-linked-chart') !== 'true') return
-    setChartTargetId(id)
-    setChartCsv(chart.getAttribute('data-chart-csv') ?? '')
-    setChartType(chart.getAttribute('data-chart-type') === 'line' ? 'line' : 'bar')
-    setWorkflowMessage(`Wczytano źródło wykresu „${chart.getAttribute('data-layer-name') || 'Wykres'}”. Zmień tabelę i odśwież wykres.`)
-  }
-
-  function createOrRefreshDataChart() {
-    const stage = drawing.current
-    if (!stage) return
-    try {
-      const previous = chartTargetId ? elementsForIds(stage.node, [chartTargetId]).find(element => element.getAttribute('data-linked-chart') === 'true') : undefined
-      const id = previous?.getAttribute('data-object-id') ?? crypto.randomUUID()
-      const next = buildDataChart(chartCsv, chartType, id, palette)
-      if (previous) {
-        next.setAttribute('transform', previous.getAttribute('transform') ?? '')
-        next.setAttribute('data-layer-name', previous.getAttribute('data-layer-name') || (chartType === 'bar' ? 'Wykres słupkowy' : 'Wykres liniowy'))
-        previous.replaceWith(next)
-      } else {
-        const objects = directObjects(stage.node).map(getBox).filter((box): box is Box => Boolean(box))
-        const right = objects.length ? Math.max(...objects.map(box => box.x + box.width)) + 32 : 40
-        const top = objects.length ? Math.min(40, Math.max(12, ...objects.map(box => box.y))) : 40
-        next.setAttribute('transform', `translate(${rounded(right)} ${rounded(top)})`)
-        stage.node.append(next)
-        setChartTargetId(id)
-      }
-      updateConnectors(stage.node); recordHistory(stage); select([id])
-      setWorkflowMessage(previous ? 'Zaktualizowano wykres z bieżącej tabeli danych.' : 'Dodano wykres. Zachowaj źródło CSV, aby odświeżyć go później.')
-    } catch (error) {
-      setWorkflowMessage(error instanceof Error ? error.message : 'Nie udało się utworzyć wykresu z tych danych.')
-    }
-  }
-
-  function installExtensionPack(extension: SvgExtensionPackage) {
-    if (installedExtensionIds.includes(extension.id)) return
-    const nextItems = extension.items.map(item => ({ ...item, id: `${extension.id}:${item.id}`, packageId: extension.id }))
-    setAssetLibrary(current => [...current.filter(item => item.packageId !== extension.id), ...nextItems].slice(-80))
-    setInstalledExtensionIds(current => [...new Set([...current, extension.id])])
-    setExtensionNotice(`Dodano pakiet „${extension.name}” do biblioteki symboli i szablonów.`)
-  }
-
-  function uninstallExtensionPack(id: string) {
-    const extension = SVG_EXTENSION_CATALOG.find(item => item.id === id)
-    setAssetLibrary(current => current.filter(item => item.packageId !== id))
-    setInstalledExtensionIds(current => current.filter(item => item !== id))
-    setExtensionNotice(`Usunięto pakiet „${extension?.name ?? id}” z biblioteki.`)
-  }
-
-  function exportExtensionPackage() {
-    const pkg = { format: 'no-tie-svg-extension', version: 1, id: crypto.randomUUID(), name: extensionPackageName.trim() || 'Mój zestaw SVG', createdAt: new Date().toISOString(), items: assetLibrary.map(({ id, name, markup, kind }) => ({ id, name, markup, kind })), palettes: customPalettes, styles: stylePresets, namedColors }
-    downloadBlob(new Blob([JSON.stringify(pkg, null, 2)], { type: 'application/json;charset=utf-8' }), `${(pkg.name.toLowerCase().replace(/[^a-z0-9]+/g, '-') || 'zestaw-svg')}.notie-svgpack.json`)
-    setExtensionNotice(`Wyeksportowano zestaw „${pkg.name}”.`)
-  }
-
-  async function importExtensionPackage(file?: File) {
-    if (!file) return
-    try {
-      const value = JSON.parse(await file.text()) as { format?: string; name?: string; id?: string; items?: unknown; palettes?: unknown; styles?: unknown; namedColors?: unknown }
-      if (value.format !== 'no-tie-svg-extension' || !Array.isArray(value.items)) throw new Error('Plik nie jest pakietem rozszerzenia No-Tie SVG.')
-      const id = typeof value.id === 'string' ? value.id : crypto.randomUUID()
-      const items = value.items.filter((item): item is SvgLibraryItem => Boolean(item && typeof item === 'object' && typeof (item as SvgLibraryItem).name === 'string' && typeof (item as SvgLibraryItem).markup === 'string'))
-      if (!items.length) throw new Error('Pakiet nie zawiera prawidłowych symboli ani szablonów.')
-      const safeItems = items.map((item, index) => ({ ...item, id: `${id}:${item.id || index}`, packageId: id, markup: sanitizeSvg(item.markup) }))
-      setAssetLibrary(current => [...current.filter(item => item.packageId !== id), ...safeItems].slice(-80))
-      setInstalledExtensionIds(current => [...new Set([...current, id])])
-      if (Array.isArray(value.palettes)) {
-        const palettes = value.palettes.filter((palette): palette is SvgPalettePreset => Boolean(
-          palette && typeof palette === 'object'
-          && typeof (palette as SvgPalettePreset).id === 'string'
-          && typeof (palette as SvgPalettePreset).name === 'string'
-          && Array.isArray((palette as SvgPalettePreset).colors)
-          && (palette as SvgPalettePreset).colors.length > 0,
-        )).map(palette => ({ ...palette, colors: palette.colors.map(color => typeof color === 'string' ? toHexColor(color) : undefined).filter((color): color is string => Boolean(color)).slice(0, 9) })).filter(palette => palette.colors.length > 0)
-        setCustomPalettes(current => [...current.filter(item => !palettes.some(palette => palette.id === item.id)), ...palettes].slice(-20))
-      }
-      if (Array.isArray(value.styles)) setStylePresets(current => [...current, ...value.styles as typeof current].slice(-20))
-      if (Array.isArray(value.namedColors)) setNamedColors(current => [...current, ...value.namedColors as typeof current].slice(-24))
-      setExtensionNotice(`Zainstalowano ${safeItems.length} elementów z pakietu „${value.name || file.name}”.`)
-    } catch (error) { setExtensionNotice(error instanceof Error ? error.message : 'Nie udało się zainstalować pakietu.') }
-  }
-
   function createCheckpoint() {
     const stage = drawing.current
     if (!stage) return
@@ -4373,54 +4129,26 @@ export function VectorEditor({
     setCommentDraft(null)
   }
 
-  function exportSpriteSource(): string | undefined {
+  function exportSvgSource(format: 'svg' | 'png' | 'pdf' = exportFormat, size = exportSize): string | undefined {
     const stage = drawing.current
     if (!stage) return undefined
-    const boards = directObjects(stage.node).filter(element => element.hasAttribute('data-artboard'))
-    const chosen = boards.filter(board => !artboardExportId || board.getAttribute('data-object-id') === artboardExportId)
-    const exportBoards: (SVGElement | null)[] = chosen.length ? chosen : [null]
-    const defs = stage.node.querySelector('defs')?.cloneNode(true) as SVGDefsElement | undefined
-    const svg = document.createElementNS(SVG_NS, 'svg')
-    svg.setAttribute('xmlns', SVG_NS); svg.setAttribute('width', '1'); svg.setAttribute('height', '1'); svg.setAttribute('viewBox', '0 0 1 1')
-    const outputDefs = defs ?? document.createElementNS(SVG_NS, 'defs')
-    if (!defs) svg.append(outputDefs)
-    exportBoards.forEach((board, index) => {
-      const box = board ? getBox(board) : { x: 0, y: 0, width: documentSize.width, height: documentSize.height }
-      if (!box) return
-      const symbol = document.createElementNS(SVG_NS, 'symbol')
-      const label = board?.getAttribute('data-layer-name') || `plansza-${index + 1}`
-      const symbolId = label.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '') || `plansza-${index + 1}`
-      symbol.setAttribute('id', `sprite-${symbolId}-${index + 1}`); symbol.setAttribute('viewBox', `${box.x} ${box.y} ${Math.max(1, box.width)} ${Math.max(1, box.height)}`)
-      directObjects(stage.node).filter(element => !element.hasAttribute('data-artboard') && intersect(box, getBox(element) ?? { x: -1, y: -1, width: 0, height: 0 })).forEach(element => symbol.append(element.cloneNode(true)))
-      outputDefs.append(symbol)
-    })
-    if (outputDefs.parentNode !== svg) svg.append(outputDefs)
-    if (optimizationEnabled) optimizeSvgDocument(svg)
-    return sanitizeSvg(new XMLSerializer().serializeToString(svg))
-  }
-
-  function exportSvgSource(format: 'svg' | 'png' | 'pdf' | 'sprite' = exportFormat, boardId = artboardExportId, size = exportSize): string | undefined {
-    const stage = drawing.current
-    if (!stage) return undefined
-    if (format === 'sprite') return exportSpriteSource()
     const copy = stage.node.cloneNode(true) as SVGSVGElement
+    const contentBounds = unionBoxes(directObjects(stage.node).map(getBox))
+    const cropToContent = fitToContent || infiniteCanvas || extendsDocument(contentBounds, documentSize)
     copy.querySelectorAll('[data-editor-ui]').forEach(element => element.remove())
-    const removeBackground = fitToContent || ((format === 'png' || format === 'pdf') && exportTransparent)
+    copy.removeAttribute('data-editor-infinite-canvas')
+    const removeBackground = cropToContent || ((format === 'png' || format === 'pdf') && exportTransparent)
     if (removeBackground) copy.querySelectorAll('[data-background]').forEach(element => element.remove())
     else copy.querySelectorAll('[data-background]').forEach(element => element.removeAttribute('data-background'))
-    copy.querySelectorAll('[data-artboard="true"]').forEach(element => element.remove())
     copy.setAttribute('width', `${size.width}`); copy.setAttribute('height', `${size.height}`)
-    const artboard = boardId ? directObjects(stage.node).find(element => element.getAttribute('data-object-id') === boardId) : undefined
-    const artboardBounds = artboard ? getBox(artboard) : undefined
-    if (artboardBounds) copy.setAttribute('viewBox', `${artboardBounds.x} ${artboardBounds.y} ${artboardBounds.width} ${artboardBounds.height}`)
-    else if (fitToContent) {
-      const bounds = unionBoxes(directObjects(stage.node).map(getBox))
-      if (bounds) {
+    if (cropToContent) {
+      if (contentBounds) {
         const margin = 20
-        const x = Math.floor(bounds.x - margin); const y = Math.floor(bounds.y - margin)
-        const width = Math.max(1, Math.ceil(bounds.width + margin * 2)); const height = Math.max(1, Math.ceil(bounds.height + margin * 2))
+        const x = Math.floor(contentBounds.x - margin); const y = Math.floor(contentBounds.y - margin)
+        const width = Math.max(1, Math.ceil(contentBounds.width + margin * 2)); const height = Math.max(1, Math.ceil(contentBounds.height + margin * 2))
         copy.setAttribute('viewBox', `${x} ${y} ${width} ${height}`)
       }
+      else copy.setAttribute('viewBox', `0 0 ${documentSize.width} ${documentSize.height}`)
     } else copy.setAttribute('viewBox', `0 0 ${documentSize.width} ${documentSize.height}`)
     if (optimizationEnabled) optimizeSvgDocument(copy)
     return sanitizeSvg(new XMLSerializer().serializeToString(copy))
@@ -4456,43 +4184,15 @@ export function VectorEditor({
     try {
       const source = exportSvgSource(exportFormat)
       if (!source) return
-      const extension = exportFormat === 'sprite' ? 'svg' : exportFormat
-      const filename = `${asset?.fileName?.replace(/\.svg$/i, '') || 'schemat'}${artboardExportId ? '-plansza' : ''}.${extension}`
-      const blob = exportFormat === 'svg' || exportFormat === 'sprite'
+      const filename = `${asset?.fileName?.replace(/\.svg$/i, '') || 'schemat'}.${exportFormat}`
+      const blob = exportFormat === 'svg'
         ? new Blob([source], { type: 'image/svg+xml;charset=utf-8' })
         : await rasterizeSvg(source, exportFormat, exportSize)
       downloadBlob(blob, filename)
-      setWorkflowMessage(exportFormat === 'sprite' ? 'Pobrano arkusz sprite SVG.' : `Pobrano plik ${exportFormat.toUpperCase()} (${exportSize.width} × ${exportSize.height} px).`)
+      setWorkflowMessage(`Pobrano plik ${exportFormat.toUpperCase()} (${exportSize.width} × ${exportSize.height} px).`)
     } catch {
       setWorkflowMessage('Nie udało się przygotować eksportu. Sprawdź rozmiar i zawartość SVG.')
     }
-  }
-
-  async function downloadAllArtboards() {
-    const stage = drawing.current
-    const boards = stage ? directObjects(stage.node).filter(element => element.hasAttribute('data-artboard')) : []
-    if (!stage || !boards.length) { setWorkflowMessage('Dodaj przynajmniej jedną planszę, aby pobrać osobne pliki.'); return }
-    try {
-      const files: Record<string, Uint8Array> = {}
-      for (const [index, board] of boards.entries()) {
-        const id = board.getAttribute('data-object-id') ?? ''
-        const bounds = getBox(board)
-        if (!bounds) continue
-        const scale = Math.min(exportSize.width / bounds.width, exportSize.height / bounds.height)
-        const size = { width: Math.max(1, Math.round(bounds.width * scale)), height: Math.max(1, Math.round(bounds.height * scale)) }
-        const source = exportSvgSource(allArtboardsFormat, id, size)
-        if (!source) continue
-        const baseSlug = (board.getAttribute('data-layer-name') || `plansza-${index + 1}`).normalize('NFKD').replace(/[\u0300-\u036f]/g, '').toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '') || `plansza-${index + 1}`
-        let slug = baseSlug
-        let suffix = 2
-        while (files[`${slug}.${allArtboardsFormat}`]) slug = `${baseSlug}-${suffix++}`
-        const blob = allArtboardsFormat === 'svg' ? new Blob([source], { type: 'image/svg+xml;charset=utf-8' }) : await rasterizeSvg(source, allArtboardsFormat, size)
-        files[`${slug}.${allArtboardsFormat}`] = new Uint8Array(await blob.arrayBuffer())
-      }
-      const zip = zipSync(files, { level: 6 })
-      downloadBlob(new Blob([zip], { type: 'application/zip' }), 'plansze-svg.zip')
-      setWorkflowMessage(`Pobrano ${Object.keys(files).length} osobnych plików ${allArtboardsFormat.toUpperCase()} w archiwum ZIP.`)
-    } catch { setWorkflowMessage('Nie udało się przygotować archiwum plansz.') }
   }
 
   async function importRaster(file?: File) {
@@ -4709,41 +4409,78 @@ export function VectorEditor({
     if (activePen.current) finishPenAction.current()
     const stage = drawing.current
     if (!stage) return
+    let stageObjects = directObjects(stage.node)
+    let expectedObjectIds = stageObjects.map(element => element.getAttribute('data-object-id')).filter((id): id is string => Boolean(id))
+    if (!stageObjects.length) {
+      const latestSnapshot = history.current.at(-1)
+      if (latestSnapshot) {
+        const snapshotDocument = new DOMParser().parseFromString(`<svg xmlns="${SVG_NS}">${latestSnapshot}</svg>`, 'image/svg+xml')
+        const recoverableObjects = Array.from(snapshotDocument.documentElement.children).filter(element => {
+          const tag = element.tagName.toLowerCase()
+          return OBJECT_TAGS.has(tag) && !element.hasAttribute('data-background') && !element.hasAttribute('data-editor-ui') && !element.hasAttribute('data-connector-visual-for')
+        })
+        const recoverableIds = recoverableObjects.map(element => element.getAttribute('data-object-id')).filter((id): id is string => Boolean(id))
+        if (recoverableIds.length) {
+          stage.clear()
+          stage.svg(latestSnapshot)
+          ensureObjectIds(stage.node)
+          updateConnectors(stage.node)
+          renderOverlay(stage, [])
+          recordHistory(stage)
+          stageObjects = directObjects(stage.node)
+          expectedObjectIds = stageObjects.map(element => element.getAttribute('data-object-id')).filter((id): id is string => Boolean(id))
+          setLayerRevision(value => value + 1)
+          setWorkflowMessage('Przywróciłem rysunek z historii, bo bieżący widok płótna był pusty.')
+        }
+      }
+    }
     const copy = stage.node.cloneNode(true) as SVGSVGElement
+    const contentBounds = unionBoxes(stageObjects.map(getBox))
+    const cropToContent = fitToContent || infiniteCanvas || extendsDocument(contentBounds, documentSize)
     copy.querySelectorAll('[data-editor-ui]').forEach(element => element.remove())
-    if (fitToContent) copy.querySelectorAll('[data-background]').forEach(element => element.remove())
+    copy.removeAttribute('data-editor-infinite-canvas')
+    if (cropToContent) copy.querySelectorAll('[data-background]').forEach(element => element.remove())
     else copy.querySelectorAll('[data-background]').forEach(element => element.removeAttribute('data-background'))
-    if (fitToContent) {
-      const bounds = unionBoxes(directObjects(stage.node).map(getBox))
-      if (bounds) {
+    if (cropToContent) {
+      if (contentBounds) {
         const margin = 20
-        const x = Math.floor(bounds.x - margin)
-        const y = Math.floor(bounds.y - margin)
-        const width = Math.max(1, Math.ceil(bounds.width + margin * 2))
-        const height = Math.max(1, Math.ceil(bounds.height + margin * 2))
+        const x = Math.floor(contentBounds.x - margin)
+        const y = Math.floor(contentBounds.y - margin)
+        const width = Math.max(1, Math.ceil(contentBounds.width + margin * 2))
+        const height = Math.max(1, Math.ceil(contentBounds.height + margin * 2))
         copy.setAttribute('viewBox', `${x} ${y} ${width} ${height}`)
         copy.setAttribute('width', `${width}`)
         copy.setAttribute('height', `${height}`)
+      } else {
+        copy.setAttribute('width', documentLength(documentSize.width))
+        copy.setAttribute('height', documentLength(documentSize.height))
+        copy.setAttribute('viewBox', `0 0 ${documentSize.width} ${documentSize.height}`)
       }
     } else {
       copy.setAttribute('width', documentLength(documentSize.width))
       copy.setAttribute('height', documentLength(documentSize.height))
       copy.setAttribute('viewBox', `0 0 ${documentSize.width} ${documentSize.height}`)
     }
-    onSave(sanitizeSvg(new XMLSerializer().serializeToString(copy)))
+    const serialized = sanitizeSvg(new XMLSerializer().serializeToString(copy))
+    if (expectedObjectIds.length) {
+      const serializedDocument = new DOMParser().parseFromString(serialized, 'image/svg+xml')
+      const serializedIds = new Set(Array.from(serializedDocument.documentElement.children).map(element => element.getAttribute('data-object-id')).filter((id): id is string => Boolean(id)))
+      const missingIds = expectedObjectIds.filter(id => !serializedIds.has(id))
+      if (missingIds.length) {
+        setWorkflowMessage('Nie zapisano rysunku, bo kontrola SVG wykryła brakujące elementy. Poprawiona wersja pozostała na płótnie.')
+        return
+      }
+    }
+    onSave(serialized)
   }
 
   const tools: { id: Tool; label: string; icon: typeof RectangleHorizontal }[] = [
     { id: 'select', label: 'Zaznacz i przesuń', icon: MousePointer2 },
+    { id: 'pan', label: 'Przesuń tablicę', icon: Hand },
     { id: 'lasso', label: 'Zaznacz lasso', icon: Lasso },
     { id: 'eraser', label: 'Gumka · usuwa fragmenty pociągnięć lub cały obiekt', icon: Eraser },
     { id: 'shapeBuilder', label: 'Buduj kształt przez wybór obszarów', icon: Combine },
-    { id: 'rect', label: 'Prostokąt', icon: RectangleHorizontal },
-    { id: 'roundRect', label: 'Zaokrąglony prostokąt', icon: RectangleVertical },
-    { id: 'ellipse', label: 'Elipsa', icon: Circle },
-    { id: 'line', label: 'Linia', icon: Minus },
-    { id: 'arrow', label: 'Strzałka', icon: ArrowRight },
-    { id: 'polygon', label: 'Wielokąt', icon: Triangle },
+    { id: 'arrow', label: 'Łącznik między figurami', icon: ArrowRight },
     { id: 'freehand', label: 'Pędzel odręczny · pozostaje aktywny; nacisk rysika zmienia szerokość', icon: Pencil },
     { id: 'pen', label: 'Pióro Béziera, kliknij punkty i Enter, aby zakończyć', icon: Pencil },
     { id: 'text', label: 'Tekst na planszy', icon: Type },
@@ -4751,7 +4488,6 @@ export function VectorEditor({
   const layerItems = drawing.current ? [...directObjects(drawing.current.node)].reverse() : []
   const reusableSymbols = drawing.current ? Array.from(drawing.current.node.querySelectorAll<SVGSymbolElement>('defs symbol')) : []
   const selectedImage = drawing.current ? elementsForIds(drawing.current.node, selectedIds).find(element => element.tagName.toLowerCase() === 'image') : undefined
-  const artboards = drawing.current ? directObjects(drawing.current.node).filter(element => element.hasAttribute('data-artboard')) : []
   const selectedPaths = selectedElements().filter(element => element.tagName.toLowerCase() === 'path')
   const documentFonts = drawing.current ? [...new Set(Array.from(drawing.current.node.querySelectorAll<SVGTextElement>('text')).map(text => text.getAttribute('font-family')).filter((family): family is string => Boolean(family?.trim())))] : []
   const unavailableFonts = documentFonts.filter(family => !document.fonts.check(`14px ${family}`))
@@ -4761,11 +4497,8 @@ export function VectorEditor({
   const checkpointDiffSource = compareCheckpoint && drawing.current
     ? checkpointDiffPreview(snapshotContent(drawing.current), compareCheckpoint.content, documentSize.width, documentSize.height)
     : ''
-  const linkedCharts = drawing.current ? directObjects(drawing.current.node).filter(element => element.getAttribute('data-linked-chart') === 'true') : []
-  const chartTableMatrix = parseCsvMatrix(chartCsv).rows
-  const chartTableColumnCount = Math.max(2, ...chartTableMatrix.map(row => row.length))
   const accessibilityObjects = drawing.current ? directObjects(drawing.current.node)
-    .filter(element => !element.hasAttribute('data-artboard') && element.tagName.toLowerCase() !== 'line')
+    .filter(element => element.tagName.toLowerCase() !== 'line')
     .sort((first, second) => {
       const firstOrder = Number(first.getAttribute('data-a11y-order'))
       const secondOrder = Number(second.getAttribute('data-a11y-order'))
@@ -4776,6 +4509,15 @@ export function VectorEditor({
       if (secondHasOrder) return 1
       return 0
     }) : []
+  const documentBox = { x: 0, y: 0, width: documentSize.width, height: documentSize.height }
+  const minimapBounds = infiniteCanvas ? unionBoxes([documentBox, ...miniObjects.map(item => item.box)]) ?? documentBox : documentBox
+  const minimapPadding = infiniteCanvas ? Math.max(20, Math.max(minimapBounds.width, minimapBounds.height) * .05) : 0
+  const minimapViewBox = {
+    x: minimapBounds.x - minimapPadding,
+    y: minimapBounds.y - minimapPadding,
+    width: minimapBounds.width + minimapPadding * 2,
+    height: minimapBounds.height + minimapPadding * 2,
+  }
   const zoomPercent = Math.round(documentSize.width / Math.max(viewBox.width, 1) * 100)
   const palette = customPalettes.find(item => item.id === activePaletteId)?.colors ?? ['#596fd8', '#e76c75', '#2b9a83', '#f0a84b', '#222c42', '#8a5bc2', '#3e8cc9', '#ffffff', '#111827']
   const paletteCommands = [
@@ -4863,9 +4605,11 @@ export function VectorEditor({
               <button className="button secondary compact-feature-button" onClick={() => zoomAtCenter(1 / 1.2)} title="Pomniejsz"><Minus size={13} /></button>
               <button className="button secondary compact-feature-button" onClick={() => fitViewToContent(false)}>Dopasuj wszystko</button>
               <button className="button secondary compact-feature-button" onClick={() => fitViewToContent(true)} disabled={!selectedIds.length}>Dopasuj zaznaczenie</button>
-              <span className="feature-help">Spacja + przeciągnięcie przesuwa płótno. Ctrl/Cmd + kółko zmienia powiększenie.</span>
+              <span className="feature-help">Przeciągnij z narzędziem „Przesuń tablicę” lub przytrzymując Spację. Ctrl/Cmd + kółko zmienia powiększenie.</span>
             </div></details>
             <details className="drawing-feature-group drawing-feature-dropdown"><summary>Wymiary dokumentu</summary><div className="drawing-feature-group-controls">
+              <label className="fill-toggle infinite-canvas-toggle"><input type="checkbox" checked={infiniteCanvas} onChange={event => setInfiniteCanvas(event.target.checked)} />Nieograniczona tablica</label>
+              <span className="feature-help">Ukrywa krawędzie arkusza. W trybie tablicy można przesuwać rysunek dowolnie daleko; eksport obejmuje całą zawartość.</span>
               <label className="geometry-control"><span>Szerokość</span><input type="number" min="1" value={displayedDimension(documentSize.width)} onChange={event => changeDocumentDimension('width', Number(event.target.value) || 1)} /></label>
               <label className="geometry-control"><span>Wysokość</span><input type="number" min="1" value={displayedDimension(documentSize.height)} onChange={event => changeDocumentDimension('height', Number(event.target.value) || 1)} /></label>
               <label className="drawing-select-control"><span>Jednostka</span><select value={documentUnit} onChange={event => setDocumentUnit(event.target.value as DocumentUnit)}><option value="px">px</option><option value="mm">mm</option><option value="in">in</option></select></label>
@@ -4886,21 +4630,7 @@ export function VectorEditor({
               <button className="button secondary compact-feature-button" onClick={() => addGuide('x')}><Plus size={13} />Pionowa prowadnica</button>
               <button className="button secondary compact-feature-button" onClick={() => addGuide('y')}><Plus size={13} />Pozioma prowadnica</button>
               <button className="button secondary compact-feature-button" onClick={() => setViewOptions(current => ({ ...current, guides: [] }))} disabled={!viewOptions.guides.length}>Usuń prowadnice ({viewOptions.guides.length})</button>
-              {viewOptions.guides.map((guide, index) => <div className="geometry-control guide-position-control" key={`${guide.axis}-${index}`}><span>{guide.axis === 'x' ? 'Pionowa X' : 'Pozioma Y'}</span><input type="number" min="0" max={guide.axis === 'x' ? documentSize.width : documentSize.height} value={guide.value} disabled={guide.locked || guideLockAll} onChange={event => setViewOptions(current => ({ ...current, guides: current.guides.map((item, currentIndex) => currentIndex === index ? { ...item, value: Number(event.target.value) } : item) }))} /><label className="fill-toggle" title="Zablokuj prowadnicę"><input type="checkbox" checked={Boolean(guide.locked)} onChange={event => setViewOptions(current => ({ ...current, guides: current.guides.map((item, currentIndex) => currentIndex === index ? { ...item, locked: event.target.checked } : item) }))} /><Lock size={12} /></label><button className="tool-button" onClick={() => setViewOptions(current => ({ ...current, guides: current.guides.filter((_item, currentIndex) => currentIndex !== index) }))} aria-label="Usuń prowadnicę"><X size={12} /></button></div>)}
-            </div></details>
-            <details className="drawing-feature-group drawing-feature-group-wide drawing-feature-dropdown"><summary>Plansze · {artboards.length}</summary><div className="drawing-feature-group-controls">
-              <label className="drawing-select-control"><span>Format planszy</span><select value={artboardPreset} onChange={event => setArtboardPreset(event.target.value)}><option value="360x220">Pozioma 360 × 220</option><option value="220x360">Pionowa 220 × 360</option><option value="220x220">Kwadrat 220 × 220</option></select></label>
-              <button className="button secondary compact-feature-button" onClick={addArtboard}><Plus size={13} />Dodaj planszę</button>
-              {artboards.map((board, index) => {
-                const id = board.getAttribute('data-object-id') ?? ''
-                const label = board.getAttribute('data-layer-name') || `Plansza ${index + 1}`
-                return <div className={`drawing-artboard-row ${selectedIds.includes(id) ? 'selected' : ''}`} key={id}>
-                  <button className="button secondary compact-feature-button" onClick={() => { select([id]); chooseArtboardExport(id) }}>Zaznacz {index + 1}</button>
-                  <input aria-label={`Nazwa planszy ${index + 1}`} defaultValue={label} onBlur={event => changeLayer(id, element => element.setAttribute('data-layer-name', event.target.value.trim() || label))} onKeyDown={event => { if (event.key === 'Enter') event.currentTarget.blur() }} />
-                  <button className="button secondary compact-feature-button" onClick={() => duplicateArtboard(id)}>Duplikuj</button>
-                  <button className="button secondary compact-feature-button" onClick={() => chooseArtboardExport(id)}>Eksport</button>
-                </div>
-              })}
+              {viewOptions.guides.map((guide, index) => <div className="geometry-control guide-position-control" key={`${guide.axis}-${index}`}><span>{guide.axis === 'x' ? 'Pionowa X' : 'Pozioma Y'}</span><input type="number" min={infiniteCanvas ? undefined : 0} max={infiniteCanvas ? undefined : guide.axis === 'x' ? documentSize.width : documentSize.height} value={guide.value} disabled={guide.locked || guideLockAll} onChange={event => setViewOptions(current => ({ ...current, guides: current.guides.map((item, currentIndex) => currentIndex === index ? { ...item, value: Number(event.target.value) } : item) }))} /><label className="fill-toggle" title="Zablokuj prowadnicę"><input type="checkbox" checked={Boolean(guide.locked)} onChange={event => setViewOptions(current => ({ ...current, guides: current.guides.map((item, currentIndex) => currentIndex === index ? { ...item, locked: event.target.checked } : item) }))} /><Lock size={12} /></label><button className="tool-button" onClick={() => setViewOptions(current => ({ ...current, guides: current.guides.filter((_item, currentIndex) => currentIndex !== index) }))} aria-label="Usuń prowadnicę"><X size={12} /></button></div>)}
             </div></details>
             <details className="drawing-feature-group drawing-feature-group-wide drawing-feature-dropdown"><summary>Pióro i rysik · wygładzanie i nacisk</summary><div className="drawing-feature-group-controls drawing-stylus-controls">
               <label className="line-width-control"><span>Wygładzanie</span><input type="range" min="0" max="1.5" step="0.05" value={stylusProfile.smoothing} onChange={event => { setBrushPresetId('current'); setStylusProfile(current => ({ ...current, smoothing: Number(event.target.value) })) }} /><output>{stylusProfile.smoothing.toFixed(2)}</output></label>
@@ -5029,14 +4759,6 @@ export function VectorEditor({
                   <button className="button secondary compact-feature-button" onClick={() => alignSelectionToKey('centerY')} disabled={selectedIds.length < 2}>Środek pionowo</button>
                   <button className="button secondary compact-feature-button" onClick={() => alignSelectionToKey('bottom')} disabled={selectedIds.length < 2}>Dolna krawędź</button>
                 </div></details>
-                <details className="drawing-feature-details"><summary>Wyrównaj do planszy</summary><div className="drawing-feature-group-controls">
-                  <button className="button secondary compact-feature-button" onClick={() => alignSelectionToArtboard('left')} disabled={!selectedIds.length}>Do lewej</button>
-                  <button className="button secondary compact-feature-button" onClick={() => alignSelectionToArtboard('centerX')} disabled={!selectedIds.length}>Wyśrodkuj poziomo</button>
-                  <button className="button secondary compact-feature-button" onClick={() => alignSelectionToArtboard('right')} disabled={!selectedIds.length}>Do prawej</button>
-                  <button className="button secondary compact-feature-button" onClick={() => alignSelectionToArtboard('top')} disabled={!selectedIds.length}>Do góry</button>
-                  <button className="button secondary compact-feature-button" onClick={() => alignSelectionToArtboard('centerY')} disabled={!selectedIds.length}>Wyśrodkuj pionowo</button>
-                  <button className="button secondary compact-feature-button" onClick={() => alignSelectionToArtboard('bottom')} disabled={!selectedIds.length}>Do dołu</button>
-                </div></details>
               </div></details>
               <details className="drawing-feature-group drawing-feature-dropdown"><summary>Automatyczny układ diagramu</summary><div className="drawing-feature-group-controls">
                 <label className="drawing-select-control"><span>Kierunek relacji</span><select value={layoutDirection} onChange={event => setLayoutDirection(event.target.value as 'horizontal' | 'vertical')}><option value="horizontal">Od lewej do prawej</option><option value="vertical">Od góry do dołu</option></select></label>
@@ -5071,7 +4793,7 @@ export function VectorEditor({
                 {reusableSymbols.map((symbol, index) => {
                   const id = symbol.id ?? ''
                   const label = symbol.getAttribute('data-layer-name') || `Komponent ${index + 1}`
-                  return <div className="drawing-symbol-row" key={id}><span>{label}</span><button className="button secondary compact-feature-button" onClick={() => insertSymbol(id)} title="Wstaw ponownie edytowalny symbol"><Plus size={12} />Wstaw</button><button className="button secondary compact-feature-button" onClick={() => updateReusableSymbol(id)} disabled={!selectedIds.length || selectedElements().every(element => element.tagName.toLowerCase() === 'use' || element.hasAttribute('data-artboard'))} title="Zastąp definicję; każde wystąpienie komponentu zostanie zaktualizowane">Aktualizuj</button></div>
+                  return <div className="drawing-symbol-row" key={id}><span>{label}</span><button className="button secondary compact-feature-button" onClick={() => insertSymbol(id)} title="Wstaw ponownie edytowalny symbol"><Plus size={12} />Wstaw</button><button className="button secondary compact-feature-button" onClick={() => updateReusableSymbol(id)} disabled={!selectedIds.length || selectedElements().every(element => element.tagName.toLowerCase() === 'use')} title="Zastąp definicję; każde wystąpienie komponentu zostanie zaktualizowane">Aktualizuj</button></div>
                 })}
               </div></details>
             </div>
@@ -5131,38 +4853,6 @@ export function VectorEditor({
                 {assetLibrary.map(item => <div className="drawing-library-asset" key={item.id}><span><small>{item.kind === 'template' ? 'Szablon' : 'Komponent'}</small>{item.name}</span><button className="button secondary compact-feature-button" onClick={() => insertLibraryAsset(item.id)}>Wstaw</button><button className="tool-button" onClick={() => setAssetLibrary(current => current.filter(assetItem => assetItem.id !== item.id))} aria-label={`Usuń zasób ${item.name}`}><X size={12} /></button></div>)}
               </div></details>
             </section>
-            <section className="drawing-workflow-card"><h3><Waypoints size={15} />Wykresy z danych</h3>
-              <input ref={chartImportInput} hidden type="file" accept=".csv,.tsv,text/csv,text/tab-separated-values" onChange={event => { void loadChartCsv(event.target.files?.[0]); event.currentTarget.value = '' }} />
-              <div className="drawing-workflow-subgroup"><h4>Źródło</h4>
-                <button className="button secondary compact-feature-button" onClick={() => chartImportInput.current?.click()}>Wczytaj CSV lub TSV</button>
-                <textarea className="drawing-chart-source" value={chartCsv} onChange={event => setChartCsv(event.target.value)} aria-label="Dane źródłowe wykresu w formacie CSV" rows={4} />
-                <details className="drawing-feature-details"><summary>Edytuj dane jako tabelę</summary><div className="drawing-advanced-controls">
-                  <div className="drawing-chart-table-scroll"><table className="drawing-chart-table"><thead><tr><th scope="col" />{Array.from({ length: Math.min(chartTableColumnCount, 12) }, (_item, columnIndex) => <th scope="col" key={columnIndex}><input value={chartTableMatrix[0]?.[columnIndex] ?? ''} onChange={event => updateChartTableCell(0, columnIndex, event.target.value)} aria-label={`Nagłówek kolumny ${columnIndex + 1}`} /></th>)}</tr></thead><tbody>{chartTableMatrix.slice(1, 101).map((row, rowIndex) => <tr key={rowIndex}><th scope="row">{rowIndex + 1}</th>{Array.from({ length: Math.min(chartTableColumnCount, 12) }, (_item, columnIndex) => <td key={columnIndex}><input value={row[columnIndex] ?? ''} onChange={event => updateChartTableCell(rowIndex + 1, columnIndex, event.target.value)} aria-label={`Wiersz ${rowIndex + 1}, kolumna ${columnIndex + 1}`} /></td>)}</tr>)}</tbody></table></div>
-                  <div className="drawing-feature-row"><button className="button secondary compact-feature-button" onClick={addChartTableRow}>Dodaj wiersz</button><button className="button secondary compact-feature-button" onClick={addChartTableColumn}>Dodaj serię danych</button><button className="button secondary compact-feature-button" onClick={removeChartTableRow} disabled={chartTableMatrix.length <= 2}>Usuń ostatni wiersz</button></div>
-                  {(chartTableMatrix.length > 101 || chartTableColumnCount > 12) && <span className="feature-help">W tabeli edytujesz pierwsze 100 wierszy i 12 kolumn; pozostałe dane są dostępne w polu CSV.</span>}
-                  <span className="feature-help">Pierwszy wiersz to nagłówki, pierwsza kolumna to etykiety kategorii. Zmiany odświeżysz przyciskiem „Utwórz” lub „Odśwież wykres”.</span>
-                </div></details>
-                <span className="feature-help">Pierwsza kolumna to etykiety, kolejne kolumny zawierają wartości liczbowe. Edycja źródła nie zmienia wykresu, dopóki go nie odświeżysz.</span>
-              </div>
-              <div className="drawing-workflow-subgroup"><h4>Wykres</h4>
-                <label className="drawing-select-control"><span>Typ</span><select value={chartType} onChange={event => setChartType(event.target.value as 'bar' | 'line')}><option value="bar">Słupkowy</option><option value="line">Liniowy</option></select></label>
-                <label className="drawing-select-control"><span>Edytuj istniejący</span><select value={chartTargetId} onChange={event => { setChartTargetId(event.target.value); if (event.target.value) loadExistingChart(event.target.value) }}><option value="">Nowy wykres</option>{linkedCharts.map((chart, index) => <option key={chart.getAttribute('data-object-id')} value={chart.getAttribute('data-object-id') ?? ''}>{chart.getAttribute('data-layer-name') || `Wykres ${index + 1}`}</option>)}</select></label>
-                <button className="button secondary compact-feature-button" onClick={createOrRefreshDataChart}>{chartTargetId ? 'Odśwież wykres' : 'Utwórz wykres'}</button>
-              </div>
-            </section>
-            <section className="drawing-workflow-card"><h3><Shapes size={15} />Pakiety symboli</h3>
-              <input ref={extensionImportInput} hidden type="file" accept=".json,.notie-svgpack.json,application/json" onChange={event => { void importExtensionPackage(event.target.files?.[0]); event.currentTarget.value = '' }} />
-              <p className="feature-help">Instaluj gotowe zestawy symboli albo wczytaj własny pakiet do biblioteki zasobów.</p>
-              <div className="drawing-extension-list">{SVG_EXTENSION_CATALOG.map(extension => {
-                const installed = installedExtensionIds.includes(extension.id)
-                return <div className="drawing-extension-row" key={extension.id}><div><strong>{extension.name}</strong><small>{extension.category} · {extension.items.length} elementy</small><span>{extension.description}</span></div><button className="button secondary compact-feature-button" onClick={() => installed ? uninstallExtensionPack(extension.id) : installExtensionPack(extension)}>{installed ? 'Usuń' : 'Zainstaluj'}</button></div>
-              })}</div>
-              <div className="drawing-workflow-subgroup"><h4>Pakiet użytkownika</h4>
-                <div className="drawing-feature-row"><input className="drawing-inline-input" value={extensionPackageName} onChange={event => setExtensionPackageName(event.target.value)} aria-label="Nazwa pakietu SVG" placeholder="Nazwa pakietu" /><button className="button secondary compact-feature-button" onClick={exportExtensionPackage}>Eksportuj</button></div>
-                <button className="button secondary compact-feature-button" onClick={() => extensionImportInput.current?.click()}>Zainstaluj pakiet z pliku</button>
-                {extensionNotice && <p className="feature-help" role="status">{extensionNotice}</p>}
-              </div>
-            </section>
             <section className="drawing-workflow-card"><h3><History size={15} />Historia i punkty kontrolne</h3>
               <button className="button secondary compact-feature-button" onClick={createCheckpoint}><Plus size={14} />Zapisz punkt kontrolny</button>
               <div className="drawing-checkpoint-list">{checkpoints.map(checkpoint => <div key={checkpoint.id}><button onClick={() => restoreCheckpoint(checkpoint)} title={checkpoint.label}>{checkpoint.label}</button><button className={compareCheckpointId === checkpoint.id ? 'selected' : ''} onClick={() => setCompareCheckpointId(current => current === checkpoint.id ? '' : checkpoint.id)} title="Porównaj zapis z bieżącym rysunkiem">Porównaj</button><button onClick={() => { setCheckpoints(current => current.filter(item => item.id !== checkpoint.id)); if (compareCheckpointId === checkpoint.id) setCompareCheckpointId('') }} aria-label="Usuń punkt kontrolny"><X size={12} /></button></div>)}</div>
@@ -5196,21 +4886,13 @@ export function VectorEditor({
               </div>
             </section>
             <section className="drawing-workflow-card"><h3><Download size={15} />Eksport</h3>
-              <div className="drawing-workflow-subgroup"><h4>Format i zakres</h4><div className="drawing-feature-row"><label className="drawing-select-control"><span>Format</span><select value={exportFormat} onChange={event => setExportFormat(event.target.value as 'svg' | 'png' | 'pdf' | 'sprite')}><option value="svg">SVG</option><option value="sprite">Arkusz sprite SVG</option><option value="png">PNG</option><option value="pdf">PDF</option></select></label>
-                <label className="drawing-select-control"><span>Obszar</span><select value={artboardExportId} onChange={event => chooseArtboardExport(event.target.value)}><option value="">Cały dokument</option>{artboards.map((board, index) => <option key={board.getAttribute('data-object-id')} value={board.getAttribute('data-object-id') ?? ''}>{board.getAttribute('data-layer-name') || `Plansza ${index + 1}`}</option>)}</select></label>
-              </div></div>
+              <div className="drawing-workflow-subgroup"><h4>Format eksportu</h4><div className="drawing-feature-row"><label className="drawing-select-control"><span>Format</span><select value={exportFormat} onChange={event => setExportFormat(event.target.value as 'svg' | 'png' | 'pdf')}><option value="svg">SVG</option><option value="png">PNG</option><option value="pdf">PDF</option></select></label></div></div>
               <div className="drawing-workflow-subgroup"><h4>Rozdzielczość i pobieranie</h4><div className="drawing-feature-row">
                 <label className="geometry-control"><span>Szerokość px</span><input type="number" min="1" max="4096" value={exportSize.width} onChange={event => setExportSize(current => ({ ...current, width: Math.max(1, Number(event.target.value) || 1) }))} /></label>
                 <label className="geometry-control"><span>Wysokość px</span><input type="number" min="1" max="4096" value={exportSize.height} onChange={event => setExportSize(current => ({ ...current, height: Math.max(1, Number(event.target.value) || 1) }))} /></label>
                 {(exportFormat === 'png' || exportFormat === 'pdf') && <label className="fill-toggle"><input type="checkbox" checked={exportTransparent} onChange={event => setExportTransparent(event.target.checked)} />Przezroczyste tło</label>}
                 <button className="button secondary compact-feature-button" onClick={() => { void downloadExport() }}><Download size={14} />Pobierz {exportFormat.toUpperCase()}</button>
               </div></div>
-              <details className="drawing-feature-details"><summary>Osobne pliki dla plansz · {artboards.length}</summary><div className="drawing-advanced-controls">
-                <label className="drawing-select-control"><span>Format wszystkich plansz</span><select value={allArtboardsFormat} onChange={event => setAllArtboardsFormat(event.target.value as 'svg' | 'png' | 'pdf')}><option value="svg">SVG</option><option value="png">PNG</option><option value="pdf">PDF</option></select></label>
-                {(allArtboardsFormat === 'png' || allArtboardsFormat === 'pdf') && <label className="fill-toggle"><input type="checkbox" checked={exportTransparent} onChange={event => setExportTransparent(event.target.checked)} />Przezroczyste tło</label>}
-                <span className="feature-help">Każda plansza trafi do osobnego pliku. Ustawione wymiary są maksymalnymi bokami obrazu; proporcje planszy zostaną zachowane. Pliki pobierzesz jako ZIP.</span>
-                <button className="button secondary compact-feature-button" onClick={() => { void downloadAllArtboards() }} disabled={!artboards.length}><Download size={14} />Pobierz {artboards.length} plansz</button>
-              </div></details>
               {workflowMessage && <p className="feature-help" role="status">{workflowMessage}</p>}
             </section>
           </div>}
@@ -5258,14 +4940,14 @@ export function VectorEditor({
                 })}
               </div>}
             </aside>
-            <div className="drawing-canvas-area">
-              <div ref={mount} className="drawing-stage" />
-              {comments.map(comment => <div key={comment.id} className="drawing-comment-pin" style={{ left: `${comment.x / documentSize.width * 100}%`, top: `${comment.y / documentSize.height * 100}%` }}>
+              <div className="drawing-canvas-area">
+              <div ref={mount} className="drawing-stage" data-infinite-canvas={infiniteCanvas ? 'true' : 'false'} />
+              {comments.map(comment => <div key={comment.id} className="drawing-comment-pin" style={{ left: `${(comment.x - viewBox.x) / viewBox.width * 100}%`, top: `${(comment.y - viewBox.y) / viewBox.height * 100}%` }}>
                 <button onClick={() => setActiveCommentId(activeCommentId === comment.id ? null : comment.id)} title={comment.text} aria-label="Pokaż komentarz"><MessageSquare size={13} /></button>
                 {activeCommentId === comment.id && <div className="drawing-comment-popover">{comment.text}<button onClick={() => setComments(current => current.filter(item => item.id !== comment.id))}><X size={12} /></button></div>}
               </div>)}
               {commentDraft && <CommentComposer onSave={saveComment} onCancel={() => setCommentDraft(null)} />}
-              {showMinimap && <div className="drawing-minimap" aria-label="Mini mapa planszy"><svg style={{ aspectRatio: `${documentSize.width} / ${documentSize.height}` }} viewBox={`0 0 ${documentSize.width} ${documentSize.height}`} role="img" aria-label="Podgląd całej planszy"><rect width={documentSize.width} height={documentSize.height} fill="#fff" stroke="#ccd2df" />{miniObjects.map(item => <rect key={item.id} x={item.box.x} y={item.box.y} width={Math.max(2, item.box.width)} height={Math.max(2, item.box.height)} fill={item.color} opacity=".8" />)}</svg><span>{miniObjects.length} elementów</span></div>}
+              {showMinimap && <div className="drawing-minimap" aria-label="Mini mapa planszy"><svg style={{ aspectRatio: `${minimapViewBox.width} / ${minimapViewBox.height}` }} viewBox={`${minimapViewBox.x} ${minimapViewBox.y} ${minimapViewBox.width} ${minimapViewBox.height}`} role="img" aria-label="Podgląd całej planszy"><rect x="0" y="0" width={documentSize.width} height={documentSize.height} fill="#fff" stroke="#ccd2df" />{miniObjects.map(item => <rect key={item.id} x={item.box.x} y={item.box.y} width={Math.max(2, item.box.width)} height={Math.max(2, item.box.height)} fill={item.color} opacity=".8" />)}</svg><span>{miniObjects.length} elementów</span></div>}
             </div>
           </div>
         </div>

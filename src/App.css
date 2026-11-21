@@ -426,7 +426,9 @@
 .markdown-table-filter input { width: 100%; min-width: 0; border: 0; outline: 0; color: #49546d; background: transparent; font: inherit; }
 .markdown-table-filter input::placeholder { color: #a2a7b3; }
 .markdown-table-filter > button { width: 23px; min-height: 23px; padding: 0; }
-.markdown-editor .milkdown li[data-item-type="task"] { list-style: none; }
+.markdown-editor .milkdown li[data-item-type="task"] { position: relative; padding-inline-start: 1.45em; list-style: none; }
+.markdown-editor .milkdown li[data-item-type="task"]::before { position: absolute; top: .34em; left: 0; display: grid; width: 13px; height: 13px; place-items: center; border: 1px solid #aab2c5; border-radius: 3px; color: #fff; content: ''; }
+.markdown-editor .milkdown li[data-item-type="task"][data-checked="true"]::before { border-color: #6376cf; background: #6376cf; content: '✓'; font-size: 10px; line-height: 1; }
 .editor-end-note { display: flex; align-items: center; gap: 12px; margin: 40px 0 0; color: #b5b8c1; font-size: 9px; }
 .end-line { height: 1px; flex: 1; background: #eeeef2; }
 .editor-footer { display: flex; align-items: center; justify-content: space-between; min-height: 49px; padding: 0 25px; border-top: 1px solid #eff0f3; color: #a0a4af; font-size: 9px; }
@@ -1285,7 +1287,6 @@
 .drawing-shape-builder-actions { display: flex; align-items: center; flex-wrap: wrap; gap: 6px; }
 .toolbar-tool-hint { align-self: center; }
 .drawing-feature-group-wide { grid-column: 1 / -1; }
-.drawing-feature-group .drawing-artboard-row { flex: 1 1 100%; }
 .feature-help { color: #8a91a1; font-size: 9px; line-height: 1.4; }
 .compact-feature-button { min-height: 27px; gap: 4px; padding: 0 8px; font-size: 9px; white-space: nowrap; }
 .feature-active { border-color: #7485e2 !important; color: #4e63cb !important; background: #f0f2ff !important; }
@@ -1302,9 +1303,6 @@
 .drawing-layer-row input { min-width: 40px; flex: 1; height: 24px; border: 0; outline: 0; color: #4c566d; background: transparent; font-size: 10px; }
 .drawing-layer-row .tool-button { width: 24px; height: 24px; }
 .drawing-layer-color { display: block; width: 12px; height: 12px; border: 1px solid #cfd3df; border-radius: 3px; }
-.drawing-artboard-row { display: flex; min-width: min(100%, 520px); align-items: center; gap: 5px; padding: 4px; border: 1px solid #e7eaf2; border-radius: 7px; background: #fff; }
-.drawing-artboard-row.selected { border-color: #aab5ec; background: #f4f6ff; }
-.drawing-artboard-row input { min-width: 80px; width: 130px; height: 25px; padding: 0 6px; border: 1px solid #e7e9f0; border-radius: 5px; color: #58637a; font-size: 9px; }
 .drawing-workflow-grid { display: grid; grid-template-columns: repeat(4, minmax(160px, 1fr)); gap: 7px; }
 .drawing-workflow-card { display: flex; min-width: 0; flex-direction: column; align-items: flex-start; gap: 6px; padding: 7px; border: 1px solid #e9ebf2; border-radius: 8px; background: #fff; }
 .drawing-workflow-card h3 { display: flex; align-items: center; gap: 5px; margin: 0; color: #58637a; font-size: 10px; font-weight: 700; }
@@ -1334,22 +1332,7 @@
 .drawing-symbol-row > span { overflow: hidden; flex: 1; color: #657089; font-size: 9px; text-overflow: ellipsis; white-space: nowrap; }
 .drawing-library-asset > span { display: flex; align-items: center; gap: 5px; }
 .drawing-library-asset > span small { flex: 0 0 auto; padding: 2px 4px; border-radius: 4px; color: #6875b8; background: #f0f2ff; font-size: 7px; }
-.drawing-chart-source, .drawing-a11y-description { width: 100%; min-width: 0; resize: vertical; padding: 7px; border: 1px solid #e3e6ee; border-radius: 6px; color: #4c566d; background: #fff; font: 9px/1.45 ui-monospace, SFMono-Regular, Menlo, monospace; }
-.drawing-chart-source { min-height: 72px; max-height: 150px; }
-.drawing-chart-table-scroll { width: 100%; max-height: 190px; overflow: auto; border: 1px solid #e9ebf2; border-radius: 6px; background: #fff; }
-.drawing-chart-table { width: max-content; min-width: 100%; border-collapse: separate; border-spacing: 0; color: #657089; font-size: 8px; }
-.drawing-chart-table th, .drawing-chart-table td { min-width: 86px; padding: 3px; border-right: 1px solid #eff0f5; border-bottom: 1px solid #eff0f5; }
-.drawing-chart-table th:first-child { position: sticky; left: 0; z-index: 1; min-width: 45px; width: 45px; background: #fafbfe; }
-.drawing-chart-table thead th { position: sticky; top: 0; z-index: 2; background: #f7f8fc; }
-.drawing-chart-table thead th:first-child { z-index: 3; }
-.drawing-chart-table input { width: 100%; min-width: 72px; height: 25px; padding: 0 5px; border: 1px solid #e7e9f0; border-radius: 4px; color: #4c566d; font-size: 8px; }
-.drawing-a11y-description { font-family: inherit; }
-.drawing-extension-list { display: flex; width: 100%; max-height: 160px; flex-direction: column; overflow: auto; }
-.drawing-extension-row { display: flex; min-width: 0; align-items: center; gap: 6px; padding: 6px 0; border-bottom: 1px solid #eff0f5; }
-.drawing-extension-row > div { display: flex; min-width: 0; flex: 1; flex-direction: column; gap: 2px; }
-.drawing-extension-row strong { color: #56617a; font-size: 9px; }
-.drawing-extension-row small, .drawing-extension-row span { color: #8a91a1; font-size: 8px; line-height: 1.35; }
-.drawing-extension-row span { overflow: hidden; text-overflow: ellipsis; }
+.drawing-a11y-description { width: 100%; min-width: 0; resize: vertical; padding: 7px; border: 1px solid #e3e6ee; border-radius: 6px; color: #4c566d; background: #fff; font-family: inherit; font-size: 9px; line-height: 1.45; }
 .drawing-a11y-order-list { display: flex; width: 100%; max-height: 130px; flex-direction: column; gap: 3px; overflow: auto; }
 .drawing-a11y-order-row { display: flex; min-width: 0; align-items: center; gap: 3px; padding: 2px; border: 1px solid #edf0f5; border-radius: 5px; }
 .drawing-a11y-order-row > .button:first-child { overflow: hidden; max-width: 38%; text-overflow: ellipsis; }
@@ -1392,6 +1375,7 @@
 .drawing-comment-composer > div { display: flex; justify-content: flex-end; gap: 5px; }
 .drawing-comment-composer .button { min-height: 28px; padding: 0 9px; font-size: 10px; }
 .canvas-text-input { position: absolute; z-index: 2; min-width: 150px; max-width: 70%; padding: 2px 5px; border: 1px solid #6378dd; border-radius: 3px; outline: 2px solid #6378dd35; background: #ffffffed; line-height: 1.35; box-shadow: 0 2px 8px #1f2a441e; }
+.canvas-child-text-input { min-width: 0; max-width: none; padding: 2px 4px; transform: translate(-50%, -50%); text-align: center; }
 .modal-footer { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 12px 18px; border-top: 1px solid #e8e9ef; background: #fff; }
 .modal-footer p { margin: 0; color: #979caa; font-size: 10px; }
 .modal-footer > div { display: flex; gap: 7px; }
@@ -1412,7 +1396,6 @@
 
 @media (max-width: 760px) {
   .drawing-workflow-grid { grid-template-columns: repeat(2, minmax(145px, 1fr)); }
-  .drawing-artboard-row { min-width: 100%; flex-wrap: wrap; }
 }
 
 @media (max-width: 500px) {
@@ -3076,6 +3059,11 @@
 .drawing-shape-item span { display: -webkit-box; max-width: 100%; overflow: hidden; -webkit-box-orient: vertical; -webkit-line-clamp: 2; line-height: 1.25; }
 .drawing-canvas-area { position: relative; display: grid; width: auto; height: 100%; min-width: 0; min-height: 0; flex: 1 1 auto; aspect-ratio: auto; place-items: center; }
 .drawing-canvas-area .drawing-stage { width: 100%; height: 100%; min-height: 0; aspect-ratio: auto; }
+.drawing-stage[data-infinite-canvas="true"] { border-color: transparent; border-radius: 0; background: transparent; box-shadow: none; }
+.drawing-stage > svg[data-editor-infinite-canvas="true"] > [data-background] { display: none; }
+.drawing-stage > svg[data-active-tool="pan"] { cursor: grab; }
+.drawing-stage > svg[data-panning="true"] { cursor: grabbing; }
+.infinite-canvas-toggle { min-height: 31px; padding: 0 7px; border: 1px solid #e5e8f2; border-radius: 6px; background: #fafbff; }
 @supports (width: 1cqw) {
   .drawing-canvas-area .drawing-stage { width: min(100%, calc(100cqh * var(--drawing-ratio))); height: min(100%, calc(100cqw / var(--drawing-ratio))); aspect-ratio: var(--drawing-ratio); }
 }

@@ -3,6 +3,7 @@ import { commandsCtx, defaultValueCtx, editorViewCtx, Editor, rootCtx } from '@m
 import { Fragment } from '@milkdown/kit/prose/model'
 import {
   commonmark,
+  createCodeBlockCommand,
   strongSchema,
   toggleEmphasisCommand,
   toggleInlineCodeCommand,
@@ -22,7 +23,7 @@ import { listener, listenerCtx } from '@milkdown/kit/plugin/listener'
 import { toggleMark as toggleProseMark } from '@milkdown/kit/prose/commands'
 import { TextSelection } from '@milkdown/kit/prose/state'
 import type { EditorView } from '@milkdown/kit/prose/view'
-import { getMarkdown, replaceAll, replaceRange } from '@milkdown/kit/utils'
+import { getMarkdown, replaceRange } from '@milkdown/kit/utils'
 import { markdownForEditor, markdownFromEditor } from './content'
 import { MarkdownContextMenu, type MarkdownMenuAction, type MarkdownNoteAction } from './MarkdownContextMenu'
 import { MarkdownTableMenu, type MarkdownTableAction } from './MarkdownTableMenu'
@@ -272,6 +273,10 @@ export function MarkdownEditor({
   const onOpenAttachmentRef = useRef(onOpenAttachment)
   const notesRef = useRef(notes)
   const assetsRef = useRef(allAssets)
+  const pendingMarkdownUpdate = useRef<{ markdown: string; view: EditorView } | null>(null)
+  const markdownUpdateTimer = useRef<number | null>(null)
+  const assistUpdateTimer = useRef<number | null>(null)
+  const lastSelectionText = useRef('')
   const [contextMenu, setContextMenu] = useState<ContextMenuState | null>(null)
   const [hoverTable, setHoverTable] = useState<TableOverlayState | null>(null)
   const [tableContextMenu, setTableContextMenu] = useState<TableContextState | null>(null)
@@ -321,11 +326,9 @@ export function MarkdownEditor({
         ctx.set(rootCtx, root.current!)
         ctx.set(defaultValueCtx, markdownForEditor(wikiLinksToMarkdown(stripTableWidthMetadata(initialDocument.markdown)), initialDocument.assets, initialDocument.attachments))
         ctx.get(listenerCtx).markdownUpdated((_ctx, updated) => {
-          const next = markdownWithTableColumnWidths(markdownToWikiLinks(markdownFromEditor(updated, initialDocument.assets, initialDocument.attachments)), _ctx.get(editorViewCtx))
-          if (next === lastMarkdown.current) return
-          lastMarkdown.current = next
-          setAssistRevision(value => value + 1)
-          onChangeRef.current(next)
+          pendingMarkdownUpdate.current = { markdown: updated, view: _ctx.get(editorViewCtx) }
+          if (markdownUpdateTimer.current !== null) window.clearTimeout(markdownUpdateTimer.current)
+          markdownUpdateTimer.current = window.setTimeout(() => flushPendingMarkdownUpdate(), 180)
         })
       })
       .use([...commonmark, columnResizingPlugin, ...gfm, ...markdownMarkupPlugins, ...noteEmbedPlugins, listener])
@@ -343,6 +346,9 @@ export function MarkdownEditor({
       setAssistRevision(value => value + 1)
     }).catch(error => console.error('Nie udało się uruchomić edytora Markdown', error))
     return () => {
+      flushPendingMarkdownUpdate(false)
+      if (assistUpdateTimer.current !== null) window.clearTimeout(assistUpdateTimer.current)
+      assistUpdateTimer.current = null
       editorRef.current = null
       void editor.destroy()
     }
@@ -568,8 +574,15 @@ export function MarkdownEditor({
       if (selection && container?.contains(selection.anchorNode) && editor) {
         const range = editor.ctx.get(editorViewCtx).state.selection
         selectedRange.current = { from: range.from, to: range.to }
-        onSelectionChangeRef.current(selection.toString())
-      } else onSelectionChangeRef.current('')
+        const text = selection.toString()
+        if (text !== lastSelectionText.current) {
+          lastSelectionText.current = text
+          onSelectionChangeRef.current(text)
+        }
+      } else if (lastSelectionText.current) {
+        lastSelectionText.current = ''
+        onSelectionChangeRef.current('')
+      }
     }
     document.addEventListener('selectionchange', updateSelection)
     return () => document.removeEventListener('selectionchange', updateSelection)
@@ -772,12 +785,36 @@ export function MarkdownEditor({
   }
 
   function saveEditorMarkdown(editor: Editor) {
+    flushPendingMarkdownUpdate()
     const view = editor.ctx.get(editorViewCtx)
     const updated = markdownWithTableColumnWidths(markdownToWikiLinks(markdownFromEditor(editor.action(getMarkdown()), initialDocument.assets, initialDocument.attachments)), view)
     if (updated === lastMarkdown.current) return
     lastMarkdown.current = updated
     setAssistRevision(value => value + 1)
     onChangeRef.current(updated)
+  }
+
+  function flushPendingMarkdownUpdate(refreshAssist = true) {
+    if (markdownUpdateTimer.current !== null) {
+      window.clearTimeout(markdownUpdateTimer.current)
+      markdownUpdateTimer.current = null
+    }
+    const pending = pendingMarkdownUpdate.current
+    pendingMarkdownUpdate.current = null
+    if (!pending) return
+    const next = markdownWithTableColumnWidths(
+      markdownToWikiLinks(markdownFromEditor(pending.markdown, initialDocument.assets, initialDocument.attachments)),
+      pending.view,
+    )
+    if (next === lastMarkdown.current) return
+    lastMarkdown.current = next
+    onChangeRef.current(next)
+    if (!refreshAssist) return
+    if (assistUpdateTimer.current !== null) window.clearTimeout(assistUpdateTimer.current)
+    assistUpdateTimer.current = window.setTimeout(() => {
+      assistUpdateTimer.current = null
+      setAssistRevision(value => value + 1)
+    }, 300)
   }
 
   function navigateToHeading(heading: HeadingEntry) {
@@ -1163,8 +1200,31 @@ export function MarkdownEditor({
         case 'bullet-list': commands.call(wrapInBulletListCommand.key); break
         case 'ordered-list': commands.call(wrapInOrderedListCommand.key); break
         case 'task-list': {
-          const items = (selectedText || 'Zadanie').split('\n').map(line => `- [ ] ${line}`)
-          replace(items.join('\n'))
+          const listItemType = view.state.schema.nodes.list_item
+          if (!listItemType) break
+          const markSelectedItemsAsTasks = () => {
+            const { from: selectedFrom, to: selectedTo } = view.state.selection
+            const transaction = view.state.tr
+            let updatedItems = 0
+            view.state.doc.descendants((node, position) => {
+              if (node.type !== listItemType) return true
+              const overlapsSelection = selectedFrom === selectedTo
+                ? position <= selectedFrom && position + node.nodeSize >= selectedFrom
+                : position < selectedTo && position + node.nodeSize > selectedFrom
+              if (overlapsSelection) {
+                transaction.setNodeMarkup(position, undefined, { ...node.attrs, checked: false })
+                updatedItems++
+                return false
+              }
+              return true
+            })
+            if (transaction.docChanged) view.dispatch(transaction)
+            return updatedItems
+          }
+          if (!markSelectedItemsAsTasks()) {
+            commands.call(wrapInBulletListCommand.key)
+            markSelectedItemsAsTasks()
+          }
           break
         }
         case 'heading-1': commands.call(wrapInHeadingCommand.key, 1); break
@@ -1173,28 +1233,40 @@ export function MarkdownEditor({
         case 'paragraph': commands.call(turnIntoTextCommand.key); break
         case 'blockquote': commands.call(wrapInBlockquoteCommand.key); break
         case 'footnote': {
-          const markdown = getMarkdown()(ctx)
+          const referenceType = view.state.schema.nodes.footnote_reference
+          const definitionType = view.state.schema.nodes.footnote_definition
+          const paragraphType = view.state.schema.nodes.paragraph
+          if (!referenceType || !definitionType || !paragraphType) break
+          const usedLabels = new Set<string>()
+          view.state.doc.descendants(node => {
+            if (node.type === referenceType || node.type === definitionType) usedLabels.add(String(node.attrs.label ?? ''))
+            return true
+          })
           let number = 1
-          while (markdown.includes(`[^nt${number}]`)) number++
-          const insertion = range.to
-          const prefix = getMarkdown({ from: 0, to: insertion })(ctx)
-          const prefixWithoutTrailingLineBreaks = prefix.replace(/[\r\n]+$/, '')
-          const markdownOffset = markdown.startsWith(prefixWithoutTrailingLineBreaks) ? prefixWithoutTrailingLineBreaks.length : markdown.length
-          const withReference = `${markdown.slice(0, markdownOffset)}[^nt${number}]${markdown.slice(markdownOffset)}`
-          const footerSeparator = withReference.endsWith('\n\n') ? '' : withReference.endsWith('\n') ? '\n' : '\n\n'
-          replaceAll(`${withReference}${footerSeparator}[^nt${number}]: Treść przypisu\n`)(ctx)
-          const cursor = Math.min(insertion + 1, view.state.doc.content.size)
-          view.dispatch(view.state.tr.setSelection(TextSelection.near(view.state.doc.resolve(cursor))))
+          while (usedLabels.has(String(number))) number++
+          const label = String(number)
+          const reference = referenceType.create({ label })
+          const definitionText = view.state.schema.text('Treść przypisu')
+          const definition = definitionType.create({ label }, paragraphType.create(null, definitionText))
+          let transaction = view.state.tr.insert(range.to, reference)
+          const cursor = range.to + reference.nodeSize
+          transaction = transaction.insert(transaction.doc.content.size, definition)
+          transaction = transaction.setSelection(TextSelection.near(transaction.doc.resolve(Math.min(cursor, transaction.doc.content.size))))
+          view.dispatch(transaction)
           break
         }
-        case 'table': replace('\n\n| Kolumna 1 | Kolumna 2 |\n| --- | --- |\n|  |  |\n\n'); break
+        case 'table': {
+          const firstHeader = selectedText.trim().replace(/\|/g, '\\|').replace(/[\r\n]+/g, ' ') || 'Kolumna 1'
+          replace(`\n\n| ${firstHeader} | Kolumna 2 |\n| --- | --- |\n|  |  |\n\n`)
+          break
+        }
         case 'callout': {
           const lines = (selectedText || 'Wyróżniony tekst').split('\n').map(line => `> ${line}`).join('\n')
           replace(`\n\n> **Wyróżnienie**\n>\n${lines}\n\n`)
           break
         }
         case 'horizontal-rule': replace('\n\n---\n\n'); break
-        case 'code-block': replace(`\n\n\`\`\`\n${selectedText}\n\`\`\`\n\n`); break
+        case 'code-block': commands.call(createCodeBlockCommand.key); break
         case 'math-block': replace(`\n\n$$\n${selectedText || 'x'}\n$$\n\n`); break
       }
       view.focus()

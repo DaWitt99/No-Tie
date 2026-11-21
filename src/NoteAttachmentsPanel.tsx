@@ -249,6 +249,7 @@ export function NoteAttachmentsPanel({ attachments, assets = [], onAdd, onAddAss
           <small>Schemat SVG · kliknij, aby edytować</small>
         </button>
         <button type="button" className="attachment-edit" aria-label={`Edytuj schemat ${asset.fileName}`} title="Edytuj schemat" onClick={() => onEditAsset(asset)}><Pencil size={14} /></button>
+        <button type="button" className="attachment-insert-link" aria-label={`Wstaw odnośnik z podglądem schematu ${asset.fileName} do notatki`} title="Wstaw odnośnik z podglądem schematu do treści notatki" onClick={() => onInsertText(`![${asset.fileName}](./assets/${asset.fileName})`)}><Link2 size={13} /><span>Wstaw odnośnik</span></button>
       </article>)}
       {attachments.map(attachment => {
       const isAudio = attachment.mimeType.startsWith('audio/')

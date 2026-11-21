@@ -17,6 +17,27 @@ function stripParagraphMarkers(line: string) {
     .replace(/^\s*(?:[-+*]|\d+[.)])\s+(?:\[[ xX]\]\s+)?/, '')
 }
 
+function stripInlineFormatting(value: string) {
+  let cleaned = value
+    .replace(/<\/?(?:u|mark|span)\b[^>]*>/gi, '')
+    .replace(/!\[([^\]]+)\]\([^)]+\)/g, '$1')
+    .replace(/\[([^\]]+)\]\([^)]+\)/g, '$1')
+    .replace(/\[\[([^|\]]+)\|([^\]]+)\]\]/g, '$2')
+    .replace(/\[\[([^\]]+)\]\]/g, '$1')
+
+  for (let pass = 0; pass < 3; pass++) {
+    const previous = cleaned
+    cleaned = cleaned
+      .replace(/\*\*([\s\S]+?)\*\*|__([\s\S]+?)__/g, (_match, a: string | undefined, b: string | undefined) => a ?? b ?? '')
+      .replace(/~~([\s\S]+?)~~/g, '$1')
+      .replace(/`([^`]+)`/g, '$1')
+      .replace(/\*([^*\n]+)\*/g, '$1')
+      .replace(/_([^_\n]+)_/g, '$1')
+    if (cleaned === previous) break
+  }
+  return cleaned
+}
+
 export function MarkdownSourceEditor({
   noteId,
   markdown,
@@ -35,12 +56,69 @@ export function MarkdownSourceEditor({
   const textareaRef = useRef<HTMLTextAreaElement>(null)
   const contextRange = useRef({ from: 0, to: 0 })
   const selectionRange = useRef({ from: 0, to: 0 })
+  const [draft, setDraft] = useState(markdown)
+  const draftRef = useRef(markdown)
+  const latestMarkdownProp = useRef(markdown)
+  const latestNoteId = useRef(noteId)
+  const onChangeRef = useRef(onChange)
+  const onSelectionChangeRef = useRef(onSelectionChange)
+  const pendingChange = useRef<string | null>(null)
+  const changeTimer = useRef<number | null>(null)
+  const emittedMarkdown = useRef(new Set<string>())
   const [contextMenu, setContextMenu] = useState<ContextMenuPosition | null>(null)
   const [focusMode, setFocusMode] = useState(false)
   const [spellChecking, setSpellChecking] = useState(() => {
     try { return JSON.parse(localStorage.getItem('no-tie-editor-validation') || '{}').spelling !== false }
     catch { return true }
   })
+
+  useEffect(() => { onChangeRef.current = onChange }, [onChange])
+  useEffect(() => { onSelectionChangeRef.current = onSelectionChange }, [onSelectionChange])
+
+  function flushPendingChange() {
+    if (changeTimer.current !== null) {
+      window.clearTimeout(changeTimer.current)
+      changeTimer.current = null
+    }
+    const next = pendingChange.current
+    pendingChange.current = null
+    if (next === null) return
+    emittedMarkdown.current.add(next)
+    if (emittedMarkdown.current.size > 4) emittedMarkdown.current.delete(emittedMarkdown.current.values().next().value!)
+    onChangeRef.current(next)
+  }
+
+  function updateDraft(next: string, immediate = false) {
+    draftRef.current = next
+    setDraft(next)
+    pendingChange.current = next
+    if (changeTimer.current !== null) window.clearTimeout(changeTimer.current)
+    if (immediate) flushPendingChange()
+    else changeTimer.current = window.setTimeout(flushPendingChange, 180)
+  }
+
+  useEffect(() => {
+    if (latestNoteId.current !== noteId) {
+      flushPendingChange()
+      latestNoteId.current = noteId
+      latestMarkdownProp.current = markdown
+      draftRef.current = markdown
+      setDraft(markdown)
+      emittedMarkdown.current.clear()
+      return
+    }
+    if (latestMarkdownProp.current === markdown) return
+    latestMarkdownProp.current = markdown
+    if (emittedMarkdown.current.delete(markdown)) return
+    if (changeTimer.current !== null) window.clearTimeout(changeTimer.current)
+    changeTimer.current = null
+    pendingChange.current = null
+    emittedMarkdown.current.clear()
+    draftRef.current = markdown
+    setDraft(markdown)
+  }, [noteId, markdown])
+
+  useEffect(() => () => { flushPendingChange() }, [])
 
   useEffect(() => {
     const appShell = textareaRef.current?.closest('.app-shell')
@@ -59,8 +137,8 @@ export function MarkdownSourceEditor({
       const wikiLink = selected ? `[[${detail.target}|${selected}]]` : `[[${detail.target}]]`
       const next = input.value.slice(0, from) + wikiLink + input.value.slice(to)
       const selectedStart = from + (selected ? detail.target.length + 3 : wikiLink.length)
-      onChange(next)
-      onSelectionChange(selected ? next.slice(selectedStart, selectedStart + selected.length) : '')
+      updateDraft(next, true)
+      onSelectionChangeRef.current(selected ? next.slice(selectedStart, selectedStart + selected.length) : '')
       setContextMenu(null)
       requestAnimationFrame(() => {
         input.focus()
@@ -69,7 +147,7 @@ export function MarkdownSourceEditor({
     }
     window.addEventListener(WIKI_LINK_INSERT_EVENT, insertWikiLink)
     return () => window.removeEventListener(WIKI_LINK_INSERT_EVENT, insertWikiLink)
-  }, [noteId, onChange, onSelectionChange])
+  }, [noteId])
 
   useEffect(() => {
     const insertEmbed = (event: Event) => {
@@ -85,12 +163,12 @@ export function MarkdownSourceEditor({
       const separator = before.endsWith('\n\n') ? '' : before.endsWith('\n') ? '\n' : '\n\n'
       const next = `${before}${separator}${macro}${after.startsWith('\n') ? '' : '\n'}${after}`
       const cursor = insertion + separator.length + macro.length
-      onChange(next)
+      updateDraft(next, true)
       requestAnimationFrame(() => { input.focus(); input.setSelectionRange(cursor, cursor) })
     }
     window.addEventListener(WIKI_EMBED_INSERT_EVENT, insertEmbed)
     return () => window.removeEventListener(WIKI_EMBED_INSERT_EVENT, insertEmbed)
-  }, [noteId, onChange])
+  }, [noteId])
 
   useEffect(() => {
     const replaceSelection = (event: Event) => {
@@ -100,13 +178,13 @@ export function MarkdownSourceEditor({
       if (!input) return
       const { from, to } = contextRange.current
       const next = input.value.slice(0, from) + detail.replacement + input.value.slice(to)
-      onChange(next)
-      onSelectionChange(detail.replacement)
+      updateDraft(next, true)
+      onSelectionChangeRef.current(detail.replacement)
       requestAnimationFrame(() => { input.focus(); input.setSelectionRange(from, from + detail.replacement.length) })
     }
     window.addEventListener(AI_REPLACE_SELECTION_EVENT, replaceSelection)
     return () => window.removeEventListener(AI_REPLACE_SELECTION_EVENT, replaceSelection)
-  }, [noteId, onChange, onSelectionChange])
+  }, [noteId])
 
   function showContextMenu(event: ReactMouseEvent<HTMLTextAreaElement>) {
     event.preventDefault()
@@ -121,15 +199,16 @@ export function MarkdownSourceEditor({
   }
 
   function applyAction(action: MarkdownMenuAction) {
+    const currentMarkdown = draftRef.current
     const { from, to } = contextRange.current
-    const start = Math.max(0, Math.min(from, markdown.length))
-    const end = Math.max(start, Math.min(to, markdown.length))
-    const selected = markdown.slice(start, end)
+    const start = Math.max(0, Math.min(from, currentMarkdown.length))
+    const end = Math.max(start, Math.min(to, currentMarkdown.length))
+    const selected = currentMarkdown.slice(start, end)
     setContextMenu(null)
 
     const commit = (next: string, selectionStart: number, selectionEnd: number) => {
-      onChange(next)
-      onSelectionChange(next.slice(selectionStart, selectionEnd))
+      updateDraft(next, true)
+      onSelectionChangeRef.current(next.slice(selectionStart, selectionEnd))
       requestAnimationFrame(() => {
         const input = textareaRef.current
         input?.focus()
@@ -137,7 +216,7 @@ export function MarkdownSourceEditor({
       })
     }
     const replace = (replacement: string, selectionOffset = replacement.length, selectedLength = 0) => {
-      const next = markdown.slice(0, start) + replacement + markdown.slice(end)
+      const next = currentMarkdown.slice(0, start) + replacement + currentMarkdown.slice(end)
       const selectionStart = start + selectionOffset
       commit(next, selectionStart, selectionStart + selectedLength)
     }
@@ -165,15 +244,12 @@ export function MarkdownSourceEditor({
         break
       }
       case 'clear-format': {
-        const line = selectedLineRange(markdown, start, end)
-        const target = selected || markdown.slice(line.start, line.end)
-        const cleaned = target
-          .replace(/<\/?(?:u|mark|span)\b[^>]*>/gi, '')
-          .replace(/!?\[([^\]]+)\]\([^)]+\)/g, '$1')
-          .replace(/\*\*|__|~~|`/g, '')
+        const line = selectedLineRange(currentMarkdown, start, end)
+        const target = selected || currentMarkdown.slice(line.start, line.end)
+        const cleaned = stripInlineFormatting(target)
         if (selected) replace(cleaned, 0, cleaned.length)
         else {
-          const next = markdown.slice(0, line.start) + cleaned + markdown.slice(line.end)
+          const next = currentMarkdown.slice(0, line.start) + cleaned + currentMarkdown.slice(line.end)
           commit(next, line.start, line.start + cleaned.length)
         }
         break
@@ -186,8 +262,8 @@ export function MarkdownSourceEditor({
       case 'heading-3':
       case 'paragraph':
       case 'blockquote': {
-        const line = selectedLineRange(markdown, start, end)
-        const target = markdown.slice(line.start, line.end)
+        const line = selectedLineRange(currentMarkdown, start, end)
+        const target = currentMarkdown.slice(line.start, line.end)
         const headingLevel = action === 'heading-1' ? 1 : action === 'heading-2' ? 2 : action === 'heading-3' ? 3 : 0
         const prefix = action === 'bullet-list' ? '- '
           : action === 'ordered-list' ? '1. '
@@ -198,21 +274,26 @@ export function MarkdownSourceEditor({
           const text = stripParagraphMarkers(value)
           return text ? `${prefix}${text}` : ''
         }).join('\n')
-        const next = markdown.slice(0, line.start) + converted + markdown.slice(line.end)
+        const next = currentMarkdown.slice(0, line.start) + converted + currentMarkdown.slice(line.end)
         commit(next, line.start, line.start + converted.length)
         break
       }
       case 'footnote': {
-        const numbers = [...markdown.matchAll(/\[\^nt(\d+)\]/g)].map(match => Number(match[1]))
-        const number = Math.max(0, ...numbers) + 1
-        const reference = `${selected}[^nt${number}]`
-        const base = markdown.slice(0, start) + reference + markdown.slice(end)
-        const definition = `\n\n[^nt${number}]: Treść przypisu\n`
+        const labels = new Set([...currentMarkdown.matchAll(/\[\^([^\]]+)\]/g)].map(match => match[1] ?? ''))
+        let number = 1
+        while (labels.has(String(number))) number++
+        const reference = `${selected}[^${number}]`
+        const base = currentMarkdown.slice(0, start) + reference + currentMarkdown.slice(end)
+        const definition = `\n\n[^${number}]: Treść przypisu\n`
         const separator = base.endsWith('\n\n') ? '' : base.endsWith('\n') ? '\n' : '\n\n'
         commit(base + separator + definition.slice(2), start + selected.length, 0)
         break
       }
-      case 'table': replace(`\n\n| ${selected || 'Kolumna 1'} | Kolumna 2 |\n| --- | --- |\n|  |  |\n\n`); break
+      case 'table': {
+        const firstHeader = selected.trim().replace(/\|/g, '\\|').replace(/[\r\n]+/g, ' ') || 'Kolumna 1'
+        replace(`\n\n| ${firstHeader} | Kolumna 2 |\n| --- | --- |\n|  |  |\n\n`)
+        break
+      }
       case 'callout': {
         const lines = (selected || 'Wyróżniony tekst').split('\n').map(line => `> ${line}`).join('\n')
         replace(`\n\n> **Wyróżnienie**\n>\n${lines}\n\n`)
@@ -238,18 +319,19 @@ export function MarkdownSourceEditor({
       className="markdown-source-editor"
       aria-label="Surowy tekst Markdown"
       spellCheck={spellChecking}
-      value={markdown}
+      value={draft}
+      onBlur={flushPendingChange}
       onContextMenu={showContextMenu}
       onSelect={event => {
         const input = event.currentTarget
         selectionRange.current = { from: input.selectionStart, to: input.selectionEnd }
-        onSelectionChange(input.value.slice(input.selectionStart, input.selectionEnd))
+        onSelectionChangeRef.current(input.value.slice(input.selectionStart, input.selectionEnd))
       }}
       onChange={event => {
         const input = event.currentTarget
         selectionRange.current = { from: input.selectionStart, to: input.selectionEnd }
-        onChange(input.value)
-        onSelectionChange(input.value.slice(input.selectionStart, input.selectionEnd))
+        updateDraft(input.value)
+        onSelectionChangeRef.current(input.value.slice(input.selectionStart, input.selectionEnd))
       }}
     />
     {contextMenu && <MarkdownContextMenu {...contextMenu} noteActions={noteActions} onNoteAction={action => { setContextMenu(null); onNoteAction(action) }} onAction={applyAction} onDismiss={() => setContextMenu(null)} />}
