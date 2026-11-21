@@ -1,6 +1,6 @@
 import { useDeferredValue, useMemo, useState } from 'react'
 import type { CSSProperties } from 'react'
-import { BookOpen, CalendarDays, Check, CheckSquare2, Clock3, FileText, Folder, GripVertical, LoaderCircle, Paperclip, RotateCcw, Search, SlidersHorizontal, Sparkles, Star, Tag, ArrowDown, ArrowUp, Trash2 } from 'lucide-react'
+import { BookOpen, CalendarDays, Check, CheckSquare2, Clock3, FileText, Folder, GripVertical, LoaderCircle, Palette, Paperclip, RotateCcw, Search, SlidersHorizontal, Sparkles, Star, Tag, ArrowDown, ArrowUp, Trash2 } from 'lucide-react'
 import type { Note, NoteAttachment } from './types'
 import { searchNotes } from './noteSearch'
 import { VirtualizedGrid } from './VirtualizedGrid'
@@ -8,6 +8,7 @@ import { VirtualizedList } from './VirtualizedList'
 
 type SortMode = 'manual' | 'updated-desc' | 'updated-asc' | 'created-desc' | 'created-asc' | 'title-asc' | 'title-desc' | 'folder-asc' | 'folder-desc'
 type DisplayMode = 'cards' | 'full' | 'names-tags' | 'names'
+type NoteColorOption = { value: string; label: string }
 export type AllNotesPreset = 'all' | 'favorites' | 'recent'
 
 const sortLabels: Record<SortMode, string> = {
@@ -54,7 +55,7 @@ function cachedNotePreview(note: Note, contentByNote?: ReadonlyMap<string, strin
   return preview
 }
 
-export function AllNotesPage({ notes, attachments, searchAttachments = attachments, contentByNote, normalizedContentByNote, onVisibleNotes, advancedSearch = true, preset = 'all', onFolderChange, query, onQueryChange, tag, onTagChange, folder, semanticSearchEnabled = false, onSemanticSearchChange, semanticScores = {}, semanticSearchBusy = false, semanticSearchError = '', searchIndexProgress, onQuickSearch, bulkActionsEnabled = false, bulkSelectMode = false, onToggleBulkSelect, bulkSelectedIds = [], onBulkSelectedIdsChange, bulkTargetFolder = '', onBulkTargetFolderChange, bulkTagDraft = '', onBulkTagDraftChange, onMoveSelected, onApplySelectedTag, onDeleteSelected, foldersForBulk = [], noteOrder = [], onReorder, getNoteColor, onOpen }: {
+export function AllNotesPage({ notes, attachments, searchAttachments = attachments, contentByNote, normalizedContentByNote, onVisibleNotes, advancedSearch = true, preset = 'all', onFolderChange, query, onQueryChange, tag, onTagChange, folder, semanticSearchEnabled = false, onSemanticSearchChange, semanticScores = {}, semanticSearchBusy = false, semanticSearchError = '', searchIndexProgress, onQuickSearch, bulkActionsEnabled = false, bulkSelectMode = false, onToggleBulkSelect, bulkSelectedIds = [], onBulkSelectedIdsChange, bulkTargetFolder = '', onBulkTargetFolderChange, bulkTagDraft = '', onBulkTagDraftChange, onMoveSelected, onApplySelectedTag, onDeleteSelected, foldersForBulk = [], noteOrder = [], onReorder, getNoteColor, noteColors, colorOptions, onOpen }: {
   notes: Note[]
   attachments: NoteAttachment[]
   searchAttachments?: NoteAttachment[]
@@ -92,12 +93,19 @@ export function AllNotesPage({ notes, attachments, searchAttachments = attachmen
   noteOrder?: string[]
   onReorder?: (sourceId: string, targetId: string) => void
   getNoteColor: (note: Note) => string | undefined
+  noteColors: ReadonlyMap<string, string | undefined>
+  colorOptions: NoteColorOption[]
   onOpen: (noteId: string) => void
 }) {
   const [displayMode, setDisplayMode] = useState<DisplayMode>(() => {
     const stored = localStorage.getItem('no-tie-note-display-mode')
     return stored === 'names' || stored === 'names-tags' || stored === 'full' ? stored : 'cards'
   })
+  const [gridColumns, setGridColumns] = useState(() => {
+    const stored = Number(localStorage.getItem('no-tie-library-grid-columns'))
+    return Number.isInteger(stored) && stored >= 1 && stored <= 4 ? stored : 0
+  })
+  const [colorFilter, setColorFilter] = useState('')
   const [sortMode, setSortMode] = useState<SortMode>(preset === 'recent' ? 'updated-desc' : 'manual')
   const [favoritesOnly, setFavoritesOnly] = useState(preset === 'favorites')
   const [attachmentsOnly, setAttachmentsOnly] = useState(false)
@@ -125,6 +133,7 @@ export function AllNotesPage({ notes, attachments, searchAttachments = attachmen
       advanced: advancedSearch,
       sortByUpdated: false,
     }).filter(note => (!favoritesOnly || note.favorite) && (!attachmentsOnly || (attachmentCounts.get(note.id) ?? 0) > 0))
+      .filter(note => !colorFilter || (colorFilter === '__none__' ? !noteColors.get(note.id) : noteColors.get(note.id) === colorFilter))
       .filter(note => !hasSemanticScores || (semanticScores[note.id] ?? -1) >= .12)
 
     return results.sort((a, b) => {
@@ -143,9 +152,9 @@ export function AllNotesPage({ notes, attachments, searchAttachments = attachmen
       if (sortMode === 'folder-desc') return collator.compare(b.folder || 'Poziom główny', a.folder || 'Poziom główny') || collator.compare(a.title, b.title)
       return b.updatedAt - a.updatedAt
     })
-  }, [notes, deferredQuery, tag, folder, searchAttachments, contentByNote, normalizedContentByNote, advancedSearch, favoritesOnly, attachmentsOnly, attachmentCounts, sortMode, noteOrderIndex, semanticSearchEnabled, semanticScores, hasSemanticScores])
+  }, [notes, deferredQuery, tag, folder, searchAttachments, contentByNote, normalizedContentByNote, advancedSearch, favoritesOnly, attachmentsOnly, attachmentCounts, colorFilter, noteColors, sortMode, noteOrderIndex, semanticSearchEnabled, semanticScores, hasSemanticScores])
 
-  const hasFilters = Boolean(query.trim() || tag || folder || favoritesOnly || attachmentsOnly)
+  const hasFilters = Boolean(query.trim() || tag || folder || favoritesOnly || attachmentsOnly || colorFilter)
   const selectedIds = new Set(bulkSelectedIds)
   const toggleSelected = (noteId: string, checked?: boolean) => {
     const shouldSelect = checked ?? !selectedIds.has(noteId)
@@ -156,12 +165,18 @@ export function AllNotesPage({ notes, attachments, searchAttachments = attachmen
     if (mode === 'full' || mode === 'names-tags' || mode === 'names') localStorage.setItem('no-tie-note-display-mode', mode)
     else localStorage.removeItem('no-tie-note-display-mode')
   }
+  const changeGridColumns = (value: number) => {
+    setGridColumns(value)
+    if (value) localStorage.setItem('no-tie-library-grid-columns', String(value))
+    else localStorage.removeItem('no-tie-library-grid-columns')
+  }
   const resetFilters = () => {
     onQueryChange('')
     onTagChange('')
     onFolderChange?.('')
     setFavoritesOnly(false)
     setAttachmentsOnly(false)
+    setColorFilter('')
   }
 
   const changeFolder = (value: string) => {
@@ -189,6 +204,7 @@ export function AllNotesPage({ notes, attachments, searchAttachments = attachmen
       <div className="all-notes-filter-controls">
         <label className="all-notes-select"><span><Tag size={13} />Tag</span><select value={tag} onChange={event => onTagChange(event.target.value)}><option value="">Wszystkie tagi</option>{tags.map(value => <option value={value} key={value}>{value}</option>)}</select></label>
         <label className="all-notes-select"><span><Folder size={13} />Folder</span><select value={folder} onChange={event => changeFolder(event.target.value)}><option value="">Wszystkie foldery</option><option value="__root__">Poziom główny</option>{folders.map(value => <option value={value} key={value}>{value}</option>)}</select></label>
+        <label className="all-notes-select all-notes-color-filter"><span><Palette size={13} />Kolor notatki</span><select value={colorFilter} onChange={event => setColorFilter(event.target.value)} aria-label="Filtruj notatki według koloru"><option value="">Wszystkie kolory</option><option value="__none__">Bez koloru</option>{colorOptions.map(color => <option value={color.value} key={color.value}>{color.label}</option>)}</select></label>
         <label className="all-notes-select all-notes-sort"><span><SlidersHorizontal size={13} />Sortuj</span><select value={sortMode} onChange={event => setSortMode(event.target.value as SortMode)}>{Object.entries(sortLabels).map(([value, label]) => <option value={value} key={value}>{label}</option>)}</select></label>
       </div>
       <div className="all-notes-toggles">
@@ -220,6 +236,7 @@ export function AllNotesPage({ notes, attachments, searchAttachments = attachmen
       <div><h2>{hasFilters ? 'Wyniki wyszukiwania' : 'Biblioteka'}</h2><span>{filteredNotes.length} z {notes.length} {noteCountLabel(notes.length)}</span></div>
       <div className="all-notes-results-actions">
         <label className="all-notes-display-select"><span>Widok</span><select value={displayMode} onChange={event => changeDisplayMode(event.target.value as DisplayMode)} aria-label="Sposób wyświetlania notatek"><option value="cards">Karty</option><option value="full">Treść i tagi</option><option value="names-tags">Nazwy i tagi</option><option value="names">Same nazwy</option></select></label>
+        {displayMode === 'cards' && <label className="all-notes-display-select"><span>Kolumny</span><select value={gridColumns || 'auto'} onChange={event => changeGridColumns(event.target.value === 'auto' ? 0 : Number(event.target.value))} aria-label="Szerokość siatki wyników"><option value="auto">Auto</option><option value="1">1</option><option value="2">2</option><option value="3">3</option><option value="4">4</option></select></label>}
         {hasSemanticScores
           ? <span className="all-notes-sort-summary"><Sparkles size={13} />Dopasowanie semantyczne</span>
           : <span className="all-notes-sort-summary"><Clock3 size={13} />{sortLabels[sortMode]}</span>}
@@ -229,6 +246,7 @@ export function AllNotesPage({ notes, attachments, searchAttachments = attachmen
     {filteredNotes.length && displayMode === 'cards' ? <VirtualizedGrid
       className="all-notes-grid"
       items={filteredNotes}
+      preferredColumns={gridColumns || undefined}
       keyOf={note => note.id}
       onItemsRendered={(start, end) => onVisibleNotes?.(filteredNotes.slice(start, end))}
       renderItem={(note, noteIndex) => {

@@ -72,6 +72,7 @@
 .tiny-icon { display: grid; place-items: center; width: 23px; height: 23px; padding: 0; border: 0; border-radius: 6px; color: #909bb3; background: transparent; cursor: pointer; }
 .tiny-icon:hover { background: #ffffff14; color: #fff; }
 .folder-item { min-height: 29px; gap: 8px; padding: 0 6px; font-size: 10px; }
+.folder-item > span:not(.nav-count) { display: block; min-width: 0; flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .folder-item, .folder-file-item, .note-card { -webkit-user-drag: none; user-select: none; }
 .folder-item, .folder-file-item, .note-card { cursor: grab; }
 .folder-item:active, .folder-file-item:active, .note-card:active { cursor: grabbing; }
@@ -113,10 +114,7 @@
 .folder-file-item:active, .folder-drop-row:active { cursor: grabbing; }
 .folder-more-notes { position: relative; display: block; width: 100%; height: 100%; min-height: 24px; border: 0; color: #aab4c9; background: transparent; text-align: left; font-size: 8px; cursor: pointer; }
 .folder-more-notes:hover { color: #e2e8f7; background: #ffffff0b; }
-.entry-actions { position: relative; z-index: 6; display: grid; flex: 0 0 24px; place-items: center; height: 25px; }
-.entry-more-button { display: grid; place-items: center; width: 22px; height: 22px; padding: 0; border: 0; border-radius: 5px; color: #98a4bf; background: transparent; cursor: pointer; opacity: .8; }
-.entry-more-button:hover, .entry-more-button[aria-expanded="true"] { color: #f2f4ff; background: #ffffff17; opacity: 1; }
-.sidebar-context-menu { position: absolute; z-index: 20; top: calc(100% + 2px); right: 0; width: 154px; padding: 5px; border: 1px solid #3b4966; border-radius: 9px; background: #24324c; box-shadow: 0 12px 30px #1018276e; }
+.sidebar-context-menu { position: fixed; z-index: 200; width: 154px; max-height: calc(100dvh - 16px); overflow: auto; padding: 5px; border: 1px solid #3b4966; border-radius: 9px; background: #24324c; box-shadow: 0 12px 30px #1018276e; }
 .sidebar-context-menu button { display: flex; align-items: center; gap: 9px; width: 100%; min-height: 32px; padding: 0 9px; border: 0; border-radius: 6px; color: #e0e5f1; background: transparent; text-align: left; font-size: 11px; cursor: pointer; }
 .sidebar-context-menu button:hover { color: white; background: #ffffff12; }
 .sidebar-context-menu button svg { color: #aab5cb; }
@@ -1424,7 +1422,6 @@
   .section-label { font-size: 9px; }
   .folder-panel .folders-section { padding-right: 5px; padding-left: 5px; }
   .folder-file-item { gap: 5px; padding-right: 4px; padding-left: 4px; font-size: 9px; }
-  .entry-actions { flex-basis: 23px; }
   .sidebar-bottom .offline-card { padding: 8px 7px; }
   .offline-card strong, .user-row strong { font-size: 10px; }
   .offline-card span:not(.online-dot), .user-row span { font-size: 9px; }
@@ -2759,7 +2756,7 @@
 .all-notes-search > button:hover { color: #5266c3; background: #f1f3ff; }
 .all-notes-search .all-notes-quick-search { display: inline-flex; width: auto; height: 30px; flex: 0 0 auto; align-items: center; gap: 5px; padding: 0 8px; border: 1px solid #e6e9f1; border-radius: 7px; color: #7180b9; background: #fafbff; font: inherit; font-size: 9px; }
 .all-notes-search .all-notes-quick-search:hover { border-color: #ccd3ef; color: #5268c4; background: #f4f6ff; }
-.all-notes-filter-controls { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 10px; }
+.all-notes-filter-controls { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 10px; }
 .all-notes-select { display: grid; min-width: 0; gap: 6px; color: #78849b; }
 .all-notes-select > span { display: flex; align-items: center; gap: 6px; font-size: 9px; font-weight: 650; }
 .all-notes-select > span svg { color: #8995bc; }
@@ -2983,10 +2980,6 @@
   .folder-file-item { min-height: 42px; }
   .tool-button { width: 42px; height: 42px; }
   .drawing-feature-tabs button { flex: 0 0 auto; }
-  .entry-actions { flex-basis: 42px; height: 42px; }
-  .entry-more-button { width: 42px; height: 42px; opacity: 1; background: #ffffff0c; }
-  .entry-more-button:hover,
-  .entry-more-button[aria-expanded="true"] { color: #fff; background: #ffffff20; }
   .attachment-delete,
   .attachment-edit { top: 5px; right: 5px; display: grid; width: 42px; height: 42px; opacity: 1; background: #ffffffed; box-shadow: 0 1px 5px #17213c20; }
   .scheme-attachment-card .attachment-edit { right: 5px; }
@@ -3378,33 +3371,29 @@
   .ai-task-queue-controls .icon-button { width: 42px; height: 42px; }
 }
 
-/* Keep the complete tool list visible in a compact, labeled desktop sidebar. */
+/* Keep the desktop tools in a compact icon rail; button titles provide tooltips. */
 @media (min-width: 1025px) {
-  .app-shell { --tools-panel-width: 252px; }
-  .sidebar { align-items: stretch; padding: 8px 10px; }
-  .sidebar-content { align-items: stretch; overflow-y: hidden; }
-  .sidebar .brand-row { justify-content: flex-start; gap: 8px; padding: 0 4px; margin: 0 0 6px; font-size: 14px; }
-  .sidebar .brand-row > span { display: inline; }
-  .sidebar .brand-mark { width: 28px; height: 28px; flex-basis: 28px; border-radius: 9px; font-size: 14px; }
-  .sidebar .new-note-button { width: 100%; min-height: 29px; justify-content: flex-start; gap: 8px; padding: 0 8px; margin: 0; border-radius: 8px; font-size: 10px; }
-  .sidebar .new-note-button > span { display: inline; }
-  .sidebar .new-note-button > kbd { display: inline; }
-  .sidebar .sidebar-section { display: flex; width: 100%; flex: 0 0 auto; flex-direction: column; align-items: stretch; gap: 0; padding: 3px 0; margin: 4px 0 0; border: 0; }
-  .sidebar .section-label { display: block; padding: 0 8px 2px; font-size: 8px; }
-  .sidebar .section-heading { display: flex; padding: 0 8px 2px; }
-  .sidebar .nav-item { position: relative; display: flex; width: 100%; min-height: 23px; flex: 0 0 23px; align-items: center; justify-content: flex-start; gap: 8px; padding: 0 8px; margin: 0; overflow: hidden; border-radius: 6px; font-size: 10px; }
-  .sidebar .nav-item svg { width: 14px; height: 14px; }
-  .sidebar .nav-item > span:not(.nav-count) { display: block; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-  .sidebar .nav-count { position: static; display: block; min-width: 0; max-width: 38px; height: auto; margin: 0 0 0 auto; padding: 0; overflow: hidden; border: 0; border-radius: 0; color: #8994ac; background: transparent; font-size: 8px; line-height: 1; text-overflow: ellipsis; white-space: nowrap; }
-  .sidebar .workspace-tools { flex: 0 0 auto; max-height: none; margin: 3px 0 0; overflow: visible; }
-  .sidebar .workspace-tools .section-heading { position: static; padding-bottom: 2px; }
-  .sidebar .workspace-tools .nav-item { min-height: 23px; flex-basis: 23px; font-size: 10px; }
-  .sidebar .smart-folders-section { flex: 0 1 auto; max-height: min(12dvh, 100px); overflow: auto; scrollbar-width: thin; }
+  .app-shell { --tools-panel-width: 64px; }
+  .sidebar { align-items: center; padding: 14px 7px 12px; }
+  .sidebar-content { align-items: center; }
+  .sidebar .brand-row { justify-content: center; gap: 0; padding: 0; margin: 0 0 14px; }
+  .sidebar .brand-row > span { display: none; }
+  .sidebar .brand-mark { width: 38px; height: 38px; flex-basis: 38px; }
+  .sidebar .new-note-button { width: 42px; min-height: 42px; justify-content: center; gap: 0; padding: 0; margin: 0 auto; }
+  .sidebar .new-note-button > span,
+  .sidebar .new-note-button > kbd,
+  .sidebar .section-label,
+  .sidebar .section-heading { display: none; }
+  .sidebar .sidebar-section { display: flex; width: 100%; flex: 0 0 auto; flex-direction: column; align-items: center; gap: 3px; padding: 10px 0; margin-top: 10px; border-top: 1px solid #ffffff12; }
+  .sidebar .nav-item { position: relative; display: grid; width: 42px; min-height: 39px; flex: 0 0 39px; place-items: center; gap: 0; padding: 0; margin: 0 auto; overflow: visible; border-radius: 9px; }
+  .sidebar .nav-item > span:not(.nav-count) { display: none; }
+  .sidebar .nav-count { position: absolute; top: -3px; right: -4px; display: grid; min-width: 15px; max-width: 27px; height: 15px; place-items: center; overflow: hidden; margin: 0; padding: 0 3px; border: 1px solid #19243a; border-radius: 999px; color: #e8ecff; background: #465986; font-size: 7px; line-height: 1; text-overflow: clip; white-space: nowrap; }
+  .sidebar .smart-folders-section { max-height: 28dvh; overflow: auto; scrollbar-width: thin; }
   .sidebar-bottom { width: 100%; }
   .sidebar-bottom .offline-card,
   .sidebar-bottom .user-row > .avatar,
   .sidebar-bottom .user-row > div:nth-child(2) { display: none; }
-  .sidebar-bottom .user-row { justify-content: flex-start; gap: 4px; padding: 3px 0 0; }
-  .sidebar-bottom .user-row-actions { flex-direction: row; gap: 4px; margin: 0; }
-  .sidebar-bottom .sidebar-help-button { width: 30px; height: 30px; flex-basis: 30px; margin: 0; }
+  .sidebar-bottom .user-row { justify-content: center; gap: 0; padding: 0; }
+  .sidebar-bottom .user-row-actions { flex-direction: column; gap: 3px; margin: 0; }
+  .sidebar-bottom .sidebar-help-button { width: 38px; height: 38px; flex-basis: 38px; margin: 0; }
 }

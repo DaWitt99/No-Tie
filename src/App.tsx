@@ -1,4 +1,5 @@
 import { lazy, Suspense, useCallback, useDeferredValue, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
+import { createPortal } from 'react-dom'
 import type { CSSProperties } from 'react'
 import {
   Archive, ArrowLeft, ArrowRight, BarChart3, Bell, BookOpen, BookmarkPlus, Brain, CalendarDays, Check, CheckSquare2, ChevronDown, ChevronRight, ChevronUp, Clock3, Code2, Columns3, Command, Copy, Eye, FilePlus2, FileText, Folder, FolderHeart, Heart, History, Import, LayoutTemplate,
@@ -30,6 +31,7 @@ import './App.css'
 
 type Filter = 'all' | 'favorites' | string
 type EntryTarget = { kind: 'folder'; path: string } | { kind: 'note'; id: string }
+type EntryContextMenu = { key: string; x: number; y: number }
 type FolderPanelEntry = { kind: 'folder'; path: string; depth: number } | { kind: 'note'; note: Note; depth: number } | { kind: 'more'; folder: string; depth: number; remaining: number }
 
 function errorMessage(error: unknown, fallback: string): string {
@@ -88,6 +90,7 @@ const FOLDER_PANEL_WIDTH_KEY = 'no-tie-folders-panel-width'
 const DEFAULT_FOLDER_PANEL_WIDTH = 236
 const MIN_FOLDER_PANEL_WIDTH = 160
 const MAX_FOLDER_PANEL_WIDTH = 460
+const FOLDER_TREE_INDENT = 14
 
 function clampFolderPanelWidth(width: number, maxWidth = MAX_FOLDER_PANEL_WIDTH) {
   return Math.max(MIN_FOLDER_PANEL_WIDTH, Math.min(maxWidth, Math.round(width)))
@@ -480,7 +483,7 @@ function App() {
   const aiTaskJobs = useRef<AiQueueJob[]>([])
   const aiQueueRunning = useRef(false)
   const activeAiTaskJob = useRef<AiQueueJob | null>(null)
-  const [openActionMenu, setOpenActionMenu] = useState('')
+  const [openActionMenu, setOpenActionMenu] = useState<EntryContextMenu | null>(null)
   const [renameTarget, setRenameTarget] = useState<EntryTarget | null>(null)
   const [renameDraft, setRenameDraft] = useState('')
   const [colorTarget, setColorTarget] = useState<EntryTarget | null>(null)
@@ -847,6 +850,11 @@ function App() {
     }
     return colors
   }, [folders, folderColors])
+  const noteColorsById = useMemo(() => {
+    const colors = new Map<string, string | undefined>()
+    for (const note of notes) colors.set(note.id, note.color || effectiveFolderColors.get(note.folder))
+    return colors
+  }, [notes, effectiveFolderColors])
   const folderPanelEntries = useMemo<FolderPanelEntry[]>(() => {
     const entries: FolderPanelEntry[] = []
     const addNotes = (folder: string, depth: number) => {
@@ -2678,11 +2686,34 @@ function App() {
     }
     if (target.kind === 'note') moveNoteToFolder(target.id, destination.path)
     else moveFolder(target.path, destination.path)
-    setOpenActionMenu('')
+    setOpenActionMenu(null)
   }
 
   function menuKey(target: EntryTarget) {
     return target.kind === 'folder' ? `folder:${target.path}` : `note:${target.id}`
+  }
+
+  function placeEntryContextMenu(target: EntryTarget, x: number, y: number) {
+    const menuHeight = target.kind === 'folder' ? 190 : 126
+    setOpenActionMenu({
+      key: menuKey(target),
+      x: Math.max(8, Math.min(x, window.innerWidth - 170)),
+      y: Math.max(8, Math.min(y, window.innerHeight - menuHeight - 8)),
+    })
+  }
+
+  function handleEntryContextMenu(event: React.MouseEvent, target: EntryTarget) {
+    event.preventDefault()
+    event.stopPropagation()
+    placeEntryContextMenu(target, event.clientX, event.clientY)
+  }
+
+  function handleEntryMenuKeyDown(event: React.KeyboardEvent<HTMLElement>, target: EntryTarget) {
+    if (event.key !== 'ContextMenu' && !(event.shiftKey && event.key === 'F10')) return
+    event.preventDefault()
+    const rect = event.currentTarget.getBoundingClientRect()
+    placeEntryContextMenu(target, rect.left, rect.bottom)
+    window.requestAnimationFrame(() => document.querySelector<HTMLElement>('.sidebar-context-menu [role="menuitem"]')?.focus())
   }
 
   function beginRename(target: EntryTarget) {
@@ -2691,7 +2722,7 @@ function App() {
       : notes.find(note => note.id === target.id)?.title ?? ''
     setRenameTarget(target)
     setRenameDraft(value)
-    setOpenActionMenu('')
+    setOpenActionMenu(null)
   }
 
   function askDelete(target: EntryTarget) {
@@ -2701,7 +2732,7 @@ function App() {
       ? notes.filter(item => item.folder === target.path || item.folder.startsWith(`${target.path}/`)).length
       : 1
     setDeleteTarget({ ...target, label, noteCount } as DeleteTarget)
-    setOpenActionMenu('')
+    setOpenActionMenu(null)
   }
 
   function removeNotesFromReviewSessions(noteIdsToRemove: Set<string>) {
@@ -2863,23 +2894,25 @@ function App() {
 
   function renderEntryMenu(target: EntryTarget, cachedSiblings?: string[]): React.ReactNode {
     const key = menuKey(target)
+    const currentMenu = openActionMenu
+    if (!currentMenu || currentMenu.key !== key) return null
     const folderSiblings = target.kind === 'folder' ? cachedSiblings ?? folders.filter(folder => {
       const parent = target.path.includes('/') ? target.path.slice(0, target.path.lastIndexOf('/')) : ''
       return (folder.includes('/') ? folder.slice(0, folder.lastIndexOf('/')) : '') === parent
     }) : []
     const folderIndex = target.kind === 'folder' ? folderSiblingIndexes.get(target.path) ?? folderSiblings.indexOf(target.path) : -1
-    return <div className="entry-actions" onClick={event => event.stopPropagation()}>
-      <button className="entry-more-button" title="Więcej opcji" aria-label="Więcej opcji" aria-expanded={openActionMenu === key} onClick={() => setOpenActionMenu(current => current === key ? '' : key)}><MoreVertical size={16} /></button>
-      {openActionMenu === key && <div className="sidebar-context-menu" role="menu">
+    return createPortal(
+      <div className="sidebar-context-menu" role="menu" aria-label={target.kind === 'folder' ? 'Opcje folderu' : 'Opcje pliku'} style={{ left: currentMenu.x, top: currentMenu.y }} onClick={event => event.stopPropagation()}>
         {target.kind === 'folder' && <>
-          <button role="menuitem" disabled={folderIndex <= 0} onClick={() => { reorderFolder(target.path, -1); setOpenActionMenu('') }}><ChevronUp size={14} />Przenieś wyżej</button>
-          <button role="menuitem" disabled={folderIndex < 0 || folderIndex >= folderSiblings.length - 1} onClick={() => { reorderFolder(target.path, 1); setOpenActionMenu('') }}><ChevronDown size={14} />Przenieś niżej</button>
+          <button role="menuitem" disabled={folderIndex <= 0} onClick={() => { reorderFolder(target.path, -1); setOpenActionMenu(null) }}><ChevronUp size={14} />Przenieś wyżej</button>
+          <button role="menuitem" disabled={folderIndex < 0 || folderIndex >= folderSiblings.length - 1} onClick={() => { reorderFolder(target.path, 1); setOpenActionMenu(null) }}><ChevronDown size={14} />Przenieś niżej</button>
         </>}
-        <button role="menuitem" onClick={() => { setColorTarget(target); setOpenActionMenu('') }}><Palette size={14} />Ustaw kolor</button>
+        <button role="menuitem" onClick={() => { setColorTarget(target); setOpenActionMenu(null) }}><Palette size={14} />Ustaw kolor</button>
         <button role="menuitem" onClick={() => beginRename(target)}><Pencil size={14} />Zmień nazwę</button>
         <button className="danger-menu-item" role="menuitem" onClick={() => askDelete(target)}><Trash2 size={14} />Usuń</button>
-      </div>}
-    </div>
+      </div>,
+      document.body,
+    )
   }
 
   function folderGuidesForEntry(path: string, includePath = true) {
@@ -2890,15 +2923,15 @@ function App() {
 
   function renderFolderBranchGuides(foldersToGuide: string[]) {
     if (!foldersToGuide.length) return null
-    return <span className="folder-branch-guides" aria-hidden="true">{foldersToGuide.map(folder => <span key={folder} style={{ left: `${14 + (folder.split('/').length - 1) * 10}px` }} />)}</span>
+    return <span className="folder-branch-guides" aria-hidden="true">{foldersToGuide.map(folder => <span key={folder} style={{ left: `${14 + (folder.split('/').length - 1) * FOLDER_TREE_INDENT}px` }} />)}</span>
   }
 
   function renderNoteFile(note: Note, depth = 0): React.ReactNode {
     const target: EntryTarget = { kind: 'note', id: note.id }
     const color = noteDisplayColor(note)
-    return <div data-drop-folder={note.folder} className={`folder-file-row ${selectedId === note.id ? 'active' : ''} ${color ? 'has-entry-color' : ''}`} style={{ paddingLeft: `${22 + depth * 10}px`, ...(entryColorStyle(color) ?? {}) }}>
+    return <div data-drop-folder={note.folder} className={`folder-file-row ${selectedId === note.id ? 'active' : ''} ${color ? 'has-entry-color' : ''}`} style={{ paddingLeft: `${22 + depth * FOLDER_TREE_INDENT}px`, ...(entryColorStyle(color) ?? {}) }} onContextMenu={event => handleEntryContextMenu(event, target)}>
       {renderFolderBranchGuides(folderGuidesForEntry(note.folder))}
-      <button className={`folder-file-item ${color ? 'has-entry-color' : ''}`} style={entryColorStyle(color)} onPointerDown={event => startEntryPointerDrag(event, target, note.title || 'Bez tytułu')} onClick={() => { if (ignoreClickAfterDrag()) return; setActiveReviewSessionId(''); setActiveFilter(note.folder ? note.folder : 'root'); selectNote(note.id); setMobileDrawer('none') }} title={note.title || 'Bez tytułu'}><FileText size={13} /><span>{note.title || 'Bez tytułu'}</span></button>
+      <button className={`folder-file-item ${color ? 'has-entry-color' : ''}`} style={entryColorStyle(color)} onKeyDown={event => handleEntryMenuKeyDown(event, target)} onPointerDown={event => startEntryPointerDrag(event, target, note.title || 'Bez tytułu')} onClick={() => { if (ignoreClickAfterDrag()) return; setActiveReviewSessionId(''); setActiveFilter(note.folder ? note.folder : 'root'); selectNote(note.id); setMobileDrawer('none') }} title={note.title || 'Bez tytułu'}><FileText size={13} /><span>{note.title || 'Bez tytułu'}</span></button>
       {renderEntryMenu(target)}
     </div>
   }
@@ -2917,7 +2950,7 @@ function App() {
   }
 
   function noteDisplayColor(note: Note): string | undefined {
-    return note.color || folderDisplayColor(note.folder)
+    return noteColorsById.get(note.id)
   }
 
   function applyEntryColor(color?: string) {
@@ -3637,10 +3670,12 @@ function App() {
   useEffect(() => {
     if (!openActionMenu) return
     const onPointerDown = (event: PointerEvent) => {
-      if (!(event.target instanceof Element) || !event.target.closest('.entry-actions')) setOpenActionMenu('')
+      if (!(event.target instanceof Element) || !event.target.closest('.sidebar-context-menu')) setOpenActionMenu(null)
     }
+    const onKeyDown = (event: KeyboardEvent) => { if (event.key === 'Escape') setOpenActionMenu(null) }
     window.addEventListener('pointerdown', onPointerDown)
-    return () => window.removeEventListener('pointerdown', onPointerDown)
+    window.addEventListener('keydown', onKeyDown)
+    return () => { window.removeEventListener('pointerdown', onPointerDown); window.removeEventListener('keydown', onKeyDown) }
   }, [openActionMenu])
 
   async function handleImport(event: React.ChangeEvent<HTMLInputElement>) {
@@ -3846,7 +3881,7 @@ function App() {
   }
 
   return (
-    <main className={`app-shell ${mobileDrawer !== 'none' ? 'drawer-open' : ''} ${entryDragVisual ? 'entry-dragging' : ''} ${showChat ? 'with-ollama-chat' : ''} ${showMainSidebar ? '' : 'sidebar-hidden'} ${showFoldersPanel ? '' : 'folders-panel-hidden'}`} style={{ '--folders-panel-width': `${Math.min(folderPanelWidth, maxFolderPanelWidth())}px` } as CSSProperties}>
+    <main className={`app-shell ${mobileDrawer !== 'none' ? 'drawer-open' : ''} ${entryDragVisual ? 'entry-dragging' : ''} ${showChat ? 'with-ollama-chat' : ''} ${showMainSidebar ? '' : 'sidebar-hidden'} ${showFoldersPanel ? '' : 'folders-panel-hidden'}`} style={{ '--folders-panel-width': `${showFoldersPanel ? Math.min(folderPanelWidth, maxFolderPanelWidth()) : 0}px` } as CSSProperties}>
       {(showMainSidebar || mobileDrawer === 'sidebar') && <aside className={`sidebar ${mobileDrawer === 'sidebar' ? 'mobile-visible' : ''}`} onClickCapture={event => {
         const target = event.target
         if (target instanceof Element && target.closest('.nav-item, .folder-file-item')) setShowCreateNotePage(false)
@@ -3906,7 +3941,7 @@ function App() {
               if (entry.kind === 'note') return renderNoteFile(entry.note, entry.depth)
               if (entry.kind === 'more') {
                 const limit = folderNoteLimits[entry.folder] ?? 60
-                return <button type="button" className="folder-more-notes" style={{ paddingLeft: `${18 + entry.depth * 10}px` }} onClick={() => setFolderNoteLimits(current => ({ ...current, [entry.folder]: limit + 60 }))}>{renderFolderBranchGuides(folderGuidesForEntry(entry.folder))}Pokaż kolejne notatki · pozostało {entry.remaining}</button>
+                return <button type="button" className="folder-more-notes" style={{ paddingLeft: `${18 + entry.depth * FOLDER_TREE_INDENT}px` }} onClick={() => setFolderNoteLimits(current => ({ ...current, [entry.folder]: limit + 60 }))}>{renderFolderBranchGuides(folderGuidesForEntry(entry.folder))}Pokaż kolejne notatki · pozostało {entry.remaining}</button>
               }
               const folder = entry.path
               const label = folder.split('/').at(-1) ?? folder
@@ -3918,9 +3953,9 @@ function App() {
               const collapsed = collapsedFolders.has(folder)
               return <div className="folder-tree-node" data-drop-folder={folder}>
                 {renderFolderBranchGuides(folderGuidesForEntry(folder, false))}
-                <div className={`folder-drop-row ${activeFilter === folder ? 'active' : ''} ${color ? 'has-entry-color' : ''}`} style={{ paddingLeft: `${6 + entry.depth * 10}px`, ...(entryColorStyle(color) ?? {}) }} data-drop-folder={folder}>
+                <div className={`folder-drop-row ${activeFilter === folder ? 'active' : ''} ${color ? 'has-entry-color' : ''}`} style={{ paddingLeft: `${6 + entry.depth * FOLDER_TREE_INDENT}px`, ...(entryColorStyle(color) ?? {}) }} data-drop-folder={folder} onContextMenu={event => handleEntryContextMenu(event, target)}>
                   <button type="button" className="folder-collapse-button" onClick={event => { event.stopPropagation(); toggleFolderExpansion(folder) }} aria-label={collapsed ? `Rozwiń zawartość folderu ${folder}` : `Zwiń zawartość folderu ${folder}`} aria-expanded={!collapsed} title={collapsed ? 'Rozwiń folder' : 'Zwiń folder'}>{collapsed ? <ChevronRight size={14} /> : <ChevronDown size={14} />}</button>
-                  <button className={`nav-item folder-item ${activeFilter === folder && !showingWorkspacePage ? 'active' : ''} ${color ? 'has-entry-color' : ''}`} style={entryColorStyle(color)} onPointerDown={event => startEntryPointerDrag(event, target, label)} onClick={() => { if (ignoreClickAfterDrag()) return; setActiveReviewSessionId(''); setActiveFilter(folder); setMobileDrawer('none'); toggleFolderExpansion(folder) }} aria-expanded={!collapsed} title={`Kliknij, aby ${collapsed ? 'rozwinąć' : 'zwinąć'} folder „${label}”. Przeciągnij, aby go przenieść.`}><Folder size={16} /><span>{label}</span><span className="nav-count">{count}</span></button>
+                  <button className={`nav-item folder-item ${activeFilter === folder && !showingWorkspacePage ? 'active' : ''} ${color ? 'has-entry-color' : ''}`} style={entryColorStyle(color)} onKeyDown={event => handleEntryMenuKeyDown(event, target)} onPointerDown={event => startEntryPointerDrag(event, target, label)} onClick={() => { if (ignoreClickAfterDrag()) return; setActiveReviewSessionId(''); setActiveFilter(folder); setMobileDrawer('none'); toggleFolderExpansion(folder) }} aria-expanded={!collapsed} title={`Kliknij, aby ${collapsed ? 'rozwinąć' : 'zwinąć'} folder „${label}”. Przeciągnij, aby go przenieść.`}><Folder size={16} /><span>{label}</span><span className="nav-count">{count}</span></button>
                   {renderEntryMenu(target, siblings)}
                 </div>
               </div>
@@ -4020,7 +4055,7 @@ function App() {
         ) : showCreateNotePage ? (
           <CreateNotePage templates={templates} folders={folders} initialFolder={createNoteInitialFolder} folderTemplateDefaults={organizationSettings.folderTemplateDefaults} onSetFolderTemplateDefault={setFolderTemplateDefault} notes={notes} assets={assets} onCreate={(template, folder) => createNote(template, folder)} onClose={() => setShowCreateNotePage(false)} />
         ) : showingAllNotesPage ? (
-          <AllNotesPage key={`${allNotesPreset}:${allNotesPresetRevision}`} preset={allNotesPreset} folder={searchFolder || allNotesFolderPreset} onFolderChange={value => { setSearchFolder(value); setAllNotesFolderPreset(value) }} query={query} onQueryChange={value => { setQuery(value); setQuickSearchActiveIndex(0) }} tag={searchTag} onTagChange={setSearchTag} semanticSearchEnabled={semanticSearchEnabled && featureFlags.semanticSearch} onSemanticSearchChange={featureFlags.semanticSearch ? value => { setSemanticSearchEnabled(value); localStorage.setItem('no-tie-semantic-search', String(value)) } : undefined} semanticScores={semanticScores} semanticSearchBusy={semanticSearchBusy} semanticSearchError={semanticSearchError} searchIndexProgress={searchIndexProgress} onQuickSearch={() => { setQuickSearchActiveIndex(0); setShowQuickSearch(true) }} bulkActionsEnabled={featureFlags.bulkActions} bulkSelectMode={featureFlags.bulkActions && bulkSelectMode} onToggleBulkSelect={() => { setBulkSelectMode(value => !value); setBulkSelectedIds([]) }} bulkSelectedIds={bulkSelectedIds} onBulkSelectedIdsChange={setBulkSelectedIds} bulkTargetFolder={bulkTargetFolder} onBulkTargetFolderChange={setBulkTargetFolder} bulkTagDraft={bulkTagDraft} onBulkTagDraftChange={setBulkTagDraft} onMoveSelected={moveSelectedNotesBulk} onApplySelectedTag={applyBulkTag} onDeleteSelected={() => void deleteSelectedNotesBulk()} foldersForBulk={folders} noteOrder={organizationSettings.noteOrder} onReorder={reorderNotes} notes={notes} attachments={attachments} searchAttachments={searchableAttachments} contentByNote={searchContentByNote.size ? searchContentByNote : noteBodies} normalizedContentByNote={searchNormalizedContentByNote} onVisibleNotes={visible => { void ensureNoteBodies(visible.map(note => note.id)).catch(reportDiskSaveError) }} advancedSearch={featureFlags.advancedQuery} getNoteColor={noteDisplayColor} onOpen={openLinkedNote} />
+          <AllNotesPage key={`${allNotesPreset}:${allNotesPresetRevision}`} preset={allNotesPreset} folder={searchFolder || allNotesFolderPreset} onFolderChange={value => { setSearchFolder(value); setAllNotesFolderPreset(value) }} query={query} onQueryChange={value => { setQuery(value); setQuickSearchActiveIndex(0) }} tag={searchTag} onTagChange={setSearchTag} semanticSearchEnabled={semanticSearchEnabled && featureFlags.semanticSearch} onSemanticSearchChange={featureFlags.semanticSearch ? value => { setSemanticSearchEnabled(value); localStorage.setItem('no-tie-semantic-search', String(value)) } : undefined} semanticScores={semanticScores} semanticSearchBusy={semanticSearchBusy} semanticSearchError={semanticSearchError} searchIndexProgress={searchIndexProgress} onQuickSearch={() => { setQuickSearchActiveIndex(0); setShowQuickSearch(true) }} bulkActionsEnabled={featureFlags.bulkActions} bulkSelectMode={featureFlags.bulkActions && bulkSelectMode} onToggleBulkSelect={() => { setBulkSelectMode(value => !value); setBulkSelectedIds([]) }} bulkSelectedIds={bulkSelectedIds} onBulkSelectedIdsChange={setBulkSelectedIds} bulkTargetFolder={bulkTargetFolder} onBulkTargetFolderChange={setBulkTargetFolder} bulkTagDraft={bulkTagDraft} onBulkTagDraftChange={setBulkTagDraft} onMoveSelected={moveSelectedNotesBulk} onApplySelectedTag={applyBulkTag} onDeleteSelected={() => void deleteSelectedNotesBulk()} foldersForBulk={folders} noteOrder={organizationSettings.noteOrder} onReorder={reorderNotes} notes={notes} attachments={attachments} searchAttachments={searchableAttachments} contentByNote={searchContentByNote.size ? searchContentByNote : noteBodies} normalizedContentByNote={searchNormalizedContentByNote} onVisibleNotes={visible => { void ensureNoteBodies(visible.map(note => note.id)).catch(reportDiskSaveError) }} advancedSearch={featureFlags.advancedQuery} getNoteColor={noteDisplayColor} noteColors={noteColorsById} colorOptions={entryColors} onOpen={openLinkedNote} />
         ) : showingFlashcardsPage ? (
           <FlashcardsPage cards={flashcards} notes={notes} attachments={attachments} trash={flashcardTrash} aiTaskNotices={flashcardAiTasks} onBeginAiTask={beginFlashcardAiTask} onFinishAiTask={finishFlashcardAiTask} onCreate={createFlashcard} onUpdate={updateFlashcard} onReview={rateFlashcard} onSetDueAt={setFlashcardDueAt} onToggleSuspend={toggleFlashcardSuspended} onDelete={trashFlashcard} onRestoreTrash={restoreFlashcardTrash} onPurgeTrash={id => setFlashcardTrash(current => current.filter(entry => entry.id !== id))} onRegenerate={regenerateFlashcard} onFindSimilar={findSimilarFlashcards} onAiAssist={assistFlashcards} onOpenNote={noteId => { setActiveReviewSessionId(''); openLinkedNote(noteId) }} />
         ) : showingReviewSessionsOverview ? (

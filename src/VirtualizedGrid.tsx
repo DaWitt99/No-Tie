@@ -1,22 +1,26 @@
 import { useEffect, useLayoutEffect, useRef, useState, type ReactNode } from 'react'
 
 const CARD_MIN_WIDTH = 250
+const PREFERRED_CARD_MIN_WIDTH = 190
 const COLUMN_GAP = 12
 const ROW_HEIGHT = 222
 
-export function VirtualizedGrid<T>({ items, className, keyOf, renderItem, onItemsRendered, overscan = 2 }: {
+export function VirtualizedGrid<T>({ items, className, keyOf, renderItem, onItemsRendered, preferredColumns, overscan = 2 }: {
   items: T[]
   className: string
   keyOf: (item: T, index: number) => string
   renderItem: (item: T, index: number) => ReactNode
   onItemsRendered?: (start: number, end: number) => void
+  preferredColumns?: number
   overscan?: number
 }) {
   const container = useRef<HTMLDivElement>(null)
   const callback = useRef(onItemsRendered)
   const frame = useRef(0)
   const [viewport, setViewport] = useState({ width: 0, height: 0, top: 0 })
-  const columns = Math.max(1, Math.floor((viewport.width + COLUMN_GAP) / (CARD_MIN_WIDTH + COLUMN_GAP)))
+  const automaticColumns = Math.max(1, Math.floor((viewport.width + COLUMN_GAP) / (CARD_MIN_WIDTH + COLUMN_GAP)))
+  const preferredAvailableColumns = Math.max(1, Math.floor((viewport.width + COLUMN_GAP) / (PREFERRED_CARD_MIN_WIDTH + COLUMN_GAP)))
+  const columns = preferredColumns ? Math.max(1, Math.min(4, preferredAvailableColumns, Math.round(preferredColumns))) : automaticColumns
   const totalRows = Math.ceil(items.length / columns)
   const firstRow = Math.max(0, Math.floor(viewport.top / ROW_HEIGHT) - overscan)
   const visibleRows = Math.max(1, Math.ceil(viewport.height / ROW_HEIGHT) + overscan * 2)
