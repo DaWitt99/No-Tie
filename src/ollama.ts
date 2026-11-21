@@ -27,10 +27,15 @@ export async function transcribeLocalAudio(endpoint: string, fileName: string, m
   return result
 }
 
-export async function embedOllamaTexts(baseUrl: string, model: string, input: string[]): Promise<number[][]> {
+export async function embedOllamaTexts(baseUrl: string, model: string, input: string[], signal?: AbortSignal): Promise<number[][]> {
   if (!model.trim()) throw new Error('Wybierz model embeddingów Ollama.')
+  if (signal?.aborted) throw new DOMException('Operację anulowano.', 'AbortError')
   if (isTauri()) {
-    try { return await invoke<number[][]>('ollama_embed', { baseUrl, model, input }) }
+    try {
+      const vectors = await invoke<number[][]>('ollama_embed', { baseUrl, model, input })
+      if (signal?.aborted) throw new DOMException('Operację anulowano.', 'AbortError')
+      return vectors
+    }
     catch (error) {
       if (error instanceof Error) throw error
       if (typeof error === 'string' && error.trim()) throw new Error(error)
@@ -42,7 +47,7 @@ export async function embedOllamaTexts(baseUrl: string, model: string, input: st
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ model, input }),
-      signal: AbortSignal.timeout(120_000),
+      signal: signal ? AbortSignal.any([signal, AbortSignal.timeout(120_000)]) : AbortSignal.timeout(120_000),
     })
     const result = await readJson<{ embeddings?: number[][] }>(response)
     if (!Array.isArray(result.embeddings)) throw new Error('Model nie zwrócił wektorów semantycznych.')

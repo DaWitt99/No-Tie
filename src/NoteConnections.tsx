@@ -1,18 +1,22 @@
+import { useMemo, useState } from 'react'
 import { ArrowDownLeft, ArrowUpRight, Network } from 'lucide-react'
 import { backlinksFor, resolveWikiTarget, wikiTargets } from './knowledge'
 import type { Note } from './types'
 
-export function NoteConnections({ note, notes, onOpen, onShowGraph }: {
+export function NoteConnections({ note, notes, onOpen, onShowGraph, onExpandedChange }: {
   note: Note
   notes: Note[]
   onOpen: (note: Note) => void
   onShowGraph: () => void
+  onExpandedChange: (expanded: boolean) => void
 }) {
-  const outgoing = [...new Set(wikiTargets(note.content))].map(target => ({ target, note: resolveWikiTarget(notes, target) }))
-  const incoming = backlinksFor(notes, note)
+  const [expanded, setExpanded] = useState(false)
+  const outgoing = useMemo(() => expanded ? [...new Set(wikiTargets(note.content))].map(target => ({ target, note: resolveWikiTarget(notes, target) })) : [], [expanded, note.content, notes])
+  const incoming = useMemo(() => expanded ? backlinksFor(notes, note) : [], [expanded, notes, note.id])
+  const connectionLabel = expanded ? incoming.length + outgoing.length ? `${incoming.length} przychodzących · ${outgoing.length} wychodzących` : 'Notatka bez połączeń' : 'Rozwiń, aby sprawdzić'
   return <div className="note-connections-wrap">
-    <details className="note-connections">
-      <summary><Network size={15} /><span>Powiązania</span><small>{incoming.length + outgoing.length ? `${incoming.length} przychodzących · ${outgoing.length} wychodzących` : 'Notatka bez połączeń'}</small></summary>
+    <details className="note-connections" onToggle={event => { const isExpanded = event.currentTarget.open; setExpanded(isExpanded); onExpandedChange(isExpanded) }}>
+      <summary><Network size={15} /><span>Powiązania</span><small>{connectionLabel}</small></summary>
       <div className="note-connections-content">
         <section><h3><ArrowDownLeft size={14} />Linkują do tej notatki</h3>{incoming.length ? incoming.map(item => <button key={item.id} onClick={() => onOpen(item)}>{item.title || 'Bez tytułu'}</button>) : <p>Brak odsyłaczy zwrotnych.</p>}</section>
         <section><h3><ArrowUpRight size={14} />Linki z tej notatki</h3>{outgoing.length ? outgoing.map((item, index) => item.note

@@ -5,28 +5,100 @@ export type NoteSearchFilters = {
   tag?: string
   folder?: string
   attachments?: NoteAttachment[]
+  contentByNote?: ReadonlyMap<string, string>
+  normalizedContentByNote?: ReadonlyMap<string, string>
   advanced?: boolean
+  sortByUpdated?: boolean
 }
+
+type SearchGroup = { fields: Record<string, string[]>; terms: { value: string; negative: boolean }[] }
+type AttachmentIndex = { content: Map<string, string>; byNote: Map<string, NoteAttachment[]> }
+type IndexedNote = {
+  title?: string
+  content?: string
+  folder?: string
+  tags?: string[]
+  aliases?: string
+  created?: string
+  updated?: string
+  attachmentContent: WeakMap<NoteAttachment[], string>
+  externalRawContent?: string
+  normalizedExternalContent?: string
+  combinedSourceBody?: string
+  combinedAttachmentContent?: string
+  combinedContent?: string
+}
+
+const EMPTY_ATTACHMENTS: NoteAttachment[] = []
+const noteIndexes = new WeakMap<Note, IndexedNote>()
+const attachmentIndexes = new WeakMap<NoteAttachment[], AttachmentIndex>()
+const queryIndexes = new Map<string, SearchGroup[]>()
+const MAX_QUERY_CACHE = 128
 
 function normalize(value: string) {
   return value.normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLocaleLowerCase('pl').trim()
 }
 
-export function searchNotes(notes: Note[], { query, tag = '', folder = '', attachments = [], advanced = true }: NoteSearchFilters): Note[] {
-  const tagNeedle = normalize(tag)
-  const folderNeedle = normalize(folder)
-  const attachmentByNote = new Map<string, NoteAttachment[]>()
+export function normalizeSearchText(value: string) {
+  return normalize(value)
+}
+
+function getNoteIndex(note: Note): IndexedNote {
+  const cached = noteIndexes.get(note)
+  if (cached) return cached
+  const index: IndexedNote = {
+    attachmentContent: new WeakMap(),
+  }
+  noteIndexes.set(note, index)
+  return index
+}
+
+function getTitle(note: Note, index: IndexedNote) { return index.title ??= normalize(note.title) }
+function getContent(note: Note, index: IndexedNote, contentByNote?: ReadonlyMap<string, string>, normalizedContentByNote?: ReadonlyMap<string, string>) {
+  const externalContent = contentByNote?.get(note.id)
+  if (externalContent === undefined) return index.content ??= normalize(note.content)
+  const normalizedExternal = normalizedContentByNote?.get(note.id)
+  if (index.externalRawContent !== externalContent || (normalizedExternal !== undefined && index.normalizedExternalContent !== normalizedExternal)) {
+    index.externalRawContent = externalContent
+    index.normalizedExternalContent = normalizedExternal ?? normalize(externalContent)
+  }
+  return index.normalizedExternalContent ?? ''
+}
+function getFolder(note: Note, index: IndexedNote) { return index.folder ??= normalize(note.folder) }
+function getTags(note: Note, index: IndexedNote) { return index.tags ??= note.tags.map(normalize) }
+function getAliases(note: Note, index: IndexedNote) { return index.aliases ??= normalize(note.aliases?.join(' ') ?? '') }
+function getCreated(note: Note, index: IndexedNote) { return index.created ??= new Date(note.createdAt).toISOString().slice(0, 10) }
+function getUpdated(note: Note, index: IndexedNote) { return index.updated ??= new Date(note.updatedAt).toISOString().slice(0, 10) }
+
+function getAttachmentIndex(attachments: NoteAttachment[]): AttachmentIndex {
+  const cached = attachmentIndexes.get(attachments)
+  if (cached) return cached
+  const grouped = new Map<string, NoteAttachment[]>()
   for (const attachment of attachments) {
-    const grouped = attachmentByNote.get(attachment.noteId)
-    if (grouped) grouped.push(attachment)
-    else attachmentByNote.set(attachment.noteId, [attachment])
+    const values = grouped.get(attachment.noteId) ?? []
+    values.push(attachment)
+    grouped.set(attachment.noteId, values)
+  }
+  const content = new Map([...grouped].map(([noteId, values]) => [noteId, values.map(attachment => `${attachment.fileName} ${attachment.author ?? ''} ${attachment.documentDate ?? ''} ${attachment.description ?? ''} ${attachment.transcript ?? ''} ${attachment.extractedText ?? ''}`).join(' ')]))
+  const index = { content, byNote: grouped }
+  attachmentIndexes.set(attachments, index)
+  return index
+}
+
+function getSearchGroups(query: string, advanced: boolean): SearchGroup[] {
+  const key = `${advanced ? '1' : '0'}\u0000${query}`
+  const cached = queryIndexes.get(key)
+  if (cached) {
+    queryIndexes.delete(key)
+    queryIndexes.set(key, cached)
+    return cached
   }
   const groups = (advanced ? query.split(/\s+OR\s+/i) : [query]).map(rawGroup => {
     const fields: Record<string, string[]> = {}
     const operator = advanced ? /(^|\s)(tag|folder|title|content|created|updated|after|before|has|is):(?:"([^"]*)"|'([^']*)'|(\S+))/gi : /(?!)/g
     const queryWithoutOperators = rawGroup.replace(operator, (_match, separator: string) => separator)
     for (const match of advanced ? rawGroup.matchAll(operator) : []) {
-      const field = match[2].toLowerCase()
+      const field = match[2]!.toLowerCase()
       const value = normalize(match[3] ?? match[4] ?? match[5] ?? '')
       if (value) (fields[field] ??= []).push(value)
     }
@@ -41,42 +113,79 @@ export function searchNotes(notes: Note[], { query, tag = '', folder = '', attac
     }
     return { fields, terms }
   }).filter(group => Object.keys(group.fields).length || group.terms.length)
+
+  queryIndexes.set(key, groups)
+  if (queryIndexes.size > MAX_QUERY_CACHE) queryIndexes.delete(queryIndexes.keys().next().value!)
+  return groups
+}
+
+export function searchQueryNeedsContent(query: string, advanced = true): boolean {
+  return getSearchGroups(query, advanced).some(group => group.terms.length > 0 || Boolean(group.fields.content?.length))
+}
+
+export function searchNotes(notes: Note[], { query, tag = '', folder = '', attachments = EMPTY_ATTACHMENTS, contentByNote, normalizedContentByNote, advanced = true, sortByUpdated = true }: NoteSearchFilters): Note[] {
+  const tagNeedle = normalize(tag)
+  const folderNeedle = normalize(folder)
+  const groups = getSearchGroups(query, advanced)
   const needsTerms = groups.some(group => group.terms.length > 0)
-  const needsTitle = groups.some(group => Boolean(group.fields.title?.length))
   const needsContent = needsTerms || groups.some(group => Boolean(group.fields.content?.length))
-  const needsFolder = Boolean(folderNeedle) || groups.some(group => Boolean(group.fields.folder?.length))
-  const needsTags = Boolean(tagNeedle) || groups.some(group => Boolean(group.fields.tag?.length))
-  if (!groups.length && !tagNeedle && !folderNeedle) return [...notes].sort((a, b) => b.updatedAt - a.updatedAt)
-  return notes.filter(note => {
-    const title = needsTitle ? normalize(note.title) : ''
-    const noteAttachments = attachmentByNote.get(note.id) ?? []
-    const content = needsContent ? normalize(`${note.content} ${noteAttachments.map(attachment => `${attachment.fileName} ${attachment.author ?? ''} ${attachment.documentDate ?? ''} ${attachment.description ?? ''} ${attachment.transcript ?? ''} ${attachment.extractedText ?? ''}`).join(' ')}`) : ''
-    const noteFolder = needsFolder ? normalize(note.folder) : ''
-    const tags = needsTags ? note.tags.map(normalize) : []
-    if (tagNeedle && !tags.some(value => value === tagNeedle)) return false
+  const attachmentIndex = needsContent || groups.some(group => Boolean(group.fields.has?.length)) ? getAttachmentIndex(attachments) : undefined
+
+  if (!groups.length && !tagNeedle && !folderNeedle) return sortByUpdated ? [...notes].sort((a, b) => b.updatedAt - a.updatedAt) : [...notes]
+  const results = notes.filter(note => {
+    const index = getNoteIndex(note)
+    if (tagNeedle && !getTags(note, index).some(value => value === tagNeedle)) return false
     if (folderNeedle === '__root__' && note.folder) return false
-    if (folderNeedle && folderNeedle !== '__root__' && noteFolder !== folderNeedle && !noteFolder.startsWith(`${folderNeedle}/`)) return false
-    const searchable = needsTerms ? normalize(`${note.title} ${note.aliases?.join(' ') ?? ''} ${note.content} ${note.folder} ${note.tags.join(' ')}`) : ''
-    const matchesGroup = ({ fields, terms }: typeof groups[number]) => {
-      if (!(fields.tag ?? []).every(needle => tags.some(value => value.includes(needle)))) return false
-      if (!(fields.folder ?? []).every(needle => noteFolder.includes(needle))) return false
-      if (!(fields.title ?? []).every(needle => title.includes(needle))) return false
+    if (folderNeedle && folderNeedle !== '__root__') {
+      const noteFolder = getFolder(note, index)
+      if (noteFolder !== folderNeedle && !noteFolder.startsWith(`${folderNeedle}/`)) return false
+    }
+
+    let content = ''
+    const noteContent = getContent(note, index, contentByNote, normalizedContentByNote)
+    if (needsContent && attachmentIndex) {
+      const attachmentText = attachmentIndex.content.get(note.id) ?? ''
+      let combined: string | undefined
+      if (contentByNote) {
+        if (index.combinedSourceBody !== noteContent || index.combinedAttachmentContent !== attachmentText) {
+          index.combinedSourceBody = noteContent
+          index.combinedAttachmentContent = attachmentText
+          index.combinedContent = normalize(`${noteContent} ${attachmentText}`)
+        }
+        combined = index.combinedContent
+      } else {
+        combined = index.attachmentContent.get(attachments)
+        if (combined === undefined) {
+          combined = normalize(`${noteContent} ${attachmentText}`)
+          index.attachmentContent.set(attachments, combined)
+        }
+      }
+      content = combined ?? ''
+    } else if (needsContent) content = noteContent
+    const hasTerm = (value: string) => getTitle(note, index).includes(value)
+      || getAliases(note, index).includes(value)
+      || (needsContent ? content : noteContent).includes(value)
+      || getFolder(note, index).includes(value)
+      || getTags(note, index).some(tagValue => tagValue.includes(value))
+    const matchesGroup = ({ fields, terms }: SearchGroup) => {
+      if (!(fields.tag ?? []).every(needle => getTags(note, index).some(value => value.includes(needle)))) return false
+      if (!(fields.folder ?? []).every(needle => getFolder(note, index).includes(needle))) return false
+      if (!(fields.title ?? []).every(needle => getTitle(note, index).includes(needle))) return false
       if (!(fields.content ?? []).every(needle => content.includes(needle))) return false
-      const created = new Date(note.createdAt).toISOString().slice(0, 10)
-      const updated = new Date(note.updatedAt).toISOString().slice(0, 10)
-      const validDate = (date: string) => /^\d{4}-\d{2}-\d{2}$/.test(date) && Number.isFinite(Date.parse(`${date}T00:00:00`))
-      if ([...(fields.created ?? []), ...(fields.updated ?? []), ...(fields.after ?? []), ...(fields.before ?? [])].some(date => !validDate(date))) return false
-      if (!(fields.created ?? []).every(date => created === date)) return false
-      if (!(fields.updated ?? []).every(date => updated === date)) return false
+      if ([...(fields.created ?? []), ...(fields.updated ?? []), ...(fields.after ?? []), ...(fields.before ?? [])].some(date => !/^\d{4}-\d{2}-\d{2}$/.test(date) || !Number.isFinite(Date.parse(`${date}T00:00:00`)))) return false
+      if (!(fields.created ?? []).every(date => getCreated(note, index) === date)) return false
+      if (!(fields.updated ?? []).every(date => getUpdated(note, index) === date)) return false
       if (!(fields.after ?? []).every(date => note.updatedAt >= new Date(`${date}T00:00:00`).getTime())) return false
       if (!(fields.before ?? []).every(date => note.updatedAt < new Date(`${date}T00:00:00`).getTime())) return false
       if (!(fields.is ?? []).every(value => value === 'favorite' && note.favorite)) return false
+      const noteAttachments = attachmentIndex?.byNote.get(note.id) ?? []
       if (!(fields.has ?? []).every(value => noteAttachments.some(attachment => value === 'attachment'
         || value === 'pdf' && attachment.mimeType === 'application/pdf'
         || value === 'image' && attachment.mimeType.startsWith('image/')
         || value === 'audio' && attachment.mimeType.startsWith('audio/')))) return false
-      return terms.every(term => term.negative ? !searchable.includes(term.value) && !content.includes(term.value) : searchable.includes(term.value) || content.includes(term.value))
+      return terms.every(term => term.negative ? !hasTerm(term.value) : hasTerm(term.value))
     }
     return !groups.length || groups.some(matchesGroup)
-  }).sort((a, b) => b.updatedAt - a.updatedAt)
+  })
+  return sortByUpdated ? results.sort((a, b) => b.updatedAt - a.updatedAt) : results
 }

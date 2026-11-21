@@ -1,56 +1,38 @@
-import { lazy, Suspense, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
+import { lazy, Suspense, useCallback, useDeferredValue, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
+import { createPortal } from 'react-dom'
 import type { CSSProperties } from 'react'
 import {
-  Archive, ArrowLeft, ArrowRight, BarChart3, Bell, BookOpen, BookmarkPlus, Brain, CalendarDays, Check, CheckSquare2, ChevronDown, ChevronUp, Clock3, Code2, Columns3, Command, Copy, Eye, FilePlus2, FileText, Folder, FolderHeart, Heart, History, Import, LayoutTemplate,
-  CircleHelp, LockKeyhole, LoaderCircle, Menu, MessageCircle, MoreVertical, Network, Paperclip, Palette, PanelLeft, Pencil, Plus, Puzzle, Repeat2, Search, Settings2, SlidersHorizontal, Sparkles, Star, Tag, ThumbsDown, ThumbsUp, Trash2, X,
+  Archive, ArrowLeft, ArrowRight, BarChart3, Bell, BookOpen, BookmarkPlus, Brain, CalendarDays, Check, CheckSquare2, ChevronDown, ChevronRight, ChevronUp, Clock3, Code2, Columns3, Command, Copy, Eye, FilePlus2, FileText, Folder, FolderHeart, Heart, History, Import, LayoutTemplate,
+  CircleHelp, Link2, LockKeyhole, LoaderCircle, Menu, MessageCircle, MoreVertical, Network, Paperclip, Palette, PanelLeft, Pencil, Plus, Puzzle, Repeat2, Search, Settings2, Sparkles, Star, Tag, ThumbsDown, ThumbsUp, Trash2, X,
 } from 'lucide-react'
-import { buildArchive, exportArchiveToFolder, exportObsidianVaultToFolder, parseArchive } from './archive'
 import type { ArchiveTransferProgress, ParsedArchive } from './archive'
 import { markdownToNote, starterAssets, starterNotes } from './content'
-import { NoteHistoryDialog } from './NoteHistoryDialog'
-import { NoteLinkDialog } from './NoteLinkDialog'
-import { NoteSearchDialog } from './NoteSearchDialog'
-import { NoteConnections } from './NoteConnections'
-import { KnowledgeGraphDialog } from './KnowledgeGraphDialog'
-import { DailyNotesDialog } from './DailyNotesDialog'
-import { NoteAttachmentsPanel } from './NoteAttachmentsPanel'
-import { AttachmentPreviewDialog } from './AttachmentPreviewDialog'
-import { HelpDialog } from './HelpDialog'
-import { BackupTrashDialog } from './BackupTrashDialog'
+import { AppLockDialog } from './AppLockDialog'
 import type { AllNotesPreset } from './AllNotesPage'
 import type { NoteWorkflowStatus } from './NoteBoardDialog'
 import type { FlashcardAiAction, FlashcardAiTaskNotice } from './FlashcardsPage'
-import { SelectedTextFlashcardDialog } from './SelectedTextFlashcardDialog'
-import { CommandPaletteDialog, type PaletteCommand } from './CommandPaletteDialog'
-import { WorkspaceLayoutsDialog } from './WorkspaceLayoutsDialog'
-import { AiSelectionEditDialog } from './AiSelectionEditDialog'
-import { FeatureManagerDialog } from './FeatureManagerDialog'
-import { AppLockDialog } from './AppLockDialog'
-import { DuplicateManagerDialog } from './DuplicateManagerDialog'
-import { NoteReminderDialog } from './NoteReminderDialog'
-import { AiNoteToolsDialog, type AiNoteTool } from './AiNoteToolsDialog'
-import { AiWorkspaceDialog } from './AiWorkspaceDialog'
-import { AiTaskQueueDialog, type AiTaskQueueItem } from './AiTaskQueueDialog'
-import { NotePropertiesEditor } from './NotePropertiesEditor'
-import { MarkdownSourceEditor } from './MarkdownSourceEditor'
-import { searchNotes } from './noteSearch'
+import type { AiNoteTool } from './AiNoteToolsDialog'
+import type { AiTaskQueueItem } from './AiTaskQueueDialog'
+import type { PaletteCommand } from './CommandPaletteDialog'
+import { normalizeSearchText, searchNotes, searchQueryNeedsContent } from './noteSearch'
 import { nextTaskDate, parseTasks, updateTaskLine, type ParsedTask, type TaskPatch } from './knowledge'
-import { resolveWikiTarget } from './knowledge'
+import { resolveWikiTarget, wikiTargets } from './knowledge'
 import { embedOllamaTexts, imageAttachmentToPngBase64, listOllamaModels, streamOllamaMessageWithFallback, transcribeLocalAudio, type OllamaModel } from './ollama'
-import { ReviewSessionDialog } from './ReviewSessionDialog'
 import { checkpointReviewSession } from './reviews'
-import { archiveAttachment, deleteAutoBackup, getAssets, getAttachmentHistory, getAttachments, getAutoBackups, getFlashcards, getFlashcardTrash, getFolderColors, getFolders, getNoteTemplates, getNoteVersions, getNotes, getOrganizationSettings, getReviewSessions, getSavedSearches, getTrashEntries, hasInitialized, markInitialized, readAutoBackup, removeAssetsForNote, removeAttachmentsForNote, removeAttachment, removeFolderFromDisk, removeNote, restoreArchivedAttachment, saveArchivedAttachment, saveAsset, saveAttachment, saveAttachmentMetadata, saveAttachmentTranscript as persistAttachmentTranscript, saveAutoBackup, saveFlashcardsAndTrash, saveFolderColors, saveFolders, saveNote, saveNoteTemplates, saveNoteVersion, saveNoteVersions, saveOrganizationSettings, saveReviewSessions, saveSavedSearches, saveTrashEntries, storageLocationLabel, usesNativeFiles } from './storage'
+import { archiveAttachment, deleteAutoBackup, getAssets, getAttachmentHistory, getAttachments, getAutoBackups, getFlashcards, getFlashcardTrash, getFolderColors, getFolders, getNoteHeaders, getNoteTemplates, getNoteVersions, getNotes, getOrganizationSettings, getReviewSessions, getSavedSearches, getTrashEntries, hasInitialized, loadNoteContent, markInitialized, readAutoBackup, removeAssetsForNote, removeAttachmentsForNote, removeAttachment, removeFolderFromDisk, removeNote, restoreArchivedAttachment, saveArchivedAttachment, saveAsset, saveAttachment, saveAttachmentMetadata, saveAttachmentTranscript as persistAttachmentTranscript, saveAutoBackup, saveFlashcardsAndTrash, saveFolderColors, saveFolders, saveNote, saveNoteTemplates, saveNoteVersion, saveNoteVersions, saveOrganizationSettings, saveReviewSessions, saveSavedSearches, saveTrashEntries, storageLocationLabel } from './storage'
 import type { AutoBackupInfo } from './storage'
 import { DEFAULT_AI_PREFERENCES, type AiDiagnostic, type AiOutputRating, type AiPreferences, type AiTaskType, type Flashcard, type FlashcardImageOcclusion, type FlashcardKind, type FlashcardTrashEntry, type Note, type NoteAsset, type NoteAttachment, type NoteAttachmentHistory, type NoteAttachmentReference, type NoteTemplate, type NoteVersion, type OrganizationSettings, type ReviewSession, type SavedSearch, type SavedWorkspaceLayout, type TrashEntry } from './types'
 import { readFeatureFlags, type FeatureFlags, type FeatureId } from './features'
 import { dispatchAiReplaceSelection, dispatchWikiEmbedInsert, dispatchWikiLinkInsert, replaceWikiLinkTarget } from './wikiLinks'
 import { fileFingerprint } from './fileFingerprint'
 import { reviewFlashcard, type FlashcardGrade, type FlashcardReviewMeta } from './flashcards'
+import { VirtualizedList } from './VirtualizedList'
 import './App.css'
 
 type Filter = 'all' | 'favorites' | string
-type NoteDisplayMode = 'full' | 'names-tags' | 'names'
 type EntryTarget = { kind: 'folder'; path: string } | { kind: 'note'; id: string }
+type EntryContextMenu = { key: string; x: number; y: number }
+type FolderPanelEntry = { kind: 'folder'; path: string; depth: number } | { kind: 'note'; note: Note; depth: number } | { kind: 'more'; folder: string; depth: number; remaining: number }
 
 function errorMessage(error: unknown, fallback: string): string {
   if (error instanceof Error && error.message) return error.message
@@ -87,6 +69,9 @@ type FlashcardGenerationScope = { kind: 'selection'; noteId: string; text: strin
 type NoteRecoveryDraft = { note: Note; capturedAt: number }
 type ArchiveTaskState = { id: number; action: 'import' | 'export'; title: string; phase: string; percent: number; completed: number; total: number; current: string; counterLabel: string; expanded: boolean; state: 'running' | 'done' | 'error'; detail: string }
 type ArchiveApplyProgress = { phase: string; completed: number; total: number; current: string }
+type SemanticDocumentCacheEntry = { model: string; title: string; folder: string; content: string; tags: string[]; attachments: NoteAttachment[]; text: string; vector?: number[] }
+const EMPTY_NOTE_ASSETS: NoteAsset[] = []
+const EMPTY_NOTE_ATTACHMENTS: NoteAttachment[] = []
 
 const REVIEW_SESSIONS_OVERVIEW_ID = '__no_tie_review_sessions_overview__'
 const SAVED_SEARCHES_PAGE_ID = '__no_tie_saved_searches_page__'
@@ -101,12 +86,27 @@ const LINK_AUDIT_PAGE_ID = '__no_tie_link_audit_page__'
 const COLLECTIONS_PAGE_ID = '__no_tie_collections_page__'
 const MAX_NOTE_GRID_SIZE = 4
 const NOTE_RECOVERY_DRAFT_KEY = 'no-tie-recovery-draft'
+const FOLDER_PANEL_WIDTH_KEY = 'no-tie-folders-panel-width'
+const DEFAULT_FOLDER_PANEL_WIDTH = 236
+const MIN_FOLDER_PANEL_WIDTH = 160
+const MAX_FOLDER_PANEL_WIDTH = 460
+const FOLDER_TREE_INDENT = 14
+
+function clampFolderPanelWidth(width: number, maxWidth = MAX_FOLDER_PANEL_WIDTH) {
+  return Math.max(MIN_FOLDER_PANEL_WIDTH, Math.min(maxWidth, Math.round(width)))
+}
+
+function initialFolderPanelWidthMax() {
+  if (window.innerWidth <= 700) return Math.min(MAX_FOLDER_PANEL_WIDTH, window.innerWidth * .88)
+  if (window.innerWidth <= 1024) return Math.min(MAX_FOLDER_PANEL_WIDTH, 380, window.innerWidth * .86)
+  return MAX_FOLDER_PANEL_WIDTH
+}
 
 type NavigationSnapshot = {
   selectedId: string; activeFilter: Filter; activeReviewSessionId: string; showCreateNotePage: boolean
   createNoteInitialFolder: string; allNotesPreset: AllNotesPreset; allNotesFolderPreset: string
   noteGridEnabled: boolean; noteGridIds: string[]; editorMode: 'rendered' | 'source'
-  showLibrary: boolean; showMainSidebar: boolean; showChat: boolean
+  showMainSidebar: boolean; showFoldersPanel: boolean; showChat: boolean
 }
 
 function folderParents(path: string): string[] {
@@ -142,6 +142,29 @@ const NoteBoardPage = lazy(() => import('./NoteBoardDialog').then(module => ({ d
 const ProjectDashboardPage = lazy(() => import('./ProjectDashboardDialog').then(module => ({ default: module.ProjectDashboardPage })))
 const ReviewSessionView = lazy(() => import('./ReviewSessionView').then(module => ({ default: module.ReviewSessionView })))
 const ReviewSessionsOverview = lazy(() => import('./ReviewSessionsOverview').then(module => ({ default: module.ReviewSessionsOverview })))
+const ReviewSessionDialog = lazy(() => import('./ReviewSessionDialog').then(module => ({ default: module.ReviewSessionDialog })))
+const NotePropertiesEditor = lazy(() => import('./NotePropertiesEditor').then(module => ({ default: module.NotePropertiesEditor })))
+const MarkdownSourceEditor = lazy(() => import('./MarkdownSourceEditor').then(module => ({ default: module.MarkdownSourceEditor })))
+const NoteConnections = lazy(() => import('./NoteConnections').then(module => ({ default: module.NoteConnections })))
+const NoteAttachmentsPanel = lazy(() => import('./NoteAttachmentsPanel').then(module => ({ default: module.NoteAttachmentsPanel })))
+const NoteHistoryDialog = lazy(() => import('./NoteHistoryDialog').then(module => ({ default: module.NoteHistoryDialog })))
+const NoteLinkDialog = lazy(() => import('./NoteLinkDialog').then(module => ({ default: module.NoteLinkDialog })))
+const NoteSearchDialog = lazy(() => import('./NoteSearchDialog').then(module => ({ default: module.NoteSearchDialog })))
+const KnowledgeGraphDialog = lazy(() => import('./KnowledgeGraphDialog').then(module => ({ default: module.KnowledgeGraphDialog })))
+const DailyNotesDialog = lazy(() => import('./DailyNotesDialog').then(module => ({ default: module.DailyNotesDialog })))
+const AttachmentPreviewDialog = lazy(() => import('./AttachmentPreviewDialog').then(module => ({ default: module.AttachmentPreviewDialog })))
+const HelpDialog = lazy(() => import('./HelpDialog').then(module => ({ default: module.HelpDialog })))
+const BackupTrashDialog = lazy(() => import('./BackupTrashDialog').then(module => ({ default: module.BackupTrashDialog })))
+const SelectedTextFlashcardDialog = lazy(() => import('./SelectedTextFlashcardDialog').then(module => ({ default: module.SelectedTextFlashcardDialog })))
+const CommandPaletteDialog = lazy(() => import('./CommandPaletteDialog').then(module => ({ default: module.CommandPaletteDialog })))
+const WorkspaceLayoutsDialog = lazy(() => import('./WorkspaceLayoutsDialog').then(module => ({ default: module.WorkspaceLayoutsDialog })))
+const AiSelectionEditDialog = lazy(() => import('./AiSelectionEditDialog').then(module => ({ default: module.AiSelectionEditDialog })))
+const FeatureManagerDialog = lazy(() => import('./FeatureManagerDialog').then(module => ({ default: module.FeatureManagerDialog })))
+const DuplicateManagerDialog = lazy(() => import('./DuplicateManagerDialog').then(module => ({ default: module.DuplicateManagerDialog })))
+const NoteReminderDialog = lazy(() => import('./NoteReminderDialog').then(module => ({ default: module.NoteReminderDialog })))
+const AiNoteToolsDialog = lazy(() => import('./AiNoteToolsDialog').then(module => ({ default: module.AiNoteToolsDialog })))
+const AiWorkspaceDialog = lazy(() => import('./AiWorkspaceDialog').then(module => ({ default: module.AiWorkspaceDialog })))
+const AiTaskQueueDialog = lazy(() => import('./AiTaskQueueDialog').then(module => ({ default: module.AiTaskQueueDialog })))
 
 const defaultTemplates: NoteTemplate[] = [
   { id: 'meeting', title: 'Nowe spotkanie', tags: ['spotkanie'], content: '# Cel spotkania\n\n## Agenda\n\n- \n\n## Notatki\n\n\n## Ustalenia i zadania\n\n- [ ] ' },
@@ -194,57 +217,6 @@ function markdownTableCells(line: string) {
     .replace(/^\|/, '')
     .replace(/\|$/, '')
   return normalized.split('|').map(cell => cell.replaceAll(escapedPipe, '|').trim())
-}
-
-function markdownTextForPreview(markdown: string) {
-  const lines = markdown.split(/\r?\n/)
-  const textLines: string[] = []
-  let codeFenceCharacter = ''
-  for (let index = 0; index < lines.length;) {
-    const codeFence = lines[index].match(/^\s{0,3}(`{3,}|~{3,})/)
-    if (codeFence && (!codeFenceCharacter || codeFenceCharacter === codeFence[1][0])) {
-      const character = codeFence[1][0]
-      codeFenceCharacter = codeFenceCharacter ? '' : character
-      index++
-      continue
-    }
-    if (codeFenceCharacter) {
-      textLines.push(lines[index++])
-      continue
-    }
-    if (hasMarkdownTablePipe(lines[index]) && index + 1 < lines.length && isMarkdownTableSeparator(lines[index + 1])) {
-      textLines.push(markdownTableCells(lines[index]).join(' '))
-      index += 2
-      while (index < lines.length && hasMarkdownTablePipe(lines[index])) textLines.push(markdownTableCells(lines[index++]).join(' '))
-      continue
-    }
-    textLines.push(lines[index++])
-  }
-  return textLines.join('\n').replace(/^\s*\|?\s*:?-{3,}:?\s*(?:\|\s*:?-{3,}:?\s*)+\|?\s*$/gm, '')
-}
-
-function cleanLibraryTag(tag: string) {
-  return tag.replace(/^\s*(?:[-+*]|\d+[.)])\s+/, '').replace(/[|]/g, ' ').replace(/^#+\s*/, '').replace(/[*_`~]/g, '').replace(/\s+/g, ' ').trim()
-}
-
-function excerpt(content: string) {
-  return markdownTextForPreview(content)
-    .replace(/^\s{0,3}\[[^\]]+\]:\s*\S+.*$/gm, '')
-    .replace(/!\[([^\]]*)\]\([^)]*\)/g, '$1')
-    .replace(/\[\[([^\]]+)\]\]/g, (_match, raw: string) => raw.split('|', 2)[1]?.trim() || raw.split('|', 1)[0].trim())
-    .replace(/\[([^\]]+)\]\([^)]*\)/g, '$1')
-    .replace(/\[([^\]]+)\]\[[^\]]*\]/g, '$1')
-    .replace(/<(https?:\/\/[^>]+|mailto:[^>]+)>/gi, '$1')
-    .replace(/`([^`]+)`/g, '$1')
-    .replace(/^\s{0,3}(?:#{1,6}\s+|>\s?|(?:[-+*]|\d+[.)])\s+(?:\[[ xX]\]\s+)?)/gm, '')
-    .replace(/^\s*[-*_]{3,}\s*$/gm, ' ')
-    .replace(/<[^>]*>/g, ' ')
-    .replace(/\\([*_`])/g, '$1')
-    .replace(/\|/g, ' ')
-    .replace(/[>*_~`$]/g, '')
-    .replace(/\s+/g, ' ')
-    .trim()
-    .slice(0, 110)
 }
 
 function isMarkdownTableSeparator(line: string) {
@@ -310,6 +282,9 @@ function polishCount(value: number, forms: [string, string, string]) {
   const form = value === 1 ? forms[0] : mod10 >= 2 && mod10 <= 4 && !(mod100 >= 12 && mod100 <= 14) ? forms[1] : forms[2]
   return `${value.toLocaleString('pl-PL')} ${form}`
 }
+function compactSidebarCount(value: number) {
+  return value >= 1_000 ? `${(value / 1_000).toLocaleString('pl-PL', { maximumFractionDigits: 1 })}k` : String(value)
+}
 const entryColors: EntryColor[] = [
   { value: '#ef7777', label: 'Koral' },
   { value: '#e99a4a', label: 'Mandarynka' },
@@ -354,6 +329,16 @@ const makeNote = (folder: string, template?: NoteTemplate): Note => {
 
 function App() {
   const [notes, setNotes] = useState<Note[]>([])
+  const hydratedNoteCache = useRef(new Map<string, { header: Note; content: string; note: Note }>())
+  const [taskReminderTasksByNote, setTaskReminderTasksByNote] = useState<Map<string, ParsedTask[]>>(() => new Map())
+  const taskReminderTasksRef = useRef(taskReminderTasksByNote)
+  const [taskReminderIndexReady, setTaskReminderIndexReady] = useState(false)
+  const [noteBodies, setNoteBodies] = useState<Map<string, string>>(() => new Map())
+  const noteBodiesRef = useRef(noteBodies)
+  const noteBodyLoads = useRef(new Map<string, Promise<string>>())
+  const pendingContentPatches = useRef(new Map<string, Note>())
+  const pendingContentPreviousBodies = useRef(new Map<string, string>())
+  const contentPatchTimers = useRef(new Map<string, number>())
   const seenNoteObjects = useRef(new Map<string, Note>())
   const pendingNoteSaves = useRef(new Map<string, Note>())
   const noteSaveQueue = useRef<Promise<void>>(Promise.resolve())
@@ -377,6 +362,7 @@ function App() {
   const [flashcardGenerationScope, setFlashcardGenerationScope] = useState<FlashcardGenerationScope | null>(null)
   const [selectedTextFlashcard, setSelectedTextFlashcard] = useState<{ noteId: string; text: string } | null>(null)
   const [showKnowledgeGraph, setShowKnowledgeGraph] = useState(false)
+  const [noteConnectionsOpen, setNoteConnectionsOpen] = useState(false)
   const [showDuplicateManager, setShowDuplicateManager] = useState(false)
   const [showNoteReminder, setShowNoteReminder] = useState(false)
   const [attachmentIndexing, setAttachmentIndexing] = useState('')
@@ -394,16 +380,18 @@ function App() {
   const [allNotesPresetRevision, setAllNotesPresetRevision] = useState(0)
   const [allNotesFolderPreset, setAllNotesFolderPreset] = useState('')
   const [query, setQuery] = useState('')
+  const [searchContentByNote, setSearchContentByNote] = useState<Map<string, string>>(() => new Map())
+  const [searchNormalizedContentByNote, setSearchNormalizedContentByNote] = useState<Map<string, string>>(() => new Map())
+  const [searchIndexProgress, setSearchIndexProgress] = useState<{ done: number; total: number } | null>(null)
   const [searchTag, setSearchTag] = useState('')
   const [searchFolder, setSearchFolder] = useState('')
-  const [showSearchFilters, setShowSearchFilters] = useState(false)
   const [semanticSearchEnabled, setSemanticSearchEnabled] = useState(() => localStorage.getItem('no-tie-semantic-search') === 'true')
   const [semanticScores, setSemanticScores] = useState<Record<string, number>>({})
   const [semanticSearchBusy, setSemanticSearchBusy] = useState(false)
   const [semanticSearchError, setSemanticSearchError] = useState('')
+  const semanticDocumentCache = useRef(new Map<string, SemanticDocumentCacheEntry>())
   const [bulkSelectMode, setBulkSelectMode] = useState(false)
   const [bulkSelectedIds, setBulkSelectedIds] = useState<string[]>([])
-  const [noteListLimit, setNoteListLimit] = useState(100)
   const [folderNoteLimits, setFolderNoteLimits] = useState<Record<string, number>>({})
   const [bulkTargetFolder, setBulkTargetFolder] = useState('')
   const [bulkTagDraft, setBulkTagDraft] = useState('')
@@ -427,7 +415,7 @@ function App() {
   const [editorMode, setEditorModeState] = useState<'rendered' | 'source'>('rendered')
   const [showDrawing, setShowDrawing] = useState(false)
   const [editingAsset, setEditingAsset] = useState<NoteAsset | undefined>()
-  const [mobileDrawer, setMobileDrawer] = useState<'none' | 'notes' | 'sidebar'>('none')
+  const [mobileDrawer, setMobileDrawer] = useState<'none' | 'sidebar' | 'folders'>('none')
   useEffect(() => {
     const closeCompactDrawerOnDesktop = () => {
       if (window.innerWidth > 1024) setMobileDrawer('none')
@@ -455,6 +443,8 @@ function App() {
   const [showCreateNotePage, setShowCreateNotePage] = useState(false)
   const [createNoteInitialFolder, setCreateNoteInitialFolder] = useState('')
   const [backupBusy, setBackupBusy] = useState(false)
+  const [backupsLoading, setBackupsLoading] = useState(false)
+  const [libraryPayloadsReady, setLibraryPayloadsReady] = useState(false)
   const automaticBackupRunning = useRef(false)
   const [activeReviewSessionId, setActiveReviewSessionId] = useState('')
   const [showReviewSessionDialog, setShowReviewSessionDialog] = useState(false)
@@ -467,7 +457,12 @@ function App() {
   const [archiveTask, setArchiveTask] = useState<ArchiveTaskState | null>(null)
   const archiveTaskSequence = useRef(0)
   const [showMainSidebar, setShowMainSidebar] = useState(() => localStorage.getItem('no-tie-main-sidebar-visible') !== 'false')
-  const [showLibrary, setShowLibrary] = useState(() => localStorage.getItem('no-tie-library-visible') !== 'false')
+  const [showFoldersPanel, setShowFoldersPanel] = useState(() => localStorage.getItem('no-tie-folders-panel-visible') !== 'false')
+  const [folderPanelWidth, setFolderPanelWidth] = useState(() => {
+    const storedWidth = Number(localStorage.getItem(FOLDER_PANEL_WIDTH_KEY))
+    const maxWidth = initialFolderPanelWidthMax()
+    return Number.isFinite(storedWidth) && storedWidth > 0 ? clampFolderPanelWidth(storedWidth, maxWidth) : clampFolderPanelWidth(DEFAULT_FOLDER_PANEL_WIDTH, maxWidth)
+  })
   const [showChat, setShowChat] = useState(() => localStorage.getItem('no-tie-ollama-chat-open') === 'true')
   const [ollamaBaseUrl, setOllamaBaseUrl] = useState(() => localStorage.getItem('no-tie-ollama-url') || 'http://localhost:11434')
   const [ollamaModel, setOllamaModel] = useState(() => localStorage.getItem('no-tie-ollama-model') || '')
@@ -488,15 +483,11 @@ function App() {
   const aiTaskJobs = useRef<AiQueueJob[]>([])
   const aiQueueRunning = useRef(false)
   const activeAiTaskJob = useRef<AiQueueJob | null>(null)
-  const [openActionMenu, setOpenActionMenu] = useState('')
+  const [openActionMenu, setOpenActionMenu] = useState<EntryContextMenu | null>(null)
   const [renameTarget, setRenameTarget] = useState<EntryTarget | null>(null)
   const [renameDraft, setRenameDraft] = useState('')
   const [colorTarget, setColorTarget] = useState<EntryTarget | null>(null)
   const [deleteTarget, setDeleteTarget] = useState<DeleteTarget | null>(null)
-  const [noteDisplayMode, setNoteDisplayMode] = useState<NoteDisplayMode>(() => {
-    const stored = localStorage.getItem('no-tie-note-display-mode')
-    return stored === 'names' || stored === 'names-tags' ? stored : 'full'
-  })
   const importInput = useRef<HTMLInputElement>(null)
   const navigationStack = useRef<NavigationSnapshot[]>([])
   const navigationIndex = useRef(-1)
@@ -505,6 +496,9 @@ function App() {
   const persistentVersionTimers = useRef(new Map<string, number>())
   const historyDialogNoteIdRef = useRef('')
   const entryPointerDrag = useRef<EntryPointerDrag | null>(null)
+  const folderPanelResizeStart = useRef<{ pointerId: number; x: number; width: number } | null>(null)
+  const folderPanelWidthRef = useRef(folderPanelWidth)
+  folderPanelWidthRef.current = folderPanelWidth
   const entryDropTarget = useRef<HTMLElement | null>(null)
   const suppressEntryClick = useRef(false)
   const entryDropAction = useRef<(target: EntryTarget, destination: EntryDropDestination) => void>(() => {})
@@ -519,8 +513,7 @@ function App() {
     if (!aiPreferences.folderAccessRestricted) return true
     return aiPreferences.allowedFolders.some(folder => folder === note.folder || (folder !== '' && note.folder.startsWith(`${folder}/`)))
   }
-  const aiAccessibleNotes = useMemo(() => notes.filter(aiCanAccessNote), [notes, aiPreferences.folderAccessRestricted, aiPreferences.allowedFolders])
-  const aiAccessibleNoteIds = useMemo(() => new Set(aiAccessibleNotes.map(note => note.id)), [aiAccessibleNotes])
+  const aiAccessibleNoteIds = useMemo(() => new Set(notes.filter(aiCanAccessNote).map(note => note.id)), [notes, aiPreferences.folderAccessRestricted, aiPreferences.allowedFolders])
 
   function updateAiTask(id: string, update: Partial<AiTaskQueueItem>) {
     setAiTaskQueue(current => current.map(task => task.id === id ? { ...task, ...update } : task))
@@ -684,18 +677,18 @@ function App() {
     let cancelled = false
     void (async () => {
       try {
-        let storedNotes = await getNotes()
-        const [loadedAssets, storedAttachments, storedSearches, storedTemplates, storedOrganization, loadedFolders, storedFolderColors, storedReviewSessions, storedTrash, storedFlashcards, storedFlashcardTrash, storedBackups] = await Promise.all([
-          getAssets(), getAttachments(), getSavedSearches(), getNoteTemplates(), getOrganizationSettings(), getFolders(), getFolderColors(), getReviewSessions(), getTrashEntries(), getFlashcards(), getFlashcardTrash(), getAutoBackups(),
+        let storedNotes = await getNoteHeaders()
+        const [storedSearches, storedTemplates, storedOrganization, loadedFolders, storedFolderColors, storedReviewSessions, storedTrash, storedFlashcards, storedFlashcardTrash] = await Promise.all([
+          getSavedSearches(), getNoteTemplates(), getOrganizationSettings(), getFolders(), getFolderColors(), getReviewSessions(), getTrashEntries(), getFlashcards(), getFlashcardTrash(),
         ])
-        let storedAssets = loadedAssets
+        let initialAssets: NoteAsset[] = []
         let storedFolders = loadedFolders
         if (!await hasInitialized()) {
           if (!storedNotes.length) {
             await Promise.all(starterNotes.map(saveNote))
             await Promise.all(starterAssets.map(saveAsset))
             storedNotes = starterNotes
-            storedAssets = starterAssets
+            initialAssets = starterAssets
           }
           await markInitialized()
         }
@@ -723,20 +716,43 @@ function App() {
             return note && note.id !== card.noteId ? { ...card, noteId: note.id } : card
           }))
           setFlashcardTrash(storedFlashcardTrash)
-          setAutoBackups(storedBackups)
-          setAttachments(storedAttachments)
+          setAttachments([])
           setSavedSearches(storedSearches)
           setTemplates(storedTemplates.length ? storedTemplates : defaultTemplates)
           setOrganizationSettings(storedOrganization)
           storedNotes.sort((a, b) => b.updatedAt - a.updatedAt)
+          notesRef.current = storedNotes
+          backupSnapshotRef.current = { ...backupSnapshotRef.current, notes: storedNotes, assets: initialAssets, attachments: [] }
           historyNoteId.current = storedNotes[0]?.id ?? ''
           noteHistory.current = storedNotes[0] ? [copyNote(storedNotes[0])] : []
           seenNoteObjects.current = new Map(storedNotes.map(note => [note.id, note]))
           setNotes(storedNotes)
-          setAssets(storedAssets)
+          setAssets(initialAssets)
           setSelectedId(storedNotes[0]?.id ?? '')
           setRecoveryDraft(pendingRecovery)
           setReady(true)
+          void Promise.all([getAssets(), getAttachments()]).then(([loadedAssets, loadedAttachments]) => {
+            if (cancelled) return
+            const activeNoteIds = new Set(notesRef.current.map(note => note.id))
+            const mergeActiveItems = <T extends { id: string; noteId: string }>(loaded: T[], current: T[]) => {
+              const merged = new Map<string, T>()
+              for (const item of loaded) if (activeNoteIds.has(item.noteId)) merged.set(item.id, item)
+              for (const item of current) if (activeNoteIds.has(item.noteId)) merged.set(item.id, item)
+              return [...merged.values()]
+            }
+            const currentSnapshot = backupSnapshotRef.current
+            const nextAssets = mergeActiveItems(loadedAssets, [...initialAssets, ...currentSnapshot.assets])
+            const nextAttachments = mergeActiveItems(loadedAttachments, currentSnapshot.attachments)
+            backupSnapshotRef.current = { ...currentSnapshot, assets: nextAssets, attachments: nextAttachments }
+            setAssets(nextAssets)
+            setAttachments(nextAttachments)
+            setLibraryPayloadsReady(true)
+          }).catch(error => {
+            if (!cancelled) {
+              setLibraryPayloadsReady(true)
+              reportDiskSaveError(error)
+            }
+          })
         }
       } catch (error) {
         if (!cancelled) {
@@ -749,6 +765,18 @@ function App() {
   }, [])
 
   useEffect(() => {
+    if (!showBackupTrash) return
+    let cancelled = false
+    setBackupsLoading(true)
+    void getAutoBackups().then(backups => {
+      if (!cancelled) setAutoBackups(backups)
+    }).catch(reportDiskSaveError).finally(() => {
+      if (!cancelled) setBackupsLoading(false)
+    })
+    return () => { cancelled = true }
+  }, [showBackupTrash])
+
+  useEffect(() => {
     if (!ready || !notes.length) return
     const currentIds = new Set(notes.map(note => note.id))
     for (const id of seenNoteObjects.current.keys()) {
@@ -759,7 +787,8 @@ function App() {
     for (const note of notes) {
       if (seenNoteObjects.current.get(note.id) === note) continue
       seenNoteObjects.current.set(note.id, note)
-      pendingNoteSaves.current.set(note.id, note)
+      const body = noteBodiesRef.current.get(note.id)
+      pendingNoteSaves.current.set(note.id, note.contentLoaded === false && body !== undefined ? { ...note, content: body, contentLoaded: true } : note)
     }
     if (!pendingNoteSaves.current.size) return
     const timeout = window.setTimeout(() => {
@@ -811,6 +840,41 @@ function App() {
     for (const note of notes) for (const folder of folderParents(note.folder)) counts.set(folder, (counts.get(folder) ?? 0) + 1)
     return counts
   }, [notes])
+  const effectiveFolderColors = useMemo(() => {
+    const colors = new Map<string, string | undefined>()
+    for (const folder of folders) {
+      const parents = folderParents(folder)
+      let color: string | undefined
+      for (let index = parents.length - 1; index >= 0 && !color; index -= 1) color = folderColors[parents[index]!]
+      colors.set(folder, color)
+    }
+    return colors
+  }, [folders, folderColors])
+  const noteColorsById = useMemo(() => {
+    const colors = new Map<string, string | undefined>()
+    for (const note of notes) colors.set(note.id, note.color || effectiveFolderColors.get(note.folder))
+    return colors
+  }, [notes, effectiveFolderColors])
+  const folderPanelEntries = useMemo<FolderPanelEntry[]>(() => {
+    const entries: FolderPanelEntry[] = []
+    const addNotes = (folder: string, depth: number) => {
+      const directNotes = notesByFolder.get(folder) ?? []
+      const limit = folderNoteLimits[folder] ?? 60
+      directNotes.slice(0, limit).forEach(note => entries.push({ kind: 'note', note, depth }))
+      if (directNotes.length > limit) entries.push({ kind: 'more', folder, depth, remaining: directNotes.length - limit })
+    }
+    const addFolders = (parent: string, depth: number) => {
+      for (const path of foldersByParent.get(parent) ?? []) {
+        entries.push({ kind: 'folder', path, depth })
+        if (collapsedFolders.has(path)) continue
+        addNotes(path, depth)
+        addFolders(path, depth + 1)
+      }
+    }
+    addNotes('', 0)
+    addFolders('', 0)
+    return entries
+  }, [notesByFolder, folderNoteLimits, foldersByParent, collapsedFolders])
   const rootNotes = notesByFolder.get('') ?? []
   const folderKey = folderRegistry.join('\u0000')
   useEffect(() => {
@@ -952,8 +1016,166 @@ function App() {
       window.removeEventListener('pointercancel', onPointerCancel)
     }
   }, [])
-  const selectedNote = notes.find(note => note.id === selectedId)
-  const navigationSnapshot = useMemo<NavigationSnapshot>(() => ({ selectedId, activeFilter, activeReviewSessionId, showCreateNotePage, createNoteInitialFolder, allNotesPreset, allNotesFolderPreset, noteGridEnabled, noteGridIds, editorMode, showLibrary, showMainSidebar, showChat }), [selectedId, activeFilter, activeReviewSessionId, showCreateNotePage, createNoteInitialFolder, allNotesPreset, allNotesFolderPreset, noteGridEnabled, noteGridIds, editorMode, showLibrary, showMainSidebar, showChat])
+  const selectedNoteHeader = notes.find(note => note.id === selectedId)
+  const selectedNote = selectedNoteHeader ? {
+    ...selectedNoteHeader,
+    content: noteBodies.get(selectedNoteHeader.id) ?? selectedNoteHeader.content,
+    contentLoaded: noteBodies.has(selectedNoteHeader.id) || selectedNoteHeader.contentLoaded !== false,
+  } : undefined
+  const noteIdsSignature = useMemo(() => notes.map(note => note.id).join('\u0000'), [notes])
+
+  function cacheNoteBody(noteId: string, content: string) {
+    const next = new Map(noteBodiesRef.current)
+    next.delete(noteId)
+    next.set(noteId, content)
+    const pinned = new Set([selectedId, ...noteGridIds])
+    while (next.size > 120) {
+      const evict = [...next.keys()].find(id => !pinned.has(id))
+      if (!evict) break
+      next.delete(evict)
+    }
+    noteBodiesRef.current = next
+    setNoteBodies(next)
+  }
+
+  function getNoteBody(noteId: string): Promise<string> {
+    const pendingPatch = pendingContentPatches.current.get(noteId)
+    if (pendingPatch) return Promise.resolve(pendingPatch.content)
+    const cached = noteBodiesRef.current.get(noteId)
+    if (cached !== undefined) return Promise.resolve(cached)
+    const pending = noteBodyLoads.current.get(noteId)
+    if (pending) return pending
+    const request = loadNoteContent(noteId).finally(() => noteBodyLoads.current.delete(noteId))
+    noteBodyLoads.current.set(noteId, request)
+    return request
+  }
+
+  async function ensureNoteBodies(noteIds: string[]) {
+    const ids = [...new Set(noteIds)].filter(id => !noteBodiesRef.current.has(id))
+    if (!ids.length) return
+    const loaded = await Promise.all(ids.map(async id => [id, await getNoteBody(id)] as const))
+    const next = new Map(noteBodiesRef.current)
+    const pinned = new Set([selectedId, ...noteGridIds])
+    for (const [id, content] of loaded) {
+      next.delete(id)
+      next.set(id, content)
+      if (historyNoteId.current === id) {
+        const header = notesRef.current.find(note => note.id === id)
+        if (header && noteHistory.current.length <= 1) noteHistory.current = [copyNote({ ...header, content, contentLoaded: true })]
+      }
+    }
+    while (next.size > 120) {
+      const evict = [...next.keys()].find(id => !pinned.has(id))
+      if (!evict) break
+      next.delete(evict)
+    }
+    noteBodiesRef.current = next
+    setNoteBodies(next)
+  }
+
+  function ensureNoteBody(noteId: string): Promise<string> {
+    return ensureNoteBodies([noteId]).then(() => noteBodiesRef.current.get(noteId) ?? getNoteBody(noteId))
+  }
+
+  function publishTaskReminderIndex(next: Map<string, ParsedTask[]>) {
+    taskReminderTasksRef.current = next
+    setTaskReminderTasksByNote(next)
+  }
+
+  function updateTaskReminderIndexForNote(note: Note) {
+    const current = taskReminderTasksRef.current
+    if (!current.has(note.id)) return
+    const next = new Map(current)
+    next.set(note.id, parseTasks([{ ...note, contentLoaded: true }]))
+    publishTaskReminderIndex(next)
+  }
+
+  function updateTaskReminderTitle(noteId: string, title: string) {
+    const current = taskReminderTasksRef.current
+    const tasks = current.get(noteId)
+    if (!tasks) return
+    const next = new Map(current)
+    next.set(noteId, tasks.map(task => task.noteTitle === title ? task : { ...task, noteTitle: title }))
+    publishTaskReminderIndex(next)
+  }
+
+  const activeSmartQuery = featureFlags.smartFolders ? savedSearches.find(search => activeFilter === `smart:${search.id}`)?.query ?? '' : ''
+  const librarySearchActive = activeReviewSessionId === ALL_NOTES_PAGE_ID || showQuickSearch
+  const bodyHeavyView = [LINK_AUDIT_PAGE_ID, COLLECTIONS_PAGE_ID, TASKS_PAGE_ID, PROJECTS_PAGE_ID, NOTE_BOARD_PAGE_ID].includes(activeReviewSessionId)
+    || showKnowledgeGraph || showDuplicateManager || showChat || showDailyNotes || noteConnectionsOpen
+  const searchNeedsContent = (librarySearchActive && searchQueryNeedsContent(query, featureFlags.advancedQuery))
+    || searchQueryNeedsContent(activeSmartQuery, featureFlags.advancedQuery)
+    || bodyHeavyView
+    || (librarySearchActive && featureFlags.semanticSearch && semanticSearchEnabled && Boolean(query.trim()))
+  useEffect(() => {
+    if (!ready || !searchNeedsContent) {
+      setSearchContentByNote(current => current.size ? new Map() : current)
+      setSearchNormalizedContentByNote(current => current.size ? new Map() : current)
+      setSearchIndexProgress(null)
+      return
+    }
+    let cancelled = false
+    const orderedNotes = notesRef.current
+    const total = orderedNotes.length
+    const indexed = new Map<string, string>()
+    const normalized = new Map<string, string>()
+    setSearchIndexProgress({ done: 0, total })
+    void (async () => {
+      for (let offset = 0; offset < orderedNotes.length; offset += 24) {
+        const batch = orderedNotes.slice(offset, offset + 24)
+        const contents = await Promise.all(batch.map(async note => {
+          const pending = pendingContentPatches.current.get(note.id)
+          const cached = noteBodiesRef.current.get(note.id)
+          return pending?.content ?? cached ?? await getNoteBody(note.id)
+        }))
+        if (cancelled) return
+        batch.forEach((note, index) => {
+          const content = contents[index] ?? ''
+          indexed.set(note.id, content)
+          normalized.set(note.id, normalizeSearchText(content))
+        })
+        if (offset % 96 === 72 || offset + batch.length === total) setSearchIndexProgress({ done: indexed.size, total })
+        if (offset + batch.length < total) await new Promise<void>(resolve => window.setTimeout(resolve, 0))
+      }
+      if (!cancelled) {
+        // A note can be edited while the background index is reading later batches.
+        // Prefer its latest draft/cache value before publishing the completed index.
+        for (const note of orderedNotes) {
+          const latestContent = pendingContentPatches.current.get(note.id)?.content ?? noteBodiesRef.current.get(note.id)
+          if (latestContent === undefined) continue
+          indexed.set(note.id, latestContent)
+          normalized.set(note.id, normalizeSearchText(latestContent))
+        }
+        setSearchContentByNote(indexed)
+        setSearchNormalizedContentByNote(normalized)
+        setSearchIndexProgress(null)
+      }
+    })().catch(error => {
+      if (!cancelled) {
+        setSearchIndexProgress(null)
+        reportDiskSaveError(error)
+      }
+    })
+    return () => { cancelled = true }
+  }, [ready, searchNeedsContent, noteIdsSignature])
+
+  const [loadingSelectedNote, setLoadingSelectedNote] = useState(false)
+  const noteGridSignature = noteGridIds.join('\u0000')
+  useEffect(() => {
+    if (!ready || !noteGridEnabled) return
+    void ensureNoteBodies(noteGridIds).catch(reportDiskSaveError)
+  }, [ready, noteGridEnabled, noteGridSignature])
+  useEffect(() => {
+    if (!ready || !selectedNoteHeader || selectedNoteHeader.contentLoaded !== false || noteBodiesRef.current.has(selectedNoteHeader.id)) return
+    let cancelled = false
+    setLoadingSelectedNote(true)
+    void ensureNoteBody(selectedNoteHeader.id).catch(reportDiskSaveError).finally(() => {
+      if (!cancelled) setLoadingSelectedNote(false)
+    })
+    return () => { cancelled = true }
+  }, [ready, selectedNoteHeader?.id])
+
+  const navigationSnapshot = useMemo<NavigationSnapshot>(() => ({ selectedId, activeFilter, activeReviewSessionId, showCreateNotePage, createNoteInitialFolder, allNotesPreset, allNotesFolderPreset, noteGridEnabled, noteGridIds, editorMode, showMainSidebar, showFoldersPanel, showChat }), [selectedId, activeFilter, activeReviewSessionId, showCreateNotePage, createNoteInitialFolder, allNotesPreset, allNotesFolderPreset, noteGridEnabled, noteGridIds, editorMode, showMainSidebar, showFoldersPanel, showChat])
   useEffect(() => {
     if (!ready) return
     if (navigationRestorePending.current) { navigationRestorePending.current = false; return }
@@ -979,8 +1201,9 @@ function App() {
     setNoteGridEnabled(snapshot.noteGridEnabled)
     setNoteGridIds(snapshot.noteGridIds.filter(id => notes.some(note => note.id === id)))
     setEditorMode(snapshot.editorMode)
-    setShowLibrary(snapshot.showLibrary)
     setShowMainSidebar(snapshot.showMainSidebar)
+    setShowFoldersPanel(snapshot.showFoldersPanel)
+    localStorage.setItem('no-tie-folders-panel-visible', String(snapshot.showFoldersPanel))
     setShowChat(snapshot.showChat)
     setMobileDrawer('none')
   }
@@ -999,7 +1222,7 @@ function App() {
       id: crypto.randomUUID(), name, selectedNoteId: selectedId,
       activeFilter, activeReviewSessionId, allNotesPreset, allNotesFolderPreset,
       noteGridEnabled, noteGridIds: [...noteGridIds].slice(0, MAX_NOTE_GRID_SIZE), editorMode,
-      showLibrary, showMainSidebar, showChat, createdAt: Date.now(),
+      showMainSidebar, showFoldersPanel, showChat, createdAt: Date.now(),
     }
     setOrganizationSettings(current => ({ ...current, workspaces: [workspace, ...current.workspaces] }))
   }
@@ -1013,15 +1236,20 @@ function App() {
     setActiveReviewSessionId(savedRouteExists ? workspace.activeReviewSessionId : '')
     setShowCreateNotePage(false)
     setAllNotesPreset(workspace.allNotesPreset)
-    setAllNotesFolderPreset(folders.includes(workspace.allNotesFolderPreset) ? workspace.allNotesFolderPreset : '')
+    const libraryFolder = folders.includes(workspace.allNotesFolderPreset) ? workspace.allNotesFolderPreset : ''
+    setAllNotesFolderPreset(libraryFolder)
+    setSearchFolder(libraryFolder)
+    setSearchTag('')
+    setQuery('')
     setNoteGridIds(noteIds)
     setNoteGridEnabled(workspace.noteGridEnabled && noteIds.length > 0)
     setEditorMode(workspace.editorMode)
-    setShowLibrary(workspace.showLibrary)
     setShowMainSidebar(workspace.showMainSidebar)
+    const foldersVisible = workspace.showFoldersPanel ?? true
+    setShowFoldersPanel(foldersVisible)
     setShowChat(workspace.showChat)
-    localStorage.setItem('no-tie-library-visible', String(workspace.showLibrary))
     localStorage.setItem('no-tie-main-sidebar-visible', String(workspace.showMainSidebar))
+    localStorage.setItem('no-tie-folders-panel-visible', String(foldersVisible))
     localStorage.setItem('no-tie-ollama-chat-open', String(workspace.showChat))
   }
 
@@ -1121,75 +1349,186 @@ function App() {
   const tagOptions = useMemo(() => [...new Set(notes.flatMap(note => note.tags))].sort((a, b) => a.localeCompare(b, 'pl')), [notes])
   const favoriteNoteCount = useMemo(() => notes.reduce((count, note) => count + Number(note.favorite), 0), [notes])
   const searchableAttachments = useMemo(() => attachments.filter(attachment => featureFlags.audioNotes || !attachment.mimeType.startsWith('audio/')).map(attachment => featureFlags.attachmentIndex ? attachment : { ...attachment, extractedText: undefined }), [attachments, featureFlags.audioNotes, featureFlags.attachmentIndex])
+  const searchableAttachmentsByNote = useMemo(() => {
+    const grouped = new Map<string, NoteAttachment[]>()
+    for (const attachment of searchableAttachments) {
+      const items = grouped.get(attachment.noteId) ?? []
+      items.push(attachment)
+      grouped.set(attachment.noteId, items)
+    }
+    return grouped
+  }, [searchableAttachments])
   const visibleAttachmentCount = searchableAttachments.length
-  const searchResults = useMemo(() => searchNotes(notes, { query: semanticSearchEnabled && featureFlags.semanticSearch ? '' : query, tag: searchTag, folder: searchFolder, attachments: searchableAttachments, advanced: featureFlags.advancedQuery }), [notes, searchableAttachments, query, searchTag, searchFolder, semanticSearchEnabled, featureFlags.semanticSearch, featureFlags.advancedQuery])
+  const deferredSearchQuery = useDeferredValue(query)
+  const searchResults = useMemo(() => searchNotes(notes, { query: librarySearchActive && semanticSearchEnabled && featureFlags.semanticSearch ? '' : deferredSearchQuery, tag: searchTag, folder: searchFolder, attachments: searchableAttachments, contentByNote: searchContentByNote, normalizedContentByNote: searchNormalizedContentByNote, advanced: featureFlags.advancedQuery }), [notes, searchableAttachments, deferredSearchQuery, searchTag, searchFolder, searchContentByNote, searchNormalizedContentByNote, librarySearchActive, semanticSearchEnabled, featureFlags.semanticSearch, featureFlags.advancedQuery])
+  const notesWithAvailableContent = useMemo(() => {
+    const noteIds = new Set(notes.map(note => note.id))
+    for (const id of hydratedNoteCache.current.keys()) {
+      if (!noteIds.has(id) || (!searchContentByNote.has(id) && !noteBodies.has(id))) hydratedNoteCache.current.delete(id)
+    }
+    return notes.map(note => {
+      const content = searchContentByNote.get(note.id) ?? noteBodies.get(note.id)
+      if (content === undefined) return note
+      const cached = hydratedNoteCache.current.get(note.id)
+      if (cached?.header === note && cached.content === content) return cached.note
+      const hydrated = { ...note, content, contentLoaded: true }
+      hydratedNoteCache.current.set(note.id, { header: note, content, note: hydrated })
+      return hydrated
+    })
+  }, [notes, searchContentByNote, noteBodies])
+  const aiAccessibleNotes = useMemo(() => showChat ? notesWithAvailableContent.filter(aiCanAccessNote) : [], [showChat, notesWithAvailableContent, aiPreferences.folderAccessRestricted, aiPreferences.allowedFolders])
   useEffect(() => {
-    if (!featureFlags.semanticSearch || !semanticSearchEnabled || !query.trim()) {
+    if (!featureFlags.semanticSearch || !semanticSearchEnabled || !query.trim() || !librarySearchActive) {
       setSemanticScores({})
       setSemanticSearchError('')
       setSemanticSearchBusy(false)
       return
     }
     let cancelled = false
+    const controller = new AbortController()
     setSemanticSearchBusy(true)
     setSemanticSearchError('')
+    setSemanticScores({})
     const timer = window.setTimeout(() => {
-      const visibleAttachments = attachments.filter(attachment => featureFlags.audioNotes || !attachment.mimeType.startsWith('audio/')).map(attachment => featureFlags.attachmentIndex ? attachment : { ...attachment, extractedText: undefined })
-      const documents = notes.map(note => {
-        const noteAttachments = visibleAttachments.filter(attachment => attachment.noteId === note.id)
-        return `${note.title}\n${note.folder}\n${note.tags.join(' ')}\n${note.content}\n${noteAttachments.map(attachment => `${attachment.fileName}\n${attachment.transcript ?? ''}\n${attachment.extractedText ?? ''}`).join('\n')}`.slice(0, 6000)
-      })
-      void embedOllamaTexts(ollamaBaseUrl, embeddingModel, [query, ...documents]).then(vectors => {
-        if (cancelled) return
-        const queryVector = vectors[0]
+      void (async () => {
+        const cache = semanticDocumentCache.current
+        const noteIds = new Set(notesWithAvailableContent.map(note => note.id))
+        for (const id of cache.keys()) if (!noteIds.has(id)) cache.delete(id)
+        const pending: SemanticDocumentCacheEntry[] = []
+        const sameReferences = (left: NoteAttachment[], right: NoteAttachment[]) => left.length === right.length && left.every((item, index) => item === right[index])
+        for (const note of notesWithAvailableContent) {
+          const noteAttachments = searchableAttachmentsByNote.get(note.id) ?? []
+          const previous = cache.get(note.id)
+          const content = searchContentByNote.get(note.id) ?? note.content
+          if (previous && previous.model === embeddingModel && previous.title === note.title && previous.folder === note.folder && previous.content === content
+            && previous.tags.length === note.tags.length && previous.tags.every((tag, index) => tag === note.tags[index])
+            && sameReferences(previous.attachments, noteAttachments)) {
+            if (!previous.vector) pending.push(previous)
+            continue
+          }
+          const entry: SemanticDocumentCacheEntry = {
+            model: embeddingModel,
+            title: note.title,
+            folder: note.folder,
+            content,
+            tags: [...note.tags],
+            attachments: [...noteAttachments],
+            text: `${note.title}\n${note.folder}\n${note.tags.join(' ')}\n${content}\n${noteAttachments.map(attachment => `${attachment.fileName}\n${attachment.transcript ?? ''}\n${attachment.extractedText ?? ''}`).join('\n')}`.slice(0, 6000),
+          }
+          cache.set(note.id, entry)
+          pending.push(entry)
+        }
+        let queryVector: number[] | undefined
+        for (let offset = 0; offset < Math.max(1, pending.length); offset += 32) {
+          if (cancelled || controller.signal.aborted) return
+          const documentBatch = pending.slice(offset, offset + 32)
+          const input = offset === 0 ? [query, ...documentBatch.map(entry => entry.text)] : documentBatch.map(entry => entry.text)
+          const vectors = await embedOllamaTexts(ollamaBaseUrl, embeddingModel, input, controller.signal)
+          if (offset === 0) queryVector = vectors.shift()
+          if (documentBatch.length !== vectors.length) throw new Error('Model nie zwrócił wszystkich wektorów semantycznych.')
+          documentBatch.forEach((entry, index) => { entry.vector = vectors[index] })
+          if (offset + 32 < pending.length) await new Promise<void>(resolve => window.setTimeout(resolve, 0))
+        }
+        if (cancelled || controller.signal.aborted) return
         if (!queryVector) throw new Error('Model nie zwrócił embeddingu zapytania.')
         const cosine = (left: number[], right: number[]) => {
           let dot = 0; let leftNorm = 0; let rightNorm = 0
           for (let index = 0; index < Math.min(left.length, right.length); index += 1) { dot += left[index]! * right[index]!; leftNorm += left[index]! ** 2; rightNorm += right[index]! ** 2 }
           return dot / (Math.sqrt(leftNorm * rightNorm) || 1)
         }
-        const scores = Object.fromEntries(notes.map((note, index) => [note.id, cosine(queryVector, vectors[index + 1] ?? [])]))
+        const scores = Object.fromEntries(notesWithAvailableContent.map(note => [note.id, cosine(queryVector!, cache.get(note.id)?.vector ?? [])]))
         setSemanticScores(scores)
         setSemanticSearchBusy(false)
-      }).catch(error => {
+      })().catch(error => {
         if (cancelled) return
         const detail = error instanceof Error ? error.message : 'Nie udało się obliczyć podobieństwa.'
         setSemanticSearchError(/model.*not found|model.*nie znaleziono/i.test(detail) ? 'Pobierz model embeddingów poleceniem: ollama pull nomic-embed-text' : detail)
         setSemanticSearchBusy(false)
       })
     }, 450)
-    return () => { cancelled = true; window.clearTimeout(timer) }
-  }, [featureFlags.semanticSearch, featureFlags.audioNotes, featureFlags.attachmentIndex, semanticSearchEnabled, query, notes, attachments, ollamaBaseUrl, embeddingModel])
-  const semanticResults = useMemo(() => {
-    if (!featureFlags.semanticSearch || !semanticSearchEnabled || !Object.keys(semanticScores).length) return searchResults
-    const order = new Map(Object.entries(semanticScores).sort((a, b) => b[1] - a[1]).map(([id], index) => [id, index]))
-    return notes.filter(note => {
-      if (searchTag && !note.tags.some(tag => tag.toLocaleLowerCase('pl') === searchTag.toLocaleLowerCase('pl'))) return false
-      if (searchFolder === '__root__' && note.folder) return false
-      if (searchFolder && searchFolder !== '__root__' && note.folder !== searchFolder && !note.folder.startsWith(`${searchFolder}/`)) return false
-      return (semanticScores[note.id] ?? -1) >= .12
-    }).sort((a, b) => (order.get(a.id) ?? Number.MAX_SAFE_INTEGER) - (order.get(b.id) ?? Number.MAX_SAFE_INTEGER))
-  }, [featureFlags.semanticSearch, semanticSearchEnabled, semanticScores, searchResults, notes, searchTag, searchFolder])
-  const smartFolderResults = useMemo(() => activeSmartFolder ? searchNotes(notes, { query: activeSmartFolder.query, tag: activeSmartFolder.tag, folder: activeSmartFolder.folder, attachments: searchableAttachments, advanced: featureFlags.advancedQuery }) : undefined, [activeSmartFolder, notes, searchableAttachments, featureFlags.advancedQuery])
-  const visibleNotes = useMemo(() => {
-    return (smartFolderResults ?? semanticResults).filter(note => {
-      if (activeSmartFolder) return true
-      if (activeFilter === 'favorites' && !note.favorite) return false
-      if (activeFilter === 'root' && note.folder) return false
-      if (activeFilter !== 'all' && activeFilter !== 'favorites' && activeFilter !== 'root' && !activeFilter.startsWith('smart:') && note.folder !== activeFilter && !note.folder.startsWith(`${activeFilter}/`)) return false
-      return true
-    })
-  }, [semanticResults, smartFolderResults, activeFilter, activeSmartFolder])
-  useEffect(() => { setNoteListLimit(100) }, [activeFilter, query, searchTag, searchFolder, activeSmartFolder?.id])
-  const currentAssets = useMemo(() => assets.filter(asset => asset.noteId === selectedId), [assets, selectedId])
-  const currentAttachments = useMemo(() => attachments.filter(attachment => attachment.noteId === selectedId), [attachments, selectedId])
+    return () => { cancelled = true; controller.abort(); window.clearTimeout(timer) }
+  }, [featureFlags.semanticSearch, semanticSearchEnabled, query, librarySearchActive, notesWithAvailableContent, searchContentByNote, searchableAttachmentsByNote, ollamaBaseUrl, embeddingModel])
+  const smartFolderResults = useMemo(() => activeSmartFolder ? searchNotes(notes, { query: activeSmartFolder.query, tag: activeSmartFolder.tag, folder: activeSmartFolder.folder, attachments: searchableAttachments, contentByNote: searchContentByNote, normalizedContentByNote: searchNormalizedContentByNote, advanced: featureFlags.advancedQuery }) : undefined, [activeSmartFolder, notes, searchableAttachments, searchContentByNote, searchNormalizedContentByNote, featureFlags.advancedQuery])
+  const assetsByNote = useMemo(() => {
+    const grouped = new Map<string, NoteAsset[]>()
+    for (const asset of assets) {
+      let items = grouped.get(asset.noteId)
+      if (!items) grouped.set(asset.noteId, items = [])
+      items.push(asset)
+    }
+    return grouped
+  }, [assets])
+  const attachmentsByNote = useMemo(() => {
+    const grouped = new Map<string, NoteAttachment[]>()
+    for (const attachment of attachments) {
+      let items = grouped.get(attachment.noteId)
+      if (!items) grouped.set(attachment.noteId, items = [])
+      items.push(attachment)
+    }
+    return grouped
+  }, [attachments])
+  const currentAssets = assetsByNote.get(selectedId) ?? EMPTY_NOTE_ASSETS
+  const currentAttachments = attachmentsByNote.get(selectedId) ?? EMPTY_NOTE_ATTACHMENTS
   const currentAttachmentsForUi = useMemo(() => featureFlags.audioNotes ? currentAttachments : currentAttachments.filter(attachment => !attachment.mimeType.startsWith('audio/')), [featureFlags.audioNotes, currentAttachments])
-  const parsedTasks = useMemo(() => parseTasks(notes), [notes])
+  const parsedTasks = useMemo(() => parseTasks(notesWithAvailableContent), [notesWithAvailableContent])
+  const reminderTasks = useMemo(() => taskReminderIndexReady ? [...taskReminderTasksByNote.values()].flat() : parsedTasks, [taskReminderIndexReady, taskReminderTasksByNote, parsedTasks])
+  const incompleteTaskCount = useMemo(() => reminderTasks.reduce((count, task) => count + Number(!task.done), 0), [reminderTasks])
+  const dueFlashcardCount = useMemo(() => flashcards.reduce((count, card) => count + Number(!card.suspended && card.dueAt <= Date.now()), 0), [flashcards])
+
+  useEffect(() => {
+    if (!ready) return
+    let cancelled = false
+    const currentNotes = notesRef.current
+    const validIds = new Set(currentNotes.map(note => note.id))
+    let base = taskReminderTasksRef.current
+    if ([...base.keys()].some(id => !validIds.has(id))) {
+      base = new Map([...base].filter(([id]) => validIds.has(id)))
+      publishTaskReminderIndex(base)
+    }
+    const missing = currentNotes.filter(note => !base.has(note.id))
+    if (!missing.length) {
+      setTaskReminderIndexReady(true)
+      return
+    }
+    setTaskReminderIndexReady(false)
+    const scannedUpdatedAt = new Map(currentNotes.map(note => [note.id, note.updatedAt]))
+    void (async () => {
+      let next = new Map(taskReminderTasksRef.current)
+      for (let offset = 0; offset < missing.length; offset += 12) {
+        const batch = missing.slice(offset, offset + 12)
+        const contents = await Promise.all(batch.map(note => getNoteBody(note.id)))
+        if (cancelled) return
+        batch.forEach((note, index) => next.set(note.id, parseTasks([{ ...note, content: contents[index] ?? '', contentLoaded: true }])))
+        taskReminderTasksRef.current = next
+        if (offset % 48 === 36) setTaskReminderTasksByNote(new Map(next))
+        if (offset + batch.length < missing.length) await new Promise<void>(resolve => window.setTimeout(resolve, 0))
+      }
+      const latestNotes = notesRef.current
+      const latestIds = new Set(latestNotes.map(note => note.id))
+      const missingIds = new Set(missing.map(note => note.id))
+      next = new Map([...taskReminderTasksRef.current].filter(([id]) => latestIds.has(id)))
+      for (const note of latestNotes) {
+        if (!missingIds.has(note.id) && scannedUpdatedAt.get(note.id) === note.updatedAt) continue
+        const pending = pendingContentPatches.current.get(note.id)?.content
+        const cached = noteBodiesRef.current.get(note.id)
+        const content = pending ?? cached ?? await getNoteBody(note.id)
+        if (cancelled) return
+        next.set(note.id, parseTasks([{ ...note, content, contentLoaded: true }]))
+      }
+      if (cancelled) return
+      taskReminderTasksRef.current = next
+      setTaskReminderTasksByNote(next)
+      setTaskReminderIndexReady(latestNotes.every(note => next.has(note.id)))
+    })().catch(error => {
+      if (!cancelled) reportDiskSaveError(error)
+    })
+    return () => { cancelled = true }
+  }, [ready, noteIdsSignature])
   useEffect(() => {
     const notifyDueTasks = () => {
       const now = new Date()
       const localMinute = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(now.getDate()).padStart(2, '0')}T${String(now.getHours()).padStart(2, '0')}:${String(now.getMinutes()).padStart(2, '0')}`
-      parsedTasks.filter(task => !task.done && task.remindAt && task.remindAt <= localMinute && (!task.snoozedUntil || task.snoozedUntil <= localMinute)).forEach(task => {
+      reminderTasks.filter(task => !task.done && task.remindAt && task.remindAt <= localMinute && (!task.snoozedUntil || task.snoozedUntil <= localMinute)).forEach(task => {
         const key = `no-tie-reminder:${task.id}:${task.remindAt}:${task.snoozedUntil}`
         if (localStorage.getItem(key)) return
         localStorage.setItem(key, '1')
@@ -1203,7 +1542,7 @@ function App() {
     notifyDueTasks()
     const timer = window.setInterval(notifyDueTasks, 30_000)
     return () => window.clearInterval(timer)
-  }, [parsedTasks])
+  }, [reminderTasks])
   useEffect(() => {
     if (!featureFlags.noteReminders) return
     const notifyNoteReminders = () => {
@@ -1254,8 +1593,12 @@ function App() {
   const selectionText = selectedNote && editorSelection.noteId === selectedNote.id && editorSelection.mode === editorMode ? editorSelection.text : ''
   const selectionCounts = countEditorText(selectionText)
   const aiDialogNote = flashcardGenerationScope
-    ? notes.find(note => note.id === flashcardGenerationScope.noteId)
-    : notes.find(note => note.id === (noteActionTargetId || selectedId))
+    ? notesWithAvailableContent.find(note => note.id === flashcardGenerationScope.noteId)
+    : notesWithAvailableContent.find(note => note.id === (noteActionTargetId || selectedId))
+  useEffect(() => {
+    if (!aiNoteTool || !aiDialogNote || aiDialogNote.contentLoaded !== false || noteBodiesRef.current.has(aiDialogNote.id)) return
+    void ensureNoteBody(aiDialogNote.id).catch(reportDiskSaveError)
+  }, [aiNoteTool, aiDialogNote?.id])
 
   function selectionForNote(noteId: string, mode: 'rendered' | 'source') {
     return editorSelection.noteId === noteId && editorSelection.mode === mode ? editorSelection.text : ''
@@ -1280,9 +1623,21 @@ function App() {
 
   const markdownNoteActions = markdownActionsFor(selectedId, editorMode)
 
+  const linkedNoteBodyIds = useMemo(() => selectedNote
+    ? [...new Set(wikiTargets(selectedNote.content).map(target => resolveWikiTarget(notes, target)?.id).filter((id): id is string => Boolean(id && id !== selectedNote.id)))]
+    : [], [selectedNote?.id, selectedNote?.content, notes])
+  useEffect(() => {
+    if (!ready || !selectedNote?.contentLoaded || !linkedNoteBodyIds.length) return
+    void ensureNoteBodies(linkedNoteBodyIds).catch(reportDiskSaveError)
+  }, [ready, selectedNote?.id, selectedNote?.content, selectedNote?.contentLoaded, linkedNoteBodyIds.join('\u0000')])
+
   function handleMarkdownNoteAction(action: string, noteId = selectedId, mode = editorMode) {
     const note = notes.find(item => item.id === noteId)
     if (!note) return
+    if (['edit-ai', 'summary', 'tasks', 'flashcards', 'quiz', 'metadata'].includes(action) && note.contentLoaded === false && !noteBodiesRef.current.has(noteId)) {
+      void ensureNoteBody(noteId).then(() => handleMarkdownNoteAction(action, noteId, mode)).catch(reportDiskSaveError)
+      return
+    }
     if (['edit-ai', 'generate-flashcards-selection', 'summary', 'tasks', 'flashcards', 'quiz', 'metadata'].includes(action) && !aiCanAccessNote(note)) {
       setToast('Ograniczenia dostępu nie pozwalają AI czytać tego folderu.')
       window.setTimeout(() => setToast(''), 3000)
@@ -1311,7 +1666,11 @@ function App() {
 
   function scheduleNoteVersion(note: Note, previous: Note) {
     if (!persistentVersionTimers.current.has(note.id)) {
-      void saveNoteVersion(previous).catch(reportDiskSaveError)
+      const previousBody = pendingContentPatches.current.get(previous.id)?.content ?? noteBodiesRef.current.get(previous.id)
+      const snapshot = previous.contentLoaded === false
+        ? getNoteBody(previous.id).then(content => ({ ...previous, content: previousBody ?? content, contentLoaded: true }))
+        : Promise.resolve(previous)
+      void snapshot.then(saveNoteVersion).catch(reportDiskSaveError)
     }
     const existingTimer = persistentVersionTimers.current.get(note.id)
     if (existingTimer !== undefined) window.clearTimeout(existingTimer)
@@ -1319,7 +1678,11 @@ function App() {
       persistentVersionTimers.current.delete(note.id)
       const latest = notesRef.current.find(item => item.id === note.id)
       if (!latest) return
-      void saveNoteVersion(latest).then(async () => {
+      const body = pendingContentPatches.current.get(note.id)?.content ?? noteBodiesRef.current.get(note.id)
+      const snapshot = latest.contentLoaded === false
+        ? getNoteBody(note.id).then(content => ({ ...latest, content: body ?? content, contentLoaded: true }))
+        : Promise.resolve(latest)
+      void snapshot.then(saveNoteVersion).then(async () => {
         if (historyDialogNoteIdRef.current === note.id) setNoteVersions(await getNoteVersions(note.id))
       }).catch(reportDiskSaveError)
     }, 1600)
@@ -1332,25 +1695,80 @@ function App() {
       window.clearTimeout(timer)
       persistentVersionTimers.current.delete(noteId)
     }
-    const latest = notesRef.current.find(item => item.id === noteId) ?? fallback
-    if (latest) await saveNoteVersion(latest)
+    const latest = fallback?.contentLoaded === true ? fallback : notesRef.current.find(item => item.id === noteId) ?? fallback
+    if (latest) {
+      const body = latest.contentLoaded === true ? latest.content : noteBodiesRef.current.get(noteId) ?? (latest.contentLoaded === false ? await getNoteBody(noteId) : latest.content)
+      await saveNoteVersion({ ...latest, content: body, contentLoaded: true })
+    }
+  }
+
+  function commitContentPatch(noteId: string, recordPersistentHistory = true) {
+    const timer = contentPatchTimers.current.get(noteId)
+    if (timer !== undefined) window.clearTimeout(timer)
+    contentPatchTimers.current.delete(noteId)
+    const updated = pendingContentPatches.current.get(noteId)
+    if (!updated) return
+    pendingContentPatches.current.delete(noteId)
+    const previousHeader = notesRef.current.find(note => note.id === noteId)
+    const previousBody = pendingContentPreviousBodies.current.get(noteId) ?? noteBodiesRef.current.get(noteId) ?? previousHeader?.content ?? ''
+    pendingContentPreviousBodies.current.delete(noteId)
+    const previous = previousHeader ? { ...previousHeader, content: previousBody, contentLoaded: true } : undefined
+    const header = { ...updated, content: '', contentLoaded: false }
+    cacheNoteBody(noteId, updated.content)
+    updateTaskReminderIndexForNote(updated)
+    setSearchContentByNote(current => {
+      if (!current.has(noteId)) return current
+      const next = new Map(current)
+      next.set(noteId, updated.content)
+      return next
+    })
+    setSearchNormalizedContentByNote(current => {
+      if (!current.has(noteId)) return current
+      const next = new Map(current)
+      next.set(noteId, normalizeSearchText(updated.content))
+      return next
+    })
+    setNotes(current => current.map(note => note.id === noteId ? header : note))
+    if (noteId === selectedId) recordNoteHistory(updated)
+    if (previous && recordPersistentHistory) scheduleNoteVersion(updated, previous)
+    try { localStorage.setItem(NOTE_RECOVERY_DRAFT_KEY, JSON.stringify({ note: updated, capturedAt: Date.now() } satisfies NoteRecoveryDraft)) }
+    catch { /* Recovery is best-effort when the browser storage quota is full. */ }
   }
 
   function patchNote(id: string, patch: Partial<Note>, recordPersistentHistory = true) {
-    const existing = notes.find(note => note.id === id)
+    const storedExisting = notesRef.current.find(note => note.id === id)
+    const pending = pendingContentPatches.current.get(id)
+    const cachedBody = noteBodiesRef.current.get(id)
+    const existing = storedExisting ? {
+      ...storedExisting,
+      content: pending?.content ?? cachedBody ?? storedExisting.content,
+      contentLoaded: pending !== undefined || cachedBody !== undefined || storedExisting.contentLoaded !== false,
+    } : undefined
     if (existing && Object.entries(patch).every(([key, value]) => JSON.stringify(existing[key as keyof Note]) === JSON.stringify(value))) return
     setSaved(false)
     const updatedAt = Math.max(currentTimestamp(), (existing?.updatedAt ?? 0) + 1)
     const updated = existing ? { ...existing, ...patch, updatedAt } : undefined
+    if (updated && typeof patch.title === 'string') updateTaskReminderTitle(id, updated.title)
+    if (existing && updated && Object.keys(patch).length === 1 && typeof patch.content === 'string') {
+      pendingContentPatches.current.set(id, { ...updated, contentLoaded: true })
+      const currentTimer = contentPatchTimers.current.get(id)
+      if (currentTimer !== undefined) window.clearTimeout(currentTimer)
+      contentPatchTimers.current.set(id, window.setTimeout(() => commitContentPatch(id, recordPersistentHistory), 320))
+      return
+    }
     if (updated) {
       try { localStorage.setItem(NOTE_RECOVERY_DRAFT_KEY, JSON.stringify({ note: updated, capturedAt: Date.now() } satisfies NoteRecoveryDraft)) }
       catch { /* Recovery is best-effort when the browser storage quota is full. */ }
     }
     if (existing && updated && recordPersistentHistory) scheduleNoteVersion(updated, existing)
+    if (existing && typeof patch.content === 'string') cacheNoteBody(id, patch.content)
     setNotes(current => current.map(note => {
       if (note.id !== id) return note
-      const next = { ...note, ...patch, updatedAt }
-      if (id === selectedId) recordNoteHistory(next)
+      const keepBodyInCache = noteBodiesRef.current.has(id) || note.contentLoaded === false
+      const next = keepBodyInCache
+        ? { ...note, ...patch, content: '', contentLoaded: false, updatedAt }
+        : { ...note, ...patch, contentLoaded: true, updatedAt }
+      if (id === selectedId) recordNoteHistory(updated ? { ...next, content: updated.content, contentLoaded: true } : next)
       return next
     }))
   }
@@ -1428,7 +1846,7 @@ function App() {
     if (!ids.size) return
     try {
       clearRecoveryDraftForNotes(ids)
-      const nextTrash = [...trashNoteData(ids), ...trashEntries].filter(entry => Date.now() - entry.deletedAt < 30 * 86_400_000)
+      const nextTrash = [...await trashNoteData(ids), ...trashEntries].filter(entry => Date.now() - entry.deletedAt < 30 * 86_400_000)
       await saveTrashEntries(nextTrash)
       await Promise.all([...ids].map(async id => { await removeAssetsForNote(id); await removeAttachmentsForNote(id); await removeNote(id) }))
       setTrashEntries(nextTrash)
@@ -1446,6 +1864,7 @@ function App() {
   }
 
   function selectNote(id: string) {
+    commitContentPatch(selectedId)
     setShowCreateNotePage(false)
     setEditorSelection({ noteId: id, mode: editorMode, text: '' })
     if (noteGridEnabled && id && !noteGridIds.includes(id)) {
@@ -1463,6 +1882,7 @@ function App() {
 
   function focusGridNote(id: string) {
     if (!notes.some(note => note.id === id)) return
+    commitContentPatch(selectedId)
     setShowCreateNotePage(false)
     setSelectedId(id)
   }
@@ -1518,6 +1938,22 @@ function App() {
     setActiveReviewSessionId(ALL_NOTES_PAGE_ID)
     setAllNotesPreset('all')
     setAllNotesFolderPreset(folder)
+    setQuery('')
+    setSearchTag('')
+    setSearchFolder(folder)
+    setAllNotesPresetRevision(value => value + 1)
+    setActiveFilter('all')
+    setMobileDrawer('none')
+  }
+
+  function openAllNotesView(preset: AllNotesPreset = 'all') {
+    setShowCreateNotePage(false)
+    setActiveReviewSessionId(ALL_NOTES_PAGE_ID)
+    setAllNotesPreset(preset)
+    setAllNotesFolderPreset('')
+    setQuery('')
+    setSearchTag('')
+    setSearchFolder('')
     setAllNotesPresetRevision(value => value + 1)
     setActiveFilter('all')
     setMobileDrawer('none')
@@ -1579,15 +2015,17 @@ function App() {
     setQuery(search.query)
     setSearchTag(search.tag)
     setSearchFolder(search.folder)
+    setShowCreateNotePage(false)
+    setActiveReviewSessionId(ALL_NOTES_PAGE_ID)
+    setAllNotesPreset('all')
+    setAllNotesFolderPreset(search.folder)
+    setAllNotesPresetRevision(value => value + 1)
     setActiveFilter('all')
-    setActiveReviewSessionId('')
-    setShowLibrary(true)
-    localStorage.setItem('no-tie-library-visible', 'true')
     setMobileDrawer('none')
   }
 
   function updateTask(task: ParsedTask, patch: TaskPatch) {
-    const note = notes.find(item => item.id === task.noteId)
+    const note = notesWithAvailableContent.find(item => item.id === task.noteId)
     if (!note) return
     const completing = patch.done === true || patch.status === 'done'
     const starting = patch.status === 'doing'
@@ -1616,7 +2054,7 @@ function App() {
   }
 
   function createTask(noteId: string, title: string, dueDate: string, priority: ParsedTask['priority'], repeat: ParsedTask['repeat'] = '', remindAt = '', dependency = '', extra: TaskPatch = {}) {
-    const note = notes.find(item => item.id === noteId)
+    const note = notesWithAvailableContent.find(item => item.id === noteId)
     if (!note) return
     const fields = [
       `id=${crypto.randomUUID()}`, dueDate ? `due=${dueDate}` : '', priority !== 'normal' ? `priority=${encodeURIComponent(priority)}` : '', repeat ? `repeat=${repeat}` : '',
@@ -1631,7 +2069,7 @@ function App() {
   }
 
   function createProjectTasks(noteId: string, additions: { title: string; extra?: TaskPatch }[]) {
-    const note = notes.find(item => item.id === noteId)
+    const note = notesWithAvailableContent.find(item => item.id === noteId)
     if (!note || !additions.length) return
     const lines = additions.map(({ title, extra = {} }) => {
       const fields = [
@@ -1679,9 +2117,14 @@ function App() {
   function insertTextIntoNote(text: string, noteId = selectedId) {
     const targetNote = notes.find(note => note.id === noteId)
     if (!targetNote || !text.trim()) return
-    const separator = targetNote.content.endsWith('\n') ? '\n' : '\n\n'
-    patchNote(targetNote.id, { content: `${targetNote.content}${separator}${text.trim()}\n` })
-    setEditorRevision(value => value + 1)
+    const append = (note: Note) => {
+      const separator = note.content.endsWith('\n') ? '\n' : '\n\n'
+      patchNote(note.id, { content: `${note.content}${separator}${text.trim()}\n` })
+      setEditorRevision(value => value + 1)
+    }
+    const loadedContent = pendingContentPatches.current.get(noteId)?.content ?? noteBodiesRef.current.get(noteId)
+    if (loadedContent !== undefined || targetNote.contentLoaded !== false) append({ ...targetNote, content: loadedContent ?? targetNote.content, contentLoaded: true })
+    else void ensureNoteBody(noteId).then(content => append({ ...targetNote, content, contentLoaded: true })).catch(reportDiskSaveError)
   }
 
   function saveAttachmentTranscript(attachment: NoteAttachment, transcript: string, transcriptSegments?: NoteAttachment['transcriptSegments']) {
@@ -1759,7 +2202,7 @@ function App() {
   }
 
   function appendAiTextToNote(value: string, kind: AiNoteTool, noteId = selectedId) {
-    const note = notes.find(item => item.id === noteId)
+    const note = notesWithAvailableContent.find(item => item.id === noteId)
     if (!note) return
     const heading = kind === 'summary' ? 'Podsumowanie AI' : kind === 'tasks' ? 'Zadania z AI' : kind === 'metadata' ? 'Sugestie metadanych AI' : 'Quiz AI'
     const separator = note.content.trimEnd() ? '\n\n' : ''
@@ -1860,8 +2303,8 @@ function App() {
 
   async function mergeDuplicateNotes(targetId: string, sourceId: string) {
     if (targetId === sourceId) return
-    const target = notes.find(note => note.id === targetId)
-    const source = notes.find(note => note.id === sourceId)
+    const target = notesWithAvailableContent.find(note => note.id === targetId)
+    const source = notesWithAvailableContent.find(note => note.id === sourceId)
     if (!target || !source) return
     const sourceAssets = assets.filter(asset => asset.noteId === sourceId)
     const sourceAttachments = attachments.filter(attachment => attachment.noteId === sourceId)
@@ -1888,7 +2331,7 @@ function App() {
       await Promise.all(renamedAssets.map(saveAsset))
       await Promise.all(renamedAttachments.map(saveAttachment))
       await saveNoteVersion(merged)
-      const nextTrash = [...trashNoteData(new Set([sourceId])), ...trashEntries].filter(entry => Date.now() - entry.deletedAt < 30 * 86_400_000)
+      const nextTrash = [...await trashNoteData(new Set([sourceId])), ...trashEntries].filter(entry => Date.now() - entry.deletedAt < 30 * 86_400_000)
       clearRecoveryDraftForNotes(new Set([sourceId]))
       await saveTrashEntries(nextTrash)
       await removeAssetsForNote(sourceId)
@@ -1962,7 +2405,7 @@ function App() {
   }
 
   async function deleteAttachment(attachment: NoteAttachment) {
-    const note = notes.find(item => item.id === attachment.noteId)
+    const note = notesWithAvailableContent.find(item => item.id === attachment.noteId)
     if (note) await saveNoteVersion(note)
     await archiveAttachment(attachment)
     await removeAttachment(attachment)
@@ -2243,11 +2686,34 @@ function App() {
     }
     if (target.kind === 'note') moveNoteToFolder(target.id, destination.path)
     else moveFolder(target.path, destination.path)
-    setOpenActionMenu('')
+    setOpenActionMenu(null)
   }
 
   function menuKey(target: EntryTarget) {
     return target.kind === 'folder' ? `folder:${target.path}` : `note:${target.id}`
+  }
+
+  function placeEntryContextMenu(target: EntryTarget, x: number, y: number) {
+    const menuHeight = target.kind === 'folder' ? 190 : 126
+    setOpenActionMenu({
+      key: menuKey(target),
+      x: Math.max(8, Math.min(x, window.innerWidth - 170)),
+      y: Math.max(8, Math.min(y, window.innerHeight - menuHeight - 8)),
+    })
+  }
+
+  function handleEntryContextMenu(event: React.MouseEvent, target: EntryTarget) {
+    event.preventDefault()
+    event.stopPropagation()
+    placeEntryContextMenu(target, event.clientX, event.clientY)
+  }
+
+  function handleEntryMenuKeyDown(event: React.KeyboardEvent<HTMLElement>, target: EntryTarget) {
+    if (event.key !== 'ContextMenu' && !(event.shiftKey && event.key === 'F10')) return
+    event.preventDefault()
+    const rect = event.currentTarget.getBoundingClientRect()
+    placeEntryContextMenu(target, rect.left, rect.bottom)
+    window.requestAnimationFrame(() => document.querySelector<HTMLElement>('.sidebar-context-menu [role="menuitem"]')?.focus())
   }
 
   function beginRename(target: EntryTarget) {
@@ -2256,7 +2722,7 @@ function App() {
       : notes.find(note => note.id === target.id)?.title ?? ''
     setRenameTarget(target)
     setRenameDraft(value)
-    setOpenActionMenu('')
+    setOpenActionMenu(null)
   }
 
   function askDelete(target: EntryTarget) {
@@ -2266,7 +2732,7 @@ function App() {
       ? notes.filter(item => item.folder === target.path || item.folder.startsWith(`${target.path}/`)).length
       : 1
     setDeleteTarget({ ...target, label, noteCount } as DeleteTarget)
-    setOpenActionMenu('')
+    setOpenActionMenu(null)
   }
 
   function removeNotesFromReviewSessions(noteIdsToRemove: Set<string>) {
@@ -2297,33 +2763,55 @@ function App() {
     } catch { /* Ignore stale or unavailable recovery metadata. */ }
   }
 
-  function commitRename() {
+  async function commitRename() {
     const value = renameDraft.trim()
-    if (!renameTarget || !value) return
-    if (renameTarget.kind === 'note') {
-      const renamed = notes.find(note => note.id === renameTarget.id)
+    const target = renameTarget
+    if (!target || !value) return
+    if (target.kind === 'note') {
+      const renamed = notesRef.current.find(note => note.id === target.id)
+      setRenameTarget(null)
+      setRenameDraft('')
       if (renamed && renamed.title !== value) {
-        notes.filter(note => note.id !== renamed.id).forEach(note => {
-          const content = replaceWikiLinkTarget(note.content, renamed.title, value)
-          if (content !== note.content) patchNote(note.id, { content })
-        })
+        setToast('Zmieniam nazwę i aktualizuję odnośniki…')
+        const candidates = notesRef.current.filter(note => note.id !== renamed.id)
+        for (let offset = 0; offset < candidates.length; offset += 24) {
+          const batch = candidates.slice(offset, offset + 24)
+          const bodies = await Promise.all(batch.map(async note => {
+            const pending = pendingContentPatches.current.get(note.id)?.content
+            const cached = noteBodiesRef.current.get(note.id)
+            if (pending !== undefined) return pending
+            if (cached !== undefined) return cached
+            if (note.contentLoaded !== false) return note.content
+            try { return await getNoteBody(note.id) } catch (error) { reportDiskSaveError(error); return '' }
+          }))
+          batch.forEach((note, index) => {
+            const original = bodies[index] ?? ''
+            const content = replaceWikiLinkTarget(original, renamed.title, value)
+            if (content === original) return
+            pendingContentPreviousBodies.current.set(note.id, original)
+            patchNote(note.id, { content })
+          })
+          if (offset + batch.length < candidates.length) await new Promise<void>(resolve => window.setTimeout(resolve, 0))
+        }
+        setToast('Zmieniono nazwę i odnośniki do notatki.')
+        window.setTimeout(() => setToast(''), 3000)
       }
-      patchNote(renameTarget.id, { title: value, aliases: renamed && renamed.title !== value ? [...new Set([...(renamed.aliases ?? []), renamed.title].filter(Boolean))] : renamed?.aliases })
+      patchNote(target.id, { title: value, aliases: renamed && renamed.title !== value ? [...new Set([...(renamed.aliases ?? []), renamed.title].filter(Boolean))] : renamed?.aliases })
     } else {
       if (value.includes('/') || value.includes('\\')) {
         setToast('Nazwa folderu nie może zawierać ukośnika')
         window.setTimeout(() => setToast(''), 2800)
         return
       }
-      const parts = renameTarget.path.split('/')
+      const parts = target.path.split('/')
       parts[parts.length - 1] = value
       const destination = parts.join('/')
-      if (destination !== renameTarget.path && folders.includes(destination)) {
+      if (destination !== target.path && folders.includes(destination)) {
         setToast('Folder o tej nazwie już istnieje')
         window.setTimeout(() => setToast(''), 2800)
         return
       }
-      const source = renameTarget.path
+      const source = target.path
       const relocate = (folder: string) => folder === source ? destination : folder.startsWith(`${source}/`) ? `${destination}${folder.slice(source.length)}` : folder
       setFolderRegistry([...new Set(folders.map(relocate).flatMap(folderParents))])
       setFolderColors(current => relocateFolderColors(current, source, destination))
@@ -2347,7 +2835,7 @@ function App() {
 
   async function removeNoteFromLibrary(id: string) {
     clearRecoveryDraftForNotes(new Set([id]))
-    const entries = trashNoteData(new Set([id]))
+    const entries = await trashNoteData(new Set([id]))
     const nextTrash = [...entries, ...trashEntries].filter(entry => Date.now() - entry.deletedAt < 30 * 86_400_000)
     await saveTrashEntries(nextTrash)
     setTrashEntries(nextTrash)
@@ -2372,7 +2860,7 @@ function App() {
       } else {
         const removedNotes = notes.filter(note => note.folder === target.path || note.folder.startsWith(`${target.path}/`))
         const removedIdsForTrash = new Set(removedNotes.map(note => note.id))
-        const nextTrash = [...trashNoteData(removedIdsForTrash), ...trashEntries].filter(entry => Date.now() - entry.deletedAt < 30 * 86_400_000)
+        const nextTrash = [...await trashNoteData(removedIdsForTrash), ...trashEntries].filter(entry => Date.now() - entry.deletedAt < 30 * 86_400_000)
         await saveTrashEntries(nextTrash)
         setTrashEntries(nextTrash)
         await Promise.all(removedNotes.map(async note => {
@@ -2406,77 +2894,63 @@ function App() {
 
   function renderEntryMenu(target: EntryTarget, cachedSiblings?: string[]): React.ReactNode {
     const key = menuKey(target)
+    const currentMenu = openActionMenu
+    if (!currentMenu || currentMenu.key !== key) return null
     const folderSiblings = target.kind === 'folder' ? cachedSiblings ?? folders.filter(folder => {
       const parent = target.path.includes('/') ? target.path.slice(0, target.path.lastIndexOf('/')) : ''
       return (folder.includes('/') ? folder.slice(0, folder.lastIndexOf('/')) : '') === parent
     }) : []
     const folderIndex = target.kind === 'folder' ? folderSiblingIndexes.get(target.path) ?? folderSiblings.indexOf(target.path) : -1
-    return <div className="entry-actions" onClick={event => event.stopPropagation()}>
-      <button className="entry-more-button" title="Więcej opcji" aria-label="Więcej opcji" aria-expanded={openActionMenu === key} onClick={() => setOpenActionMenu(current => current === key ? '' : key)}><MoreVertical size={16} /></button>
-      {openActionMenu === key && <div className="sidebar-context-menu" role="menu">
+    return createPortal(
+      <div className="sidebar-context-menu" role="menu" aria-label={target.kind === 'folder' ? 'Opcje folderu' : 'Opcje pliku'} style={{ left: currentMenu.x, top: currentMenu.y }} onClick={event => event.stopPropagation()}>
         {target.kind === 'folder' && <>
-          <button role="menuitem" disabled={folderIndex <= 0} onClick={() => { reorderFolder(target.path, -1); setOpenActionMenu('') }}><ChevronUp size={14} />Przenieś wyżej</button>
-          <button role="menuitem" disabled={folderIndex < 0 || folderIndex >= folderSiblings.length - 1} onClick={() => { reorderFolder(target.path, 1); setOpenActionMenu('') }}><ChevronDown size={14} />Przenieś niżej</button>
+          <button role="menuitem" disabled={folderIndex <= 0} onClick={() => { reorderFolder(target.path, -1); setOpenActionMenu(null) }}><ChevronUp size={14} />Przenieś wyżej</button>
+          <button role="menuitem" disabled={folderIndex < 0 || folderIndex >= folderSiblings.length - 1} onClick={() => { reorderFolder(target.path, 1); setOpenActionMenu(null) }}><ChevronDown size={14} />Przenieś niżej</button>
         </>}
-        <button role="menuitem" onClick={() => { setColorTarget(target); setOpenActionMenu('') }}><Palette size={14} />Ustaw kolor</button>
+        <button role="menuitem" onClick={() => { setColorTarget(target); setOpenActionMenu(null) }}><Palette size={14} />Ustaw kolor</button>
         <button role="menuitem" onClick={() => beginRename(target)}><Pencil size={14} />Zmień nazwę</button>
         <button className="danger-menu-item" role="menuitem" onClick={() => askDelete(target)}><Trash2 size={14} />Usuń</button>
-      </div>}
-    </div>
+      </div>,
+      document.body,
+    )
+  }
+
+  function folderGuidesForEntry(path: string, includePath = true) {
+    const foldersToGuide = folderParents(path)
+    if (!includePath) foldersToGuide.pop()
+    return foldersToGuide.filter(folder => !collapsedFolders.has(folder))
+  }
+
+  function renderFolderBranchGuides(foldersToGuide: string[]) {
+    if (!foldersToGuide.length) return null
+    return <span className="folder-branch-guides" aria-hidden="true">{foldersToGuide.map(folder => <span key={folder} style={{ left: `${14 + (folder.split('/').length - 1) * FOLDER_TREE_INDENT}px` }} />)}</span>
   }
 
   function renderNoteFile(note: Note, depth = 0): React.ReactNode {
     const target: EntryTarget = { kind: 'note', id: note.id }
     const color = noteDisplayColor(note)
-    return <div key={note.id} className={`folder-file-row ${selectedId === note.id ? 'active' : ''} ${color ? 'has-entry-color' : ''}`} style={{ paddingLeft: `${27 + depth * 14}px`, ...(entryColorStyle(color) ?? {}) }}>
-      <button className={`folder-file-item ${color ? 'has-entry-color' : ''}`} style={entryColorStyle(color)} onPointerDown={event => startEntryPointerDrag(event, target, note.title || 'Bez tytułu')} onClick={() => { if (ignoreClickAfterDrag()) return; setActiveReviewSessionId(''); setActiveFilter(note.folder ? note.folder : 'root'); selectNote(note.id); setMobileDrawer('none') }} title="Przeciągnij notatkę do innego folderu"><FileText size={13} /><span>{note.title || 'Bez tytułu'}</span></button>
+    return <div data-drop-folder={note.folder} className={`folder-file-row ${selectedId === note.id ? 'active' : ''} ${color ? 'has-entry-color' : ''}`} style={{ paddingLeft: `${22 + depth * FOLDER_TREE_INDENT}px`, ...(entryColorStyle(color) ?? {}) }} onContextMenu={event => handleEntryContextMenu(event, target)}>
+      {renderFolderBranchGuides(folderGuidesForEntry(note.folder))}
+      <button className={`folder-file-item ${color ? 'has-entry-color' : ''}`} style={entryColorStyle(color)} onKeyDown={event => handleEntryMenuKeyDown(event, target)} onPointerDown={event => startEntryPointerDrag(event, target, note.title || 'Bez tytułu')} onClick={() => { if (ignoreClickAfterDrag()) return; setActiveReviewSessionId(''); setActiveFilter(note.folder ? note.folder : 'root'); selectNote(note.id); setMobileDrawer('none') }} title={note.title || 'Bez tytułu'}><FileText size={13} /><span>{note.title || 'Bez tytułu'}</span></button>
       {renderEntryMenu(target)}
     </div>
   }
 
-  function renderFolderNotes(folder: string, depth = 0): React.ReactNode {
-    const directNotes = notesByFolder.get(folder) ?? []
-    const limit = folderNoteLimits[folder] ?? 60
-    return <>
-      {directNotes.slice(0, limit).map(note => renderNoteFile(note, depth))}
-      {directNotes.length > limit && <button type="button" className="folder-more-notes" style={{ paddingLeft: `${27 + depth * 14}px` }} onClick={() => setFolderNoteLimits(current => ({ ...current, [folder]: limit + 60 }))}>Pokaż kolejne notatki · pozostało {directNotes.length - limit}</button>}
-    </>
-  }
-
-  function renderFolderTree(parent: string, depth = 0): React.ReactNode {
-    const children = foldersByParent.get(parent) ?? []
-    return children.map(folder => {
-      const label = folder.split('/').at(-1) ?? folder
-      const siblings = foldersByParent.get(folder.includes('/') ? folder.slice(0, folder.lastIndexOf('/')) : '') ?? []
-      const count = folderNoteCounts.get(folder) ?? 0
-      const target: EntryTarget = { kind: 'folder', path: folder }
-      const color = folderDisplayColor(folder)
-      const collapsed = collapsedFolders.has(folder)
-      return <div key={folder} className="folder-tree-node" data-drop-folder={folder}>
-        <div className={`folder-drop-row ${activeFilter === folder ? 'active' : ''} ${color ? 'has-entry-color' : ''}`} style={{ paddingLeft: `${10 + depth * 14}px`, ...(entryColorStyle(color) ?? {}) }} data-drop-folder={folder}>
-          <button type="button" className={`folder-collapse-button ${collapsed ? 'is-collapsed' : ''}`} onClick={event => { event.stopPropagation(); setCollapsedFolders(current => { const next = new Set(current); if (next.has(folder)) next.delete(folder); else next.add(folder); return next }) }} aria-label={collapsed ? `Rozwiń zawartość folderu ${folder}` : `Schowaj zawartość folderu ${folder}`} aria-expanded={!collapsed} title={collapsed ? 'Pokaż zawartość folderu' : 'Schowaj zawartość folderu'}><ChevronDown size={14} /></button>
-          <button className={`nav-item folder-item ${activeFilter === folder && !showingWorkspacePage ? 'active' : ''} ${color ? 'has-entry-color' : ''}`} style={entryColorStyle(color)} onPointerDown={event => startEntryPointerDrag(event, target, label)} onClick={() => { if (ignoreClickAfterDrag()) return; setActiveReviewSessionId(''); setActiveFilter(folder); setMobileDrawer('none') }} title={`Przeciągnij folder „${label}”, aby go przenieść`}><Folder size={16} /><span>{label}</span><span className="nav-count">{count}</span></button>
-          {renderEntryMenu(target, siblings)}
-        </div>
-        {!collapsed && <>
-          {renderFolderNotes(folder, depth)}
-          {renderFolderTree(folder, depth + 1)}
-        </>}
-      </div>
+  function toggleFolderExpansion(folder: string) {
+    setCollapsedFolders(current => {
+      const next = new Set(current)
+      if (next.has(folder)) next.delete(folder)
+      else next.add(folder)
+      return next
     })
   }
 
   function folderDisplayColor(folder: string): string | undefined {
-    const parents = folderParents(folder)
-    for (let index = parents.length - 1; index >= 0; index -= 1) {
-      const color = folderColors[parents[index]]
-      if (color) return color
-    }
-    return undefined
+    return effectiveFolderColors.get(folder)
   }
 
   function noteDisplayColor(note: Note): string | undefined {
-    return note.color || folderDisplayColor(note.folder)
+    return noteColorsById.get(note.id)
   }
 
   function applyEntryColor(color?: string) {
@@ -2601,11 +3075,6 @@ function App() {
     setMobileDrawer('none')
   }
 
-  function setDisplayMode(mode: NoteDisplayMode) {
-    setNoteDisplayMode(mode)
-    localStorage.setItem('no-tie-note-display-mode', mode)
-  }
-
   function toggleChat() {
     setShowChat(current => {
       const next = !current
@@ -2619,18 +3088,18 @@ function App() {
     localStorage.setItem('no-tie-ollama-chat-open', 'false')
   }
 
-  function toggleLibrary() {
-    setShowLibrary(current => {
-      const next = !current
-      localStorage.setItem('no-tie-library-visible', String(next))
-      return next
-    })
-  }
-
   function toggleMainSidebar() {
     setShowMainSidebar(current => {
       const next = !current
       localStorage.setItem('no-tie-main-sidebar-visible', String(next))
+      return next
+    })
+  }
+
+  function toggleFoldersPanel() {
+    setShowFoldersPanel(current => {
+      const next = !current
+      localStorage.setItem('no-tie-folders-panel-visible', String(next))
       return next
     })
   }
@@ -2651,20 +3120,41 @@ function App() {
     return isCompactLayout() ? mobileDrawer === 'sidebar' : showMainSidebar
   }
 
-  function toggleLibraryPanel() {
-    if (isCompactLayout()) {
-      if (!showLibrary) {
-        localStorage.setItem('no-tie-library-visible', 'true')
-        setShowLibrary(true)
-      }
-      setMobileDrawer(current => current === 'notes' ? 'none' : 'notes')
-      return
-    }
-    toggleLibrary()
+  function maxFolderPanelWidth() {
+    if (window.innerWidth <= 700) return Math.min(MAX_FOLDER_PANEL_WIDTH, window.innerWidth * .88)
+    if (window.innerWidth <= 1024) return Math.min(MAX_FOLDER_PANEL_WIDTH, 380, window.innerWidth * .86)
+    const toolsWidth = 252
+    const chatWidth = showChat ? window.innerWidth > 1400 ? 340 : 250 : 0
+    const editorMinimum = showChat ? window.innerWidth <= 1100 ? 220 : 250 : 280
+    return Math.max(MIN_FOLDER_PANEL_WIDTH, Math.min(MAX_FOLDER_PANEL_WIDTH, window.innerWidth - toolsWidth - chatWidth - editorMinimum - 24))
   }
 
-  function libraryPanelIsVisible() {
-    return isCompactLayout() ? mobileDrawer === 'notes' : showLibrary
+  function updateFolderPanelWidth(width: number, persist = false) {
+    const nextWidth = clampFolderPanelWidth(width, maxFolderPanelWidth())
+    folderPanelWidthRef.current = nextWidth
+    setFolderPanelWidth(nextWidth)
+    if (persist) localStorage.setItem(FOLDER_PANEL_WIDTH_KEY, String(nextWidth))
+  }
+
+  function finishFolderPanelResize() {
+    folderPanelResizeStart.current = null
+    localStorage.setItem(FOLDER_PANEL_WIDTH_KEY, String(folderPanelWidthRef.current))
+  }
+
+  function toggleFoldersPanelDrawer() {
+    if (isCompactLayout()) {
+      if (!showFoldersPanel) {
+        localStorage.setItem('no-tie-folders-panel-visible', 'true')
+        setShowFoldersPanel(true)
+      }
+      setMobileDrawer(current => current === 'folders' ? 'none' : 'folders')
+      return
+    }
+    toggleFoldersPanel()
+  }
+
+  function foldersPanelIsVisible() {
+    return isCompactLayout() ? mobileDrawer === 'folders' : showFoldersPanel
   }
 
   function openOllamaSettings() {
@@ -2721,17 +3211,25 @@ function App() {
   }
 
   async function createAutomaticBackup(silent = true) {
-    if (automaticBackupRunning.current) return
+    if (automaticBackupRunning.current || !libraryPayloadsReady) return
     const snapshot = backupSnapshotRef.current
     if (!snapshot.notes.length) return
     automaticBackupRunning.current = true
     setBackupBusy(true)
     try {
-      await Promise.all(snapshot.notes.map(note => flushNoteVersion(note.id, note)))
-      const versions = (await Promise.all(snapshot.notes.map(note => getNoteVersions(note.id)))).flat()
-      const attachmentHistory = (await Promise.all(snapshot.notes.map(note => getAttachmentHistory(note.id)))).flat()
+      const diskNotes = await getNotes()
+      const diskById = new Map(diskNotes.map(note => [note.id, note]))
+      const backupNotes = snapshot.notes.map(note => {
+        const pending = pendingContentPatches.current.get(note.id)
+        const content = pending?.content ?? noteBodiesRef.current.get(note.id) ?? diskById.get(note.id)?.content ?? ''
+        return { ...note, content, contentLoaded: true }
+      })
+      await Promise.all(backupNotes.map(note => flushNoteVersion(note.id, note)))
+      const versions = (await Promise.all(backupNotes.map(note => getNoteVersions(note.id)))).flat()
+      const attachmentHistory = (await Promise.all(backupNotes.map(note => getAttachmentHistory(note.id)))).flat()
       const workspace = { reviewSessions: snapshot.reviewSessions, savedSearches: snapshot.savedSearches, noteTemplates: snapshot.templates, folderColors: snapshot.folderColors, flashcards: snapshot.flashcards, flashcardTrash: snapshot.flashcardTrash, trash: snapshot.trashEntries, organization: snapshot.organizationSettings }
-      const info = await saveAutoBackup(buildArchive(snapshot.notes, snapshot.assets, versions, snapshot.attachments, workspace, attachmentHistory))
+      const { buildArchive } = await import('./archive')
+      const info = await saveAutoBackup(buildArchive(backupNotes, snapshot.assets, versions, snapshot.attachments, workspace, attachmentHistory))
       localStorage.setItem('no-tie-last-automatic-backup', String(info.createdAt))
       setAutoBackups(await getAutoBackups())
       if (!silent) setToast(`Utworzono kopię zapasową: ${info.fileName}`)
@@ -2744,7 +3242,7 @@ function App() {
   }
 
   useEffect(() => {
-    if (!ready) return
+    if (!ready || !libraryPayloadsReady) return
     const checkBackupSchedule = () => {
       const previous = Number(localStorage.getItem('no-tie-last-automatic-backup') ?? '0')
       if (Date.now() - previous >= 86_400_000) void createAutomaticBackup(true)
@@ -2752,7 +3250,7 @@ function App() {
     checkBackupSchedule()
     const interval = window.setInterval(checkBackupSchedule, 60 * 60_000)
     return () => window.clearInterval(interval)
-  }, [ready])
+  }, [ready, libraryPayloadsReady])
 
   async function downloadAutomaticBackup(fileName: string) {
     try {
@@ -2824,9 +3322,10 @@ function App() {
 
   async function regenerateFlashcard(card: Flashcard): Promise<{ question: string; answer: string }> {
     return runAiTask(`Popraw fiszkę · ${card.question.slice(0, 45)}`, async signal => {
-    const note = resolveWikiTarget(notes, card.noteId)
-    if (!note) throw new Error('Nie znaleziono notatki źródłowej tej fiszki.')
-    if (!aiCanAccessNote(note)) throw new Error('Ograniczenia dostępu nie pozwalają AI czytać tego folderu.')
+    const noteHeader = resolveWikiTarget(notes, card.noteId)
+    if (!noteHeader) throw new Error('Nie znaleziono notatki źródłowej tej fiszki.')
+    if (!aiCanAccessNote(noteHeader)) throw new Error('Ograniczenia dostępu nie pozwalają AI czytać tego folderu.')
+    const note = noteHeader.contentLoaded === false ? { ...noteHeader, content: await getNoteBody(noteHeader.id), contentLoaded: true } : noteHeader
     if (!ollamaModel.trim()) throw new Error('Wybierz model Ollama w ustawieniach.')
 
     const contextImages: string[] = []
@@ -2989,13 +3488,26 @@ function App() {
     })
   }
 
-  function trashNoteData(noteIds: Set<string>, batchId = crypto.randomUUID()) {
+  async function trashNoteData(noteIds: Set<string>, batchId = crypto.randomUUID()) {
     const deletedAt = Date.now()
-    return notes.filter(note => noteIds.has(note.id)).map(note => ({
-      id: crypto.randomUUID(), batchId, deletedAt, note: copyNote(note),
-      assets: assets.filter(asset => asset.noteId === note.id).map(asset => ({ ...asset })),
-      attachments: attachments.filter(attachment => attachment.noteId === note.id).map(attachment => ({ ...attachment })),
-    }))
+    const targets = notes.filter(note => noteIds.has(note.id))
+    const entries: TrashEntry[] = []
+    for (let offset = 0; offset < targets.length; offset += 24) {
+      const batch = targets.slice(offset, offset + 24)
+      const notesWithContent = await Promise.all(batch.map(async note => {
+        const pending = pendingContentPatches.current.get(note.id)?.content
+        const cached = noteBodiesRef.current.get(note.id)
+        const content = pending ?? cached ?? (note.contentLoaded === false ? await getNoteBody(note.id) : note.content)
+        return { ...note, content, contentLoaded: true }
+      }))
+      entries.push(...notesWithContent.map(note => ({
+        id: crypto.randomUUID(), batchId, deletedAt, note: copyNote(note),
+        assets: assets.filter(asset => asset.noteId === note.id).map(asset => ({ ...asset })),
+        attachments: attachments.filter(attachment => attachment.noteId === note.id).map(attachment => ({ ...attachment })),
+      })))
+      if (offset + batch.length < targets.length) await new Promise<void>(resolve => window.setTimeout(resolve, 0))
+    }
+    return entries
   }
 
   async function restoreTrashEntry(entryId: string) {
@@ -3069,17 +3581,21 @@ function App() {
     const taskId = beginArchiveTask('export', 'Eksport paczki No-Tie')
     try {
       await letProgressPaint()
+      const diskNotes = await getNotes()
+      const diskById = new Map(diskNotes.map(note => [note.id, note]))
+      const exportNotes = notes.map(note => ({ ...note, content: pendingContentPatches.current.get(note.id)?.content ?? noteBodiesRef.current.get(note.id) ?? diskById.get(note.id)?.content ?? '', contentLoaded: true }))
       const versions: NoteVersion[] = []
       const attachmentHistory: NoteAttachmentHistory[] = []
-      updateArchiveTask(taskId, { phase: 'Zbieram historię i ustawienia', percent: 3, completed: 0, total: notes.length, current: '', counterLabel: 'notatek' })
-      await processBatches(notes, async note => {
+      updateArchiveTask(taskId, { phase: 'Zbieram historię i ustawienia', percent: 3, completed: 0, total: exportNotes.length, current: '', counterLabel: 'notatek' })
+      await processBatches(exportNotes, async note => {
         await flushNoteVersion(note.id, note)
         versions.push(...await getNoteVersions(note.id))
         attachmentHistory.push(...await getAttachmentHistory(note.id))
-      }, (completed, note) => updateArchiveTask(taskId, { phase: 'Zbieram historię notatek', percent: 3 + Math.round((completed / Math.max(1, notes.length)) * 4), completed, total: notes.length, current: note.title || note.id, counterLabel: 'notatek' }))
+      }, (completed, note) => updateArchiveTask(taskId, { phase: 'Zbieram historię notatek', percent: 3 + Math.round((completed / Math.max(1, exportNotes.length)) * 4), completed, total: exportNotes.length, current: note.title || note.id, counterLabel: 'notatek' }))
       const workspace = { reviewSessions, savedSearches, noteTemplates: templates, folderColors, flashcards, flashcardTrash, trash: trashEntries, organization: organizationSettings }
-      updateArchiveTask(taskId, { phase: 'Przygotowuję pliki do spakowania', percent: 7, completed: 0, total: notes.length, counterLabel: 'notatek' })
-      const savedPath = await exportArchiveToFolder(notes, assets, versions, attachments, workspace, attachmentHistory, progress => archiveTaskProgress(taskId, progress))
+      updateArchiveTask(taskId, { phase: 'Przygotowuję pliki do spakowania', percent: 7, completed: 0, total: exportNotes.length, counterLabel: 'notatek' })
+      const { exportArchiveToFolder } = await import('./archive')
+      const savedPath = await exportArchiveToFolder(exportNotes, assets, versions, attachments, workspace, attachmentHistory, progress => archiveTaskProgress(taskId, progress))
       if (!savedPath) { completeArchiveTask(taskId, 'done', 'Eksport został anulowany.'); return }
       completeArchiveTask(taskId, 'done', `Paczka została zapisana: ${savedPath}`)
     } catch (error) {
@@ -3092,8 +3608,12 @@ function App() {
     const taskId = beginArchiveTask('export', 'Eksport vaulta Obsidiana')
     try {
       await letProgressPaint()
+      const diskNotes = await getNotes()
+      const diskById = new Map(diskNotes.map(note => [note.id, note]))
+      const exportNotes = notes.map(note => ({ ...note, content: pendingContentPatches.current.get(note.id)?.content ?? noteBodiesRef.current.get(note.id) ?? diskById.get(note.id)?.content ?? '', contentLoaded: true }))
       updateArchiveTask(taskId, { phase: 'Przygotowuję notatki i załączniki', percent: 5, completed: 0, total: notes.length, counterLabel: 'notatek' })
-      const savedPath = await exportObsidianVaultToFolder(notes, assets, attachments, progress => archiveTaskProgress(taskId, progress))
+      const { exportObsidianVaultToFolder } = await import('./archive')
+      const savedPath = await exportObsidianVaultToFolder(exportNotes, assets, attachments, progress => archiveTaskProgress(taskId, progress))
       if (!savedPath) { completeArchiveTask(taskId, 'done', 'Eksport został anulowany.'); return }
       completeArchiveTask(taskId, 'done', `Zapisano ${savedPath}. Rozpakuj ZIP i otwórz folder w Obsidianie.`)
     } catch (error) {
@@ -3150,10 +3670,12 @@ function App() {
   useEffect(() => {
     if (!openActionMenu) return
     const onPointerDown = (event: PointerEvent) => {
-      if (!(event.target instanceof Element) || !event.target.closest('.entry-actions')) setOpenActionMenu('')
+      if (!(event.target instanceof Element) || !event.target.closest('.sidebar-context-menu')) setOpenActionMenu(null)
     }
+    const onKeyDown = (event: KeyboardEvent) => { if (event.key === 'Escape') setOpenActionMenu(null) }
     window.addEventListener('pointerdown', onPointerDown)
-    return () => window.removeEventListener('pointerdown', onPointerDown)
+    window.addEventListener('keydown', onKeyDown)
+    return () => { window.removeEventListener('pointerdown', onPointerDown); window.removeEventListener('keydown', onKeyDown) }
   }, [openActionMenu])
 
   async function handleImport(event: React.ChangeEvent<HTMLInputElement>) {
@@ -3177,6 +3699,7 @@ function App() {
       } else {
         updateArchiveTask(taskId, { phase: 'Wczytuję zawartość archiwum', percent: 5, current: file.name })
         const bytes = new Uint8Array(await file.arrayBuffer())
+        const { parseArchive } = await import('./archive')
         parsed = await parseArchive(bytes, progress => archiveTaskProgress(taskId, progress))
       }
       updateArchiveTask(taskId, { phase: 'Zapisuję notatki i załączniki', percent: 75, completed: 0, total: parsed.notes.length + parsed.assets.length + parsed.attachments.length, current: '' })
@@ -3275,7 +3798,9 @@ function App() {
     try {
       await letProgressPaint()
       updateArchiveTask(taskId, { phase: 'Odczytuję kopię zapasową', percent: 5, current: fileName })
-      const imported = await parseArchive(await readAutoBackup(fileName), progress => archiveTaskProgress(taskId, progress))
+      const backupBytes = await readAutoBackup(fileName)
+      const { parseArchive } = await import('./archive')
+      const imported = await parseArchive(backupBytes, progress => archiveTaskProgress(taskId, progress))
       await applyParsedArchive(imported, true, progress => updateArchiveTask(taskId, {
         phase: progress.phase,
         percent: progress.phase.startsWith('Czyszczę') ? 75 + Math.round((progress.completed / Math.max(1, progress.total)) * 4) : 79 + Math.round((progress.completed / Math.max(1, progress.total)) * 20),
@@ -3327,9 +3852,9 @@ function App() {
     if (!showCommandPalette) return []
     const openPage = (pageId: string, filter: Filter = 'all') => () => { setShowCreateNotePage(false); setActiveReviewSessionId(pageId); setActiveFilter(filter); setMobileDrawer('none') }
     const commands: PaletteCommand[] = [
-      { id: 'all-notes', title: 'Wszystkie notatki', detail: 'Otwórz wyszukiwarkę i bibliotekę', group: 'Widoki', run: () => { setAllNotesPreset('all'); setAllNotesFolderPreset(''); setAllNotesPresetRevision(value => value + 1); openPage(ALL_NOTES_PAGE_ID)() } },
-      { id: 'favorites', title: 'Ulubione', detail: 'Pokaż ulubione notatki', group: 'Widoki', run: () => { setAllNotesPreset('favorites'); setAllNotesFolderPreset(''); setAllNotesPresetRevision(value => value + 1); openPage(ALL_NOTES_PAGE_ID)() } },
-      { id: 'recent', title: 'Ostatnie notatki', detail: 'Sortuj od ostatnio zmienionych', group: 'Widoki', run: () => { setAllNotesPreset('recent'); setAllNotesFolderPreset(''); setAllNotesPresetRevision(value => value + 1); openPage(ALL_NOTES_PAGE_ID)() } },
+      { id: 'all-notes', title: 'Biblioteka', detail: 'Przeszukuj i porządkuj notatki', group: 'Widoki', run: () => openAllNotesView('all') },
+      { id: 'favorites', title: 'Ulubione', detail: 'Pokaż ulubione notatki', group: 'Widoki', run: () => openAllNotesView('favorites') },
+      { id: 'recent', title: 'Ostatnie notatki', detail: 'Sortuj od ostatnio zmienionych', group: 'Widoki', run: () => openAllNotesView('recent') },
       { id: 'new-note', title: 'Nowa notatka', detail: 'Utwórz notatkę z szablonu', group: 'Narzędzia', run: openCreateNote },
       { id: 'flashcards', title: 'Fiszki', detail: 'Otwórz moduł fiszek', group: 'Narzędzia', run: openPage(FLASHCARDS_PAGE_ID) },
       { id: 'tasks', title: 'Zadania', detail: 'Otwórz listę zadań', group: 'Narzędzia', run: openPage(TASKS_PAGE_ID) },
@@ -3356,102 +3881,106 @@ function App() {
   }
 
   return (
-    <main className={`app-shell ${mobileDrawer !== 'none' ? 'drawer-open' : ''} ${entryDragVisual ? 'entry-dragging' : ''} ${showChat ? 'with-ollama-chat' : ''} ${showLibrary ? '' : 'library-hidden'} ${showMainSidebar ? '' : 'sidebar-hidden'}`}>
-      <aside className={`sidebar ${mobileDrawer === 'sidebar' ? 'mobile-visible' : ''}`} onClickCapture={event => {
+    <main className={`app-shell ${mobileDrawer !== 'none' ? 'drawer-open' : ''} ${entryDragVisual ? 'entry-dragging' : ''} ${showChat ? 'with-ollama-chat' : ''} ${showMainSidebar ? '' : 'sidebar-hidden'} ${showFoldersPanel ? '' : 'folders-panel-hidden'}`} style={{ '--folders-panel-width': `${showFoldersPanel ? Math.min(folderPanelWidth, maxFolderPanelWidth()) : 0}px` } as CSSProperties}>
+      {(showMainSidebar || mobileDrawer === 'sidebar') && <aside className={`sidebar ${mobileDrawer === 'sidebar' ? 'mobile-visible' : ''}`} onClickCapture={event => {
         const target = event.target
         if (target instanceof Element && target.closest('.nav-item, .folder-file-item')) setShowCreateNotePage(false)
       }}>
         <div className="sidebar-content">
-          <div className="brand-row"><div className="brand-mark">N</div><span>No-Tie</span><button className="mobile-close icon-button" onClick={() => setMobileDrawer('none')} aria-label="Zamknij menu"><X size={18} /></button></div>
-          <button className="new-note-button" onClick={openCreateNote}><Plus size={17} /><span>Nowa notatka</span><kbd>N</kbd></button>
+          <div className="brand-row" title="No-Tie"><div className="brand-mark">N</div><span>No-Tie</span><button className="mobile-close icon-button" onClick={() => setMobileDrawer('none')} aria-label="Zamknij menu"><X size={18} /></button></div>
+          <button className="new-note-button" onClick={openCreateNote} title="Nowa notatka (N)" aria-label="Nowa notatka"><Plus size={17} /><span>Nowa notatka</span><kbd>N</kbd></button>
           <div className="sidebar-section">
             <span className="section-label">BIBLIOTEKA</span>
-            <button className={`nav-item ${showingAllNotesPage && allNotesPreset === 'all' ? 'active' : ''}`} onClick={() => { setActiveReviewSessionId(ALL_NOTES_PAGE_ID); setAllNotesPreset('all'); setAllNotesFolderPreset(''); setAllNotesPresetRevision(value => value + 1); setActiveFilter('all'); setMobileDrawer('none') }}><BookOpen size={17} /><span>Wszystkie notatki</span><span className="nav-count">{notes.length}</span></button>
-            <button className={`nav-item ${showingAllNotesPage && allNotesPreset === 'favorites' ? 'active' : ''}`} onClick={() => { setActiveReviewSessionId(ALL_NOTES_PAGE_ID); setAllNotesPreset('favorites'); setAllNotesFolderPreset(''); setAllNotesPresetRevision(value => value + 1); setActiveFilter('all'); setMobileDrawer('none') }}><Heart size={17} /><span>Ulubione</span><span className="nav-count">{favoriteNoteCount}</span></button>
-            <button className={`nav-item ${showingAllNotesPage && allNotesPreset === 'recent' ? 'active' : ''}`} onClick={() => { setActiveReviewSessionId(ALL_NOTES_PAGE_ID); setAllNotesPreset('recent'); setAllNotesFolderPreset(''); setAllNotesPresetRevision(value => value + 1); setActiveFilter('all'); setMobileDrawer('none') }}><Clock3 size={17} /><span>Ostatnie</span></button>
+            <button className={`nav-item ${showingAllNotesPage && allNotesPreset === 'all' && !activeSmartFolder ? 'active' : ''}`} title="Biblioteka" aria-label="Biblioteka" onClick={() => openAllNotesView('all')}><BookOpen size={17} /><span>Biblioteka</span><span className="nav-count" title={`${notes.length} notatek`}>{compactSidebarCount(notes.length)}</span></button>
+            <button className={`nav-item ${showingAllNotesPage && allNotesPreset === 'favorites' ? 'active' : ''}`} title="Ulubione" aria-label="Ulubione" onClick={() => openAllNotesView('favorites')}><Heart size={17} /><span>Ulubione</span><span className="nav-count" title={`${favoriteNoteCount} ulubionych notatek`}>{compactSidebarCount(favoriteNoteCount)}</span></button>
+            <button className={`nav-item ${showingAllNotesPage && allNotesPreset === 'recent' ? 'active' : ''}`} title="Ostatnie notatki" aria-label="Ostatnie notatki" onClick={() => openAllNotesView('recent')}><Clock3 size={17} /><span>Ostatnie</span></button>
           </div>
           <div className="sidebar-section workspace-tools">
             <div className="section-heading"><span className="section-label">NARZĘDZIA</span></div>
-            <button className={`nav-item ${showingFlashcardsPage ? 'active' : ''}`} onClick={() => { setActiveReviewSessionId(FLASHCARDS_PAGE_ID); setActiveFilter('all'); setMobileDrawer('none') }}><Brain size={16} /><span>Fiszki</span><span className="nav-count">{flashcards.filter(card => !card.suspended && card.dueAt <= Date.now()).length}</span></button>
-            <button className={`nav-item ${showingTaskManagerPage ? 'active' : ''}`} onClick={() => { setActiveReviewSessionId(TASKS_PAGE_ID); setMobileDrawer('none') }}><CheckSquare2 size={16} /><span>Zadania</span><span className="nav-count">{parsedTasks.filter(task => !task.done).length}</span></button>
-            <button className="nav-item" onClick={() => setShowDailyNotes(true)}><CalendarDays size={16} /><span>Notatki dzienne</span></button>
-            <button className={`nav-item ${showingReviewSessionsOverview || activeReviewSession ? 'active' : ''}`} onClick={() => { setActiveReviewSessionId(REVIEW_SESSIONS_OVERVIEW_ID); setMobileDrawer('none') }}><Repeat2 size={16} /><span>Powtórki</span><span className="nav-count">{reviewSessions.length}</span></button>
-            <button className={`nav-item ${showingSavedSearchesPage ? 'active' : ''}`} onClick={() => { setActiveReviewSessionId(SAVED_SEARCHES_PAGE_ID); setMobileDrawer('none') }}><BookmarkPlus size={16} /><span>Zapisane widoki</span><span className="nav-count">{savedSearches.length}</span></button>
-            <button className={`nav-item ${showingNoteTemplatesPage ? 'active' : ''}`} onClick={() => { setActiveReviewSessionId(NOTE_TEMPLATES_PAGE_ID); setMobileDrawer('none') }}><FilePlus2 size={16} /><span>Szablony</span><span className="nav-count">{templates.length}</span></button>
-            {featureFlags.attachmentManager && <button className={`nav-item ${showingAttachmentManagerPage ? 'active' : ''}`} onClick={() => { setActiveReviewSessionId(ATTACHMENTS_PAGE_ID); setMobileDrawer('none') }}><Paperclip size={16} /><span>Załączniki</span><span className="nav-count">{visibleAttachmentCount}</span></button>}
-            {featureFlags.noteBoard && <button className={`nav-item ${showingNoteBoardPage ? 'active' : ''}`} onClick={() => { setActiveReviewSessionId(NOTE_BOARD_PAGE_ID); setMobileDrawer('none') }}><Columns3 size={16} /><span>Statusy notatek</span></button>}
-            {featureFlags.projectDashboard && <button className={`nav-item ${showingProjectDashboardPage ? 'active' : ''}`} onClick={() => { setActiveReviewSessionId(PROJECTS_PAGE_ID); setMobileDrawer('none') }}><BarChart3 size={16} /><span>Pulpit projektów</span></button>}
-            <button className={`nav-item ${showingCollectionsPage ? 'active' : ''}`} onClick={() => { setCollectionFocusId(''); setActiveReviewSessionId(COLLECTIONS_PAGE_ID); setMobileDrawer('none') }}><FolderHeart size={16} /><span>Kolekcje</span><span className="nav-count">{organizationSettings.collections.length}</span></button>
-            <button className={`nav-item ${showingLinkAuditPage ? 'active' : ''}`} onClick={() => { setActiveReviewSessionId(LINK_AUDIT_PAGE_ID); setMobileDrawer('none') }}><Network size={16} /><span>Kontrola powiązań</span></button>
-            <button className="nav-item" onClick={() => setShowWorkspaceLayouts(true)}><LayoutTemplate size={16} /><span>Obszary robocze</span><span className="nav-count">{organizationSettings.workspaces.length}</span></button>
-            <button className="nav-item" onClick={() => setShowKnowledgeGraph(true)}><Network size={16} /><span>Mapa powiązań</span></button>
-            {featureFlags.duplicateManager && <button className="nav-item" onClick={() => setShowDuplicateManager(true)}><Copy size={16} /><span>Duplikaty</span></button>}
-            <button className="nav-item" onClick={() => setShowBackupTrash(true)}><Archive size={16} /><span>Kopie i kosz</span><span className="nav-count">{trashEntries.length}</span></button>
+            <button className={`nav-item ${showingFlashcardsPage ? 'active' : ''}`} title="Fiszki" aria-label="Fiszki" onClick={() => { setActiveReviewSessionId(FLASHCARDS_PAGE_ID); setActiveFilter('all'); setMobileDrawer('none') }}><Brain size={16} /><span>Fiszki</span><span className="nav-count" title={`${dueFlashcardCount} fiszek do powtórki`}>{compactSidebarCount(dueFlashcardCount)}</span></button>
+            <button className={`nav-item ${showingTaskManagerPage ? 'active' : ''}`} title="Zadania" aria-label="Zadania" onClick={() => { setActiveReviewSessionId(TASKS_PAGE_ID); setMobileDrawer('none') }}><CheckSquare2 size={16} /><span>Zadania</span><span className="nav-count" title={`${incompleteTaskCount} niewykonanych zadań`}>{compactSidebarCount(incompleteTaskCount)}</span></button>
+            <button className="nav-item" title="Notatki dzienne" aria-label="Notatki dzienne" onClick={() => setShowDailyNotes(true)}><CalendarDays size={16} /><span>Notatki dzienne</span></button>
+            <button className={`nav-item ${showingReviewSessionsOverview || activeReviewSession ? 'active' : ''}`} title="Powtórki" aria-label="Powtórki" onClick={() => { setActiveReviewSessionId(REVIEW_SESSIONS_OVERVIEW_ID); setMobileDrawer('none') }}><Repeat2 size={16} /><span>Powtórki</span><span className="nav-count" title={`${reviewSessions.length} zapisanych powtórek`}>{compactSidebarCount(reviewSessions.length)}</span></button>
+            <button className={`nav-item ${showingSavedSearchesPage ? 'active' : ''}`} title="Zapisane widoki" aria-label="Zapisane widoki" onClick={() => { setActiveReviewSessionId(SAVED_SEARCHES_PAGE_ID); setMobileDrawer('none') }}><BookmarkPlus size={16} /><span>Zapisane widoki</span><span className="nav-count" title={`${savedSearches.length} zapisanych widoków`}>{compactSidebarCount(savedSearches.length)}</span></button>
+            <button className={`nav-item ${showingNoteTemplatesPage ? 'active' : ''}`} title="Szablony notatek" aria-label="Szablony notatek" onClick={() => { setActiveReviewSessionId(NOTE_TEMPLATES_PAGE_ID); setMobileDrawer('none') }}><FilePlus2 size={16} /><span>Szablony</span><span className="nav-count" title={`${templates.length} szablonów`}>{compactSidebarCount(templates.length)}</span></button>
+            {featureFlags.attachmentManager && <button className={`nav-item ${showingAttachmentManagerPage ? 'active' : ''}`} title="Załączniki" aria-label="Załączniki" onClick={() => { setActiveReviewSessionId(ATTACHMENTS_PAGE_ID); setMobileDrawer('none') }}><Paperclip size={16} /><span>Załączniki</span><span className="nav-count" title={`${visibleAttachmentCount} załączników`}>{compactSidebarCount(visibleAttachmentCount)}</span></button>}
+            {featureFlags.noteBoard && <button className={`nav-item ${showingNoteBoardPage ? 'active' : ''}`} title="Statusy notatek" aria-label="Statusy notatek" onClick={() => { setActiveReviewSessionId(NOTE_BOARD_PAGE_ID); setMobileDrawer('none') }}><Columns3 size={16} /><span>Statusy notatek</span></button>}
+            {featureFlags.projectDashboard && <button className={`nav-item ${showingProjectDashboardPage ? 'active' : ''}`} title="Pulpit projektów" aria-label="Pulpit projektów" onClick={() => { setActiveReviewSessionId(PROJECTS_PAGE_ID); setMobileDrawer('none') }}><BarChart3 size={16} /><span>Pulpit projektów</span></button>}
+            <button className={`nav-item ${showingCollectionsPage ? 'active' : ''}`} title="Kolekcje" aria-label="Kolekcje" onClick={() => { setCollectionFocusId(''); setActiveReviewSessionId(COLLECTIONS_PAGE_ID); setMobileDrawer('none') }}><FolderHeart size={16} /><span>Kolekcje</span><span className="nav-count" title={`${organizationSettings.collections.length} kolekcji`}>{compactSidebarCount(organizationSettings.collections.length)}</span></button>
+            <button className={`nav-item ${showingLinkAuditPage ? 'active' : ''}`} title="Kontrola powiązań" aria-label="Kontrola powiązań" onClick={() => { setActiveReviewSessionId(LINK_AUDIT_PAGE_ID); setMobileDrawer('none') }}><Link2 size={16} /><span>Kontrola powiązań</span></button>
+            <button className="nav-item" title="Obszary robocze" aria-label="Obszary robocze" onClick={() => setShowWorkspaceLayouts(true)}><LayoutTemplate size={16} /><span>Obszary robocze</span><span className="nav-count" title={`${organizationSettings.workspaces.length} obszarów roboczych`}>{compactSidebarCount(organizationSettings.workspaces.length)}</span></button>
+            <button className="nav-item" title="Mapa powiązań" aria-label="Mapa powiązań" onClick={() => setShowKnowledgeGraph(true)}><Network size={16} /><span>Mapa powiązań</span></button>
+            {featureFlags.duplicateManager && <button className="nav-item" title="Znajdź duplikaty" aria-label="Znajdź duplikaty" onClick={() => setShowDuplicateManager(true)}><Copy size={16} /><span>Duplikaty</span></button>}
+            <button className="nav-item" title="Kopie zapasowe i kosz" aria-label="Kopie zapasowe i kosz" onClick={() => setShowBackupTrash(true)}><Archive size={16} /><span>Kopie i kosz</span><span className="nav-count" title={`${trashEntries.length} elementów w koszu`}>{compactSidebarCount(trashEntries.length)}</span></button>
           </div>
-          {featureFlags.smartFolders && savedSearches.length > 0 && <div className="sidebar-section smart-folders-section"><div className="section-heading"><span className="section-label">INTELIGENTNE FOLDERY</span></div>{savedSearches.map(search => <button type="button" className={`nav-item ${activeFilter === `smart:${search.id}` ? 'active' : ''}`} key={search.id} onClick={() => { setActiveReviewSessionId(''); setActiveFilter(`smart:${search.id}`); setQuery(''); setSearchTag(''); setSearchFolder(''); setMobileDrawer('none') }}><Search size={15} /><span>{search.name}</span>{activeFilter === `smart:${search.id}` && <span className="nav-count">{smartFolderResults?.length ?? 0}</span>}</button>)}</div>}
-          <div className="sidebar-section folders-section">
-            <div className="section-heading"><span className="section-label">FOLDERY</span><button className="tiny-icon" title="Dodaj folder" aria-label="Dodaj folder" onClick={() => { setFolderDraft(''); setShowFolderDialog(true) }}><Plus size={15} /></button></div>
-            <div className="folder-entries" data-drop-folder="">
-              {renderFolderNotes('')}
-              {renderFolderTree('')}
-              {!folders.length && !rootNotes.length && <p className="empty-hint">Utwórz folder lub przeciągnij tu notatkę.</p>}
-            </div>
-          </div>
+          {featureFlags.smartFolders && savedSearches.length > 0 && <div className="sidebar-section smart-folders-section"><div className="section-heading"><span className="section-label">INTELIGENTNE FOLDERY</span></div>{savedSearches.map(search => <button type="button" className={`nav-item ${activeFilter === `smart:${search.id}` ? 'active' : ''}`} title={search.name} aria-label={`Inteligentny folder: ${search.name}`} key={search.id} onClick={() => { setShowCreateNotePage(false); setActiveReviewSessionId(ALL_NOTES_PAGE_ID); setAllNotesPreset('all'); setAllNotesFolderPreset(search.folder); setAllNotesPresetRevision(value => value + 1); setActiveFilter(`smart:${search.id}`); setQuery(search.query); setSearchTag(search.tag); setSearchFolder(search.folder); setMobileDrawer('none') }}><Search size={15} /><span>{search.name}</span>{activeFilter === `smart:${search.id}` && <span className="nav-count">{compactSidebarCount(smartFolderResults?.length ?? 0)}</span>}</button>)}</div>}
         </div>
         <div className="sidebar-bottom">
           <div className="offline-card"><span className="online-dot" /><div><strong>Dane lokalne</strong><span>{storageLocationLabel} · offline</span></div><Check size={15} /></div>
           <div className="user-row"><div className="avatar">N</div><div><strong>Moje notatki</strong><span>Przestrzeń prywatna</span></div><div className="user-row-actions">{featureFlags.appLock && hasLockPin && <button type="button" className="sidebar-help-button" onClick={lockApp} title="Zablokuj aplikację" aria-label="Zablokuj aplikację"><LockKeyhole size={17} /></button>}<button type="button" className="sidebar-help-button" onClick={() => setShowFeatureManager(true)} title="Moduły aplikacji" aria-label="Otwórz moduły aplikacji"><Puzzle size={17} /></button><button type="button" className="sidebar-help-button" onClick={() => setShowHelp(true)} title="Instrukcja obsługi" aria-label="Otwórz instrukcję obsługi"><CircleHelp size={19} /></button></div></div>
         </div>
-      </aside>
+      </aside>}
 
-      <section className={`notes-panel ${mobileDrawer === 'notes' ? 'mobile-visible' : ''}`} hidden={!showLibrary}>
-        <div className="notes-panel-heading"><div><p className="eyebrow">TWOJA BIBLIOTEKA</p><h1>{activeFilter === 'all' ? 'Notatki' : activeFilter === 'favorites' ? 'Ulubione' : activeFilter === 'root' ? 'Poziom główny' : activeSmartFolder?.name ?? activeFilter.split('/').at(-1)}</h1></div><button className="mobile-close icon-button" onClick={() => setMobileDrawer('none')} aria-label="Zamknij listę"><X size={18} /></button></div>
-        <div className="search-controls">
-          <label className="search-box"><Search size={16} /><input value={query} onChange={event => { setQuery(event.target.value); setQuickSearchActiveIndex(0) }} placeholder="Szukaj notatek…" title="Szukaj także po treści, tagach i folderach. Obsługuje tag:, folder:, title: i content:." /><kbd>⌘/Ctrl K</kbd></label>
-          <button className={`search-filter-button ${showSearchFilters ? 'active' : ''}`} type="button" aria-label="Filtry wyszukiwania" aria-expanded={showSearchFilters} title="Filtruj po tagu i folderze" onClick={() => setShowSearchFilters(value => !value)}><SlidersHorizontal size={16} /></button>
-          <button className="search-quick-button" type="button" aria-label="Otwórz szybkie wyszukiwanie" title="Szybkie wyszukiwanie (Ctrl+K)" onClick={() => { setQuickSearchActiveIndex(0); setShowQuickSearch(true) }}><Search size={15} /><kbd>⌘K</kbd></button>
+      {(showFoldersPanel || mobileDrawer === 'folders') && <aside className={`folder-panel ${mobileDrawer === 'folders' ? 'mobile-visible' : ''}`} onClickCapture={event => {
+        const target = event.target
+        if (target instanceof Element && target.closest('.nav-item, .folder-file-item')) setShowCreateNotePage(false)
+      }}>
+        <div className="folder-panel-resize-handle" role="separator" aria-orientation="vertical" aria-label="Zmień szerokość panelu Foldery i pliki" aria-valuemin={MIN_FOLDER_PANEL_WIDTH} aria-valuemax={maxFolderPanelWidth()} aria-valuenow={Math.min(folderPanelWidth, maxFolderPanelWidth())} tabIndex={0} onPointerDown={event => { event.preventDefault(); folderPanelResizeStart.current = { pointerId: event.pointerId, x: event.clientX, width: event.currentTarget.parentElement?.getBoundingClientRect().width ?? folderPanelWidthRef.current }; event.currentTarget.setPointerCapture(event.pointerId) }} onPointerMove={event => { const start = folderPanelResizeStart.current; if (!start || start.pointerId !== event.pointerId) return; updateFolderPanelWidth(start.width + event.clientX - start.x) }} onPointerUp={event => { if (folderPanelResizeStart.current?.pointerId !== event.pointerId) return; finishFolderPanelResize() }} onPointerCancel={finishFolderPanelResize} onLostPointerCapture={() => { if (folderPanelResizeStart.current) finishFolderPanelResize() }} onDoubleClick={() => updateFolderPanelWidth(DEFAULT_FOLDER_PANEL_WIDTH, true)} onKeyDown={event => { if (event.key === 'ArrowLeft') { event.preventDefault(); updateFolderPanelWidth(folderPanelWidthRef.current - 16, true) } else if (event.key === 'ArrowRight') { event.preventDefault(); updateFolderPanelWidth(folderPanelWidthRef.current + 16, true) } else if (event.key === 'Home') { event.preventDefault(); updateFolderPanelWidth(MIN_FOLDER_PANEL_WIDTH, true) } else if (event.key === 'End') { event.preventDefault(); updateFolderPanelWidth(maxFolderPanelWidth(), true) } }} />
+        <header className="folder-panel-heading">
+          <div><p className="eyebrow">ORGANIZACJA NOTATEK</p><h2>Foldery i pliki</h2></div>
+          <div className="folder-panel-heading-actions"><button className="tiny-icon" title="Dodaj folder" aria-label="Dodaj folder" onClick={() => { setFolderDraft(''); setShowFolderDialog(true) }}><Plus size={15} /></button><button className="mobile-close icon-button" onClick={() => setMobileDrawer('none')} aria-label="Zamknij foldery i pliki"><X size={18} /></button></div>
+        </header>
+        <div className="folders-section">
+          <VirtualizedList
+            className="folder-entries"
+            dataDropFolder=""
+            items={folderPanelEntries}
+            itemHeight={29}
+            keyOf={entry => entry.kind === 'note' ? `note:${entry.note.id}` : entry.kind === 'folder' ? `folder:${entry.path}` : `more:${entry.folder}`}
+            renderItem={entry => {
+              if (entry.kind === 'note') return renderNoteFile(entry.note, entry.depth)
+              if (entry.kind === 'more') {
+                const limit = folderNoteLimits[entry.folder] ?? 60
+                return <button type="button" className="folder-more-notes" style={{ paddingLeft: `${18 + entry.depth * FOLDER_TREE_INDENT}px` }} onClick={() => setFolderNoteLimits(current => ({ ...current, [entry.folder]: limit + 60 }))}>{renderFolderBranchGuides(folderGuidesForEntry(entry.folder))}Pokaż kolejne notatki · pozostało {entry.remaining}</button>
+              }
+              const folder = entry.path
+              const label = folder.split('/').at(-1) ?? folder
+              const parent = folder.includes('/') ? folder.slice(0, folder.lastIndexOf('/')) : ''
+              const siblings = foldersByParent.get(parent) ?? []
+              const count = folderNoteCounts.get(folder) ?? 0
+              const target: EntryTarget = { kind: 'folder', path: folder }
+              const color = folderDisplayColor(folder)
+              const collapsed = collapsedFolders.has(folder)
+              return <div className="folder-tree-node" data-drop-folder={folder}>
+                {renderFolderBranchGuides(folderGuidesForEntry(folder, false))}
+                <div className={`folder-drop-row ${activeFilter === folder ? 'active' : ''} ${color ? 'has-entry-color' : ''}`} style={{ paddingLeft: `${6 + entry.depth * FOLDER_TREE_INDENT}px`, ...(entryColorStyle(color) ?? {}) }} data-drop-folder={folder} onContextMenu={event => handleEntryContextMenu(event, target)}>
+                  <button type="button" className="folder-collapse-button" onClick={event => { event.stopPropagation(); toggleFolderExpansion(folder) }} aria-label={collapsed ? `Rozwiń zawartość folderu ${folder}` : `Zwiń zawartość folderu ${folder}`} aria-expanded={!collapsed} title={collapsed ? 'Rozwiń folder' : 'Zwiń folder'}>{collapsed ? <ChevronRight size={14} /> : <ChevronDown size={14} />}</button>
+                  <button className={`nav-item folder-item ${activeFilter === folder && !showingWorkspacePage ? 'active' : ''} ${color ? 'has-entry-color' : ''}`} style={entryColorStyle(color)} onKeyDown={event => handleEntryMenuKeyDown(event, target)} onPointerDown={event => startEntryPointerDrag(event, target, label)} onClick={() => { if (ignoreClickAfterDrag()) return; setActiveReviewSessionId(''); setActiveFilter(folder); setMobileDrawer('none'); toggleFolderExpansion(folder) }} aria-expanded={!collapsed} title={`Kliknij, aby ${collapsed ? 'rozwinąć' : 'zwinąć'} folder „${label}”. Przeciągnij, aby go przenieść.`}><Folder size={16} /><span>{label}</span><span className="nav-count">{count}</span></button>
+                  {renderEntryMenu(target, siblings)}
+                </div>
+              </div>
+            }}
+            footer={!folders.length && !rootNotes.length && <p className="empty-hint">Utwórz folder lub przeciągnij tu notatkę.</p>}
+          />
         </div>
-        {showSearchFilters && <div className="search-filter-panel">
-          <label><span>Tag</span><select value={searchTag} onChange={event => setSearchTag(event.target.value)} aria-label="Filtruj bibliotekę po tagu"><option value="">Wszystkie tagi</option>{tagOptions.map(tag => <option key={tag} value={tag}>{tag}</option>)}</select></label>
-          <label><span>Folder</span><select value={searchFolder} onChange={event => setSearchFolder(event.target.value)} aria-label="Filtruj bibliotekę po folderze"><option value="">Wszystkie foldery</option><option value="__root__">Bez folderu</option>{folders.map(folder => <option key={folder} value={folder}>{folder}</option>)}</select></label>
-          {featureFlags.semanticSearch && <label className="semantic-search-toggle"><input type="checkbox" checked={semanticSearchEnabled} onChange={event => { setSemanticSearchEnabled(event.target.checked); localStorage.setItem('no-tie-semantic-search', String(event.target.checked)) }} />Szukaj semantycznie {semanticSearchBusy && <small>…</small>}</label>}
-          {(searchTag || searchFolder) && <button type="button" className="link-button" onClick={() => { setSearchTag(''); setSearchFolder('') }}>Wyczyść</button>}
-          {featureFlags.advancedQuery && <small>Zapytania: <code>tag:projekt</code>, <code>folder:Praca</code>, <code>title:spotkanie</code>, <code>content:ustalenia</code>, <code>after:2026-01-01</code>, <code>has:pdf</code>, <code>OR</code>, <code>NOT</code>.</small>}
-          {semanticSearchError && <small className="semantic-search-error" role="status">{semanticSearchError}</small>}
-        </div>}
-        {featureFlags.bulkActions && <div className="bulk-note-toolbar"><button type="button" className={`button ${bulkSelectMode ? 'primary' : 'secondary'}`} onClick={() => { setBulkSelectMode(value => !value); setBulkSelectedIds([]) }}>{bulkSelectMode ? 'Zakończ zaznaczanie' : 'Zaznacz notatki'}</button>{bulkSelectMode && <><span>{bulkSelectedIds.length} zaznaczono</span><button type="button" className="link-button" onClick={() => setBulkSelectedIds(visibleNotes.map(note => note.id))}>Zaznacz widoczne</button><select aria-label="Przenieś zaznaczone notatki do folderu" value={bulkTargetFolder} onChange={event => setBulkTargetFolder(event.target.value)}><option value="">Poziom główny</option>{folders.map(folder => <option key={folder} value={folder}>{folder}</option>)}</select><button type="button" className="button secondary" disabled={!bulkSelectedIds.length} onClick={moveSelectedNotesBulk}>Przenieś</button><input aria-label="Tag dla zaznaczonych notatek" value={bulkTagDraft} onChange={event => setBulkTagDraft(event.target.value)} placeholder="Dodaj/usuń tag" /><button type="button" className="button secondary" disabled={!bulkTagDraft.trim() || !bulkSelectedIds.length} onClick={applyBulkTag}>Zastosuj tag</button><button type="button" className="button danger-button" disabled={!bulkSelectedIds.length} onClick={() => void deleteSelectedNotesBulk()}><Trash2 size={13} />Do kosza</button></>}</div>}
-        <div className="list-toolbar"><span>{visibleNotes.length} NOTATKI</span><label className="list-view-select"><span>Widok</span><select value={noteDisplayMode} onChange={event => setDisplayMode(event.target.value as NoteDisplayMode)} aria-label="Sposób wyświetlania notatek"><option value="full">Treść i tagi</option><option value="names-tags">Nazwy i tagi</option><option value="names">Same nazwy</option></select></label></div>
-        <div className="note-list">
-          {visibleNotes.slice(0, noteListLimit).map(note => (
-            <div className="note-card-select-row" key={note.id}>{bulkSelectMode && <input type="checkbox" className="note-bulk-checkbox" aria-label={`Zaznacz notatkę ${note.title || 'Bez tytułu'}`} checked={bulkSelectedIds.includes(note.id)} onPointerDown={event => event.stopPropagation()} onClick={event => event.stopPropagation()} onChange={event => setBulkSelectedIds(current => event.target.checked ? [...new Set([...current, note.id])] : current.filter(id => id !== note.id))} />}<button className={`note-card view-${noteDisplayMode} ${selectedId === note.id ? 'selected' : ''} ${noteDisplayColor(note) ? 'has-entry-color' : ''}`} style={entryColorStyle(noteDisplayColor(note))} onPointerDown={event => startEntryPointerDrag(event, { kind: 'note', id: note.id }, note.title || 'Bez tytułu')} onClick={() => { if (ignoreClickAfterDrag() || bulkSelectMode) return; setActiveReviewSessionId(''); selectNote(note.id); setMobileDrawer('none') }}>
-              {noteDisplayMode === 'full' && <div className="note-card-top"><span className="note-date">{dateLabel(note.updatedAt)}</span>{note.favorite && <Star size={14} className="favorite-mini" fill="currentColor" />}</div>}
-              <strong>{note.title || 'Bez tytułu'}</strong>
-              {noteDisplayMode === 'full' && <p>{excerpt(note.content) || 'Pusta notatka'}</p>}
-              {noteDisplayMode !== 'names' && <div className="note-card-bottom">{noteDisplayMode === 'full' && note.folder && <span className="folder-pill"><Folder size={12} />{note.folder}</span>}{note.tags.map(cleanLibraryTag).filter(tag => tag && !/^[-:|\s]+$/.test(tag)).map((tag, index) => <span key={`${index}:${tag}`} className="tag-pill">{tag}</span>)}</div>}
-            </button></div>
-          ))}
-          {noteListLimit < visibleNotes.length && <button type="button" className="note-list-load-more" onClick={() => setNoteListLimit(limit => Math.min(visibleNotes.length, limit + 100))}>Pokaż kolejne {Math.min(100, visibleNotes.length - noteListLimit)} · pozostało {visibleNotes.length - noteListLimit}</button>}
-          {!visibleNotes.length && <div className="empty-state compact"><div className="empty-illustration"><Search size={22} /></div><strong>Brak pasujących notatek</strong><span>Spróbuj zmienić wyszukiwanie albo utwórz nową notatkę.</span><button className="button secondary" onClick={openCreateNote}><Plus size={15} />Nowa notatka</button></div>}
-        </div>
-        <div className="notes-list-footer"><span><span className="online-dot" />{usesNativeFiles ? ' Pliki na tym urządzeniu' : ' Zapis na tym urządzeniu'}</span></div>
-      </section>
+      </aside>}
 
       <section className="editor-panel">
         <header className="topbar">
           <div className="topbar-start">
-            <div className="mobile-actions"><button className="icon-button" onClick={() => setMobileDrawer('sidebar')} aria-label="Otwórz menu folderów i narzędzi"><Menu size={19} /></button><button className="icon-button" onClick={() => { if (!showLibrary) { localStorage.setItem('no-tie-library-visible', 'true'); setShowLibrary(true) } setMobileDrawer('notes') }} aria-label={showLibrary ? 'Pokaż notatki' : 'Pokaż bibliotekę'}><PanelLeft size={18} /></button></div>
+            <div className="mobile-actions"><button className="icon-button" onClick={() => setMobileDrawer('sidebar')} aria-label="Otwórz narzędzia"><Menu size={19} /></button><button className="icon-button" onClick={() => { if (!showFoldersPanel) { localStorage.setItem('no-tie-folders-panel-visible', 'true'); setShowFoldersPanel(true) } setMobileDrawer('folders') }} aria-label="Otwórz foldery i pliki"><Folder size={18} /></button><button className="icon-button" onClick={() => openAllNotesView('all')} aria-label="Otwórz Bibliotekę" title="Biblioteka"><BookOpen size={18} /></button></div>
             <div className="navigation-history-controls" aria-label="Historia widoków"><button type="button" className="icon-button" title="Poprzedni widok" aria-label="Poprzedni widok" disabled={navigationPosition <= 0} onClick={() => moveNavigationHistory(-1)}><ArrowLeft size={16} /></button><button type="button" className="icon-button" title="Następny widok" aria-label="Następny widok" disabled={navigationPosition < 0 || navigationPosition >= navigationStack.current.length - 1} onClick={() => moveNavigationHistory(1)}><ArrowRight size={16} /></button></div>
             <details className="topbar-dropdown topbar-dropdown-left" onBlur={event => { if (!event.currentTarget.contains(event.relatedTarget as Node | null)) event.currentTarget.removeAttribute('open') }}>
-              <summary className="topbar-dropdown-trigger" aria-label="Menu paneli i biblioteki"><MoreVertical size={16} /><span className="topbar-dropdown-label">Panele</span><ChevronDown size={13} /></summary>
-              <div className="topbar-dropdown-menu" role="group" aria-label="Panele i biblioteka">
-                <button type="button" onClick={event => { toggleSidebarPanel(); event.currentTarget.closest('details')?.removeAttribute('open') }}><PanelLeft size={15} /><span>{sidebarPanelIsVisible() ? 'Ukryj foldery i narzędzia' : 'Pokaż foldery i narzędzia'}</span>{sidebarPanelIsVisible() && <Check size={14} className="topbar-menu-check" />}</button>
-                <button type="button" onClick={event => { toggleLibraryPanel(); event.currentTarget.closest('details')?.removeAttribute('open') }}><BookOpen size={15} /><span>{libraryPanelIsVisible() ? 'Ukryj Twoją bibliotekę' : 'Pokaż Twoją bibliotekę'}</span>{libraryPanelIsVisible() && <Check size={14} className="topbar-menu-check" />}</button>
+              <summary className="topbar-dropdown-trigger" aria-label="Menu paneli"><MoreVertical size={16} /><span className="topbar-dropdown-label">Panele</span><ChevronDown size={13} /></summary>
+              <div className="topbar-dropdown-menu" role="group" aria-label="Panele">
+                <button type="button" onClick={event => { toggleSidebarPanel(); event.currentTarget.closest('details')?.removeAttribute('open') }}><PanelLeft size={15} /><span>{sidebarPanelIsVisible() ? 'Ukryj narzędzia' : 'Pokaż narzędzia'}</span>{sidebarPanelIsVisible() && <Check size={14} className="topbar-menu-check" />}</button>
+                <button type="button" onClick={event => { toggleFoldersPanelDrawer(); event.currentTarget.closest('details')?.removeAttribute('open') }}><Folder size={15} /><span>{foldersPanelIsVisible() ? 'Ukryj Foldery i pliki' : 'Pokaż Foldery i pliki'}</span>{foldersPanelIsVisible() && <Check size={14} className="topbar-menu-check" />}</button>
               </div>
             </details>
           </div>
           <nav className="breadcrumb" aria-label="Ścieżka nawigacji">
-            {showCreateNotePage ? <><button type="button" className="breadcrumb-link" onClick={() => openAllNotesFolder('')}>Notatki</button><span className="crumb-slash">/</span><span className="breadcrumb-current">Nowa notatka</span></> : showingToolsBreadcrumb ? <><span className="breadcrumb-section">Narzędzia</span><span className="crumb-slash">/</span><span className="breadcrumb-current">{toolsBreadcrumbTitle}</span></> : activeSmartFolder ? <><button type="button" className="breadcrumb-link" onClick={() => openAllNotesFolder('')}>Notatki</button><span className="crumb-slash">/</span><span className="breadcrumb-current">{activeSmartFolder.name}</span></> : <>
-              <button type="button" className="breadcrumb-link" onClick={() => openAllNotesFolder('')}>Notatki</button>
+            {showCreateNotePage ? <><button type="button" className="breadcrumb-link" onClick={() => openAllNotesFolder('')}>Biblioteka</button><span className="crumb-slash">/</span><span className="breadcrumb-current">Nowa notatka</span></> : showingToolsBreadcrumb ? <><span className="breadcrumb-section">Narzędzia</span><span className="crumb-slash">/</span><span className="breadcrumb-current">{toolsBreadcrumbTitle}</span></> : activeSmartFolder ? <><button type="button" className="breadcrumb-link" onClick={() => openAllNotesFolder('')}>Biblioteka</button><span className="crumb-slash">/</span><span className="breadcrumb-current">{activeSmartFolder.name}</span></> : <>
+              <button type="button" className="breadcrumb-link" onClick={() => openAllNotesFolder('')}>Biblioteka</button>
               {showingAllNotesPage && !allNotesFolderPreset && <span className="breadcrumb-pair"><span className="crumb-slash">/</span><button type="button" className="breadcrumb-link breadcrumb-current" aria-current="page" onClick={() => openAllNotesFolder('')}>Wszystkie notatki</button></span>}
               {breadcrumbFolders.map(folder => <span className="breadcrumb-pair" key={folder.path}><span className="crumb-slash">/</span><button type="button" className={`breadcrumb-link ${folder.path === breadcrumbFolderPath ? 'breadcrumb-current' : ''}`} aria-current={folder.path === breadcrumbFolderPath ? 'page' : undefined} onClick={() => openAllNotesFolder(folder.path)}>{folder.label}</button></span>)}
             </>}
@@ -3484,8 +4013,8 @@ function App() {
         <Suspense fallback={<div className="editor-loading">Otwieram widok…</div>}>
         {!showingWorkspacePage && noteGridEnabled ? (
           <NoteGridView
-            notes={noteGridIds.map(id => notes.find(note => note.id === id)).filter((note): note is Note => Boolean(note))}
-            allNotes={notes}
+            notes={noteGridIds.map(id => notesWithAvailableContent.find(note => note.id === id)).filter((note): note is Note => Boolean(note))}
+            allNotes={notesWithAvailableContent}
             assets={assets}
             attachments={attachments.filter(attachment => featureFlags.audioNotes || !attachment.mimeType.startsWith('audio/')).map(attachment => featureFlags.attachmentIndex ? attachment : { ...attachment, extractedText: undefined })}
             activeNoteId={selectedId}
@@ -3512,21 +4041,21 @@ function App() {
         ) : showingNoteTemplatesPage ? (
           <TemplateManagerDialog templates={templates} notes={notes} assets={assets} onSave={setTemplates} onClose={() => setActiveReviewSessionId('')} />
         ) : showingLinkAuditPage ? (
-          <NoteLinkAuditPage notes={notes} onOpen={openLinkedNote} />
+          <NoteLinkAuditPage notes={notesWithAvailableContent} onOpen={openLinkedNote} />
         ) : showingCollectionsPage ? (
-          <CollectionsPage collections={organizationSettings.collections} notes={notes} initialCollectionId={collectionFocusId} onChange={collections => setOrganizationSettings(current => ({ ...current, collections }))} onOpen={openLinkedNote} />
+          <CollectionsPage collections={organizationSettings.collections} notes={notesWithAvailableContent} initialCollectionId={collectionFocusId} onChange={collections => setOrganizationSettings(current => ({ ...current, collections }))} onOpen={openLinkedNote} />
         ) : showingTaskManagerPage ? (
-          <TaskManagerPage notes={notes} tasks={parsedTasks} attachments={attachments} onUpdate={updateTask} onOpenNote={openLinkedNote} onOpenAttachment={openAttachmentPreview} onCreate={createTask} onCreateMany={createProjectTasks} onClose={() => setActiveReviewSessionId('')} />
+          <TaskManagerPage notes={notesWithAvailableContent} tasks={parsedTasks} attachments={attachments} onUpdate={updateTask} onOpenNote={openLinkedNote} onOpenAttachment={openAttachmentPreview} onCreate={createTask} onCreateMany={createProjectTasks} onClose={() => setActiveReviewSessionId('')} />
         ) : showingProjectDashboardPage ? (
-          <ProjectDashboardPage notes={notes} tasks={parsedTasks} onOpenNote={openLinkedNote} onClose={() => setActiveReviewSessionId('')} />
+          <ProjectDashboardPage notes={notesWithAvailableContent} tasks={parsedTasks} onOpenNote={openLinkedNote} onClose={() => setActiveReviewSessionId('')} />
         ) : showingAttachmentManagerPage ? (
           <AttachmentManagerPage notes={notes} attachments={attachments.filter(attachment => featureFlags.audioNotes || !attachment.mimeType.startsWith('audio/')).map(attachment => featureFlags.attachmentIndex ? attachment : { ...attachment, extractedText: undefined })} indexing={attachmentIndexing} onOpenNote={openLinkedNote} onPreview={openAttachmentPreview} onDelete={attachment => void deleteAttachment(attachment)} onIndex={featureFlags.attachmentIndex ? attachment => void indexAttachment(attachment) : undefined} onClose={() => setActiveReviewSessionId('')} />
         ) : showingNoteBoardPage ? (
-          <NoteBoardPage notes={notes} onSetStatus={setNoteWorkflowStatus} onOpen={openLinkedNote} onClose={() => setActiveReviewSessionId('')} />
+          <NoteBoardPage notes={notesWithAvailableContent} onSetStatus={setNoteWorkflowStatus} onOpen={openLinkedNote} onClose={() => setActiveReviewSessionId('')} />
         ) : showCreateNotePage ? (
           <CreateNotePage templates={templates} folders={folders} initialFolder={createNoteInitialFolder} folderTemplateDefaults={organizationSettings.folderTemplateDefaults} onSetFolderTemplateDefault={setFolderTemplateDefault} notes={notes} assets={assets} onCreate={(template, folder) => createNote(template, folder)} onClose={() => setShowCreateNotePage(false)} />
         ) : showingAllNotesPage ? (
-          <AllNotesPage key={`${allNotesPreset}:${allNotesPresetRevision}`} preset={allNotesPreset} initialFolder={allNotesFolderPreset} onFolderChange={setAllNotesFolderPreset} noteOrder={organizationSettings.noteOrder} onReorder={reorderNotes} notes={notes} attachments={attachments} searchAttachments={attachments.filter(attachment => featureFlags.audioNotes || !attachment.mimeType.startsWith('audio/')).map(attachment => featureFlags.attachmentIndex ? attachment : { ...attachment, extractedText: undefined })} advancedSearch={featureFlags.advancedQuery} getNoteColor={noteDisplayColor} onOpen={openLinkedNote} />
+          <AllNotesPage key={`${allNotesPreset}:${allNotesPresetRevision}`} preset={allNotesPreset} folder={searchFolder || allNotesFolderPreset} onFolderChange={value => { setSearchFolder(value); setAllNotesFolderPreset(value) }} query={query} onQueryChange={value => { setQuery(value); setQuickSearchActiveIndex(0) }} tag={searchTag} onTagChange={setSearchTag} semanticSearchEnabled={semanticSearchEnabled && featureFlags.semanticSearch} onSemanticSearchChange={featureFlags.semanticSearch ? value => { setSemanticSearchEnabled(value); localStorage.setItem('no-tie-semantic-search', String(value)) } : undefined} semanticScores={semanticScores} semanticSearchBusy={semanticSearchBusy} semanticSearchError={semanticSearchError} searchIndexProgress={searchIndexProgress} bulkActionsEnabled={featureFlags.bulkActions} bulkSelectMode={featureFlags.bulkActions && bulkSelectMode} onToggleBulkSelect={() => { setBulkSelectMode(value => !value); setBulkSelectedIds([]) }} bulkSelectedIds={bulkSelectedIds} onBulkSelectedIdsChange={setBulkSelectedIds} bulkTargetFolder={bulkTargetFolder} onBulkTargetFolderChange={setBulkTargetFolder} bulkTagDraft={bulkTagDraft} onBulkTagDraftChange={setBulkTagDraft} onMoveSelected={moveSelectedNotesBulk} onApplySelectedTag={applyBulkTag} onDeleteSelected={() => void deleteSelectedNotesBulk()} foldersForBulk={folders} noteOrder={organizationSettings.noteOrder} onReorder={reorderNotes} notes={notes} attachments={attachments} searchAttachments={searchableAttachments} contentByNote={searchContentByNote.size ? searchContentByNote : noteBodies} normalizedContentByNote={searchNormalizedContentByNote} onVisibleNotes={visible => { void ensureNoteBodies(visible.map(note => note.id)).catch(reportDiskSaveError) }} advancedSearch={featureFlags.advancedQuery} getNoteColor={noteDisplayColor} noteColors={noteColorsById} colorOptions={entryColors} onOpen={openLinkedNote} />
         ) : showingFlashcardsPage ? (
           <FlashcardsPage cards={flashcards} notes={notes} attachments={attachments} trash={flashcardTrash} aiTaskNotices={flashcardAiTasks} onBeginAiTask={beginFlashcardAiTask} onFinishAiTask={finishFlashcardAiTask} onCreate={createFlashcard} onUpdate={updateFlashcard} onReview={rateFlashcard} onSetDueAt={setFlashcardDueAt} onToggleSuspend={toggleFlashcardSuspended} onDelete={trashFlashcard} onRestoreTrash={restoreFlashcardTrash} onPurgeTrash={id => setFlashcardTrash(current => current.filter(entry => entry.id !== id))} onRegenerate={regenerateFlashcard} onFindSimilar={findSimilarFlashcards} onAiAssist={assistFlashcards} onOpenNote={noteId => { setActiveReviewSessionId(''); openLinkedNote(noteId) }} />
         ) : showingReviewSessionsOverview ? (
@@ -3550,6 +4079,8 @@ function App() {
             onEdit={() => openReviewSessionEditor(activeReviewSession.id)}
             onReorder={noteIds => reorderReviewSession(activeReviewSession.id, noteIds)}
           />
+        ) : selectedNote && !selectedNote.contentLoaded ? (
+          <div className="editor-loading note-body-loading" role="status"><LoaderCircle size={19} className={loadingSelectedNote ? 'is-spinning' : ''} />{loadingSelectedNote ? 'Wczytuję treść notatki…' : <button type="button" className="link-button" onClick={() => void ensureNoteBody(selectedNote.id).catch(reportDiskSaveError)}>Wczytaj treść ponownie</button>}</div>
         ) : selectedNote ? (
           <article className="note-editor" key={selectedNote.id}>
             <div className="editor-scroll">
@@ -3561,8 +4092,8 @@ function App() {
                 <div className="editor-tools-left"><div className="view-mode-toggle" role="group" aria-label="Widok notatki"><button className={`view-mode-button ${editorMode === 'rendered' ? 'active' : ''}`} title="Widok wizualny" aria-label="Widok wizualny" aria-pressed={editorMode === 'rendered'} onClick={() => setEditorMode('rendered')}><Eye size={16} /></button><button className={`view-mode-button ${editorMode === 'source' ? 'active' : ''}`} title="Surowy Markdown" aria-label="Surowy Markdown" aria-pressed={editorMode === 'source'} onClick={() => setEditorMode('source')}><Code2 size={16} /></button></div></div>
                 <div className="template-toolbar"><button type="button" className="icon-button template-manage-button" title="Eksportuj jako HTML" aria-label="Eksportuj jako HTML" onClick={() => exportCurrentAsHtml()}><FileText size={14} /></button><button type="button" className="icon-button template-manage-button" title="Drukuj / zapisz jako PDF" aria-label="Drukuj lub zapisz jako PDF" onClick={exportCurrentAsPdf}><Archive size={14} /></button></div>
               </div>
-              {editorMode === 'source' ? <MarkdownSourceEditor noteId={selectedNote.id} markdown={selectedNote.content} onChange={content => patchNote(selectedNote.id, { content })} onSelectionChange={text => setEditorSelection({ noteId: selectedNote.id, mode: 'source', text })} noteActions={markdownNoteActions} onNoteAction={handleMarkdownNoteAction} /> : <Suspense fallback={<div className="editor-loading">Otwieram edytor…</div>}><MarkdownEditor key={`${selectedNote.id}-${editorRevision}`} noteId={selectedNote.id} markdown={selectedNote.content} assets={currentAssets} attachments={currentAttachments} revision={editorRevision} onChange={content => patchNote(selectedNote.id, { content })} onSelectionChange={text => setEditorSelection({ noteId: selectedNote.id, mode: 'rendered', text })} onOpenNote={openLinkedNote} onOpenAttachment={(fileName, page, fragment) => openAttachment(fileName, selectedNote.id, page, fragment)} notes={notes} allAssets={assets} noteActions={markdownNoteActions} onNoteAction={handleMarkdownNoteAction} /></Suspense>}
-      <NoteConnections note={selectedNote} notes={notes} onOpen={note => openLinkedNote(note.id)} onShowGraph={() => setShowKnowledgeGraph(true)} />
+              {editorMode === 'source' ? <MarkdownSourceEditor noteId={selectedNote.id} markdown={selectedNote.content} onChange={content => patchNote(selectedNote.id, { content })} onSelectionChange={text => setEditorSelection({ noteId: selectedNote.id, mode: 'source', text })} noteActions={markdownNoteActions} onNoteAction={handleMarkdownNoteAction} /> : <Suspense fallback={<div className="editor-loading">Otwieram edytor…</div>}><MarkdownEditor key={`${selectedNote.id}-${editorRevision}`} noteId={selectedNote.id} markdown={selectedNote.content} assets={currentAssets} attachments={currentAttachments} revision={editorRevision} onChange={content => patchNote(selectedNote.id, { content })} onSelectionChange={text => setEditorSelection({ noteId: selectedNote.id, mode: 'rendered', text })} onOpenNote={openLinkedNote} onOpenAttachment={(fileName, page, fragment) => openAttachment(fileName, selectedNote.id, page, fragment)} notes={notesWithAvailableContent} allAssets={assets} noteActions={markdownNoteActions} onNoteAction={handleMarkdownNoteAction} /></Suspense>}
+      <NoteConnections note={selectedNote} notes={notesWithAvailableContent} onOpen={note => openLinkedNote(note.id)} onShowGraph={() => setShowKnowledgeGraph(true)} onExpandedChange={setNoteConnectionsOpen} />
               <NoteAttachmentsPanel attachments={currentAttachmentsForUi} assets={currentAssets} audioEnabled={featureFlags.audioNotes} onAdd={addAttachments} onAddAsset={() => { setEditingAsset(undefined); setShowDrawing(true) }} onEditAsset={asset => { setEditingAsset(asset); setShowDrawing(true) }} onRemove={attachment => void deleteAttachment(attachment)} onOcr={recognizeAttachmentText} onSaveExtractedText={saveAttachmentExtractedText} onTranscribe={featureFlags.audioNotes ? transcribeAudioAttachment : undefined} onInsertText={insertTextIntoNote} onSaveTranscript={saveAttachmentTranscript} onInsertAttachmentLink={insertAttachmentLink} onPreview={openAttachmentPreview} />
               <div className="editor-content-stats" aria-label="Statystyki dokumentu i zaznaczenia">
                 <span>Dokument: <strong>{polishCount(documentCounts.words, ['słowo', 'słowa', 'słów'])}</strong><i>·</i><strong>{polishCount(documentCounts.characters, ['znak', 'znaki', 'znaków'])}</strong></span>
@@ -3579,6 +4110,7 @@ function App() {
         </Suspense>
       </section>
       {showChat && <Suspense fallback={<div className="chat-loading">Otwieram czat…</div>}><ChatPanel open baseUrl={ollamaBaseUrl} model={ollamaModel} note={selectedNote && aiCanAccessNote(selectedNote) ? selectedNote : undefined} notes={aiAccessibleNotes} assets={assets.filter(asset => aiAccessibleNoteIds.has(asset.noteId))} attachments={attachments.filter(attachment => aiAccessibleNoteIds.has(attachment.noteId) && (featureFlags.audioNotes || !attachment.mimeType.startsWith('audio/'))).map(attachment => featureFlags.attachmentIndex ? attachment : { ...attachment, extractedText: undefined })} preferences={aiPreferences} contextPickerEnabled={featureFlags.aiContextPicker} citationsEnabled={featureFlags.aiCitations} onOpenCitation={openCitation} onRunTask={runAiTask} onDiagnostic={saveAiDiagnostic} onRateOutput={rateAiOutput} onClose={closeChat} onOpenSettings={openOllamaSettings} /></Suspense>}
+      <Suspense fallback={null}>
       {showHelp && <HelpDialog onClose={() => setShowHelp(false)} />}
       {showCommandPalette && <CommandPaletteDialog commands={paletteCommands} onClose={() => setShowCommandPalette(false)} />}
       {showWorkspaceLayouts && <WorkspaceLayoutsDialog layouts={organizationSettings.workspaces} onSave={saveWorkspaceLayout} onApply={applyWorkspaceLayout} onDelete={id => setOrganizationSettings(current => ({ ...current, workspaces: current.workspaces.filter(layout => layout.id !== id) }))} onClose={() => setShowWorkspaceLayouts(false)} />}
@@ -3596,9 +4128,9 @@ function App() {
       {deleteTarget && <div className="modal-backdrop" role="presentation" onMouseDown={event => { if (event.target === event.currentTarget) setDeleteTarget(null) }}><section className="folder-dialog confirm-dialog" role="dialog" aria-modal="true" aria-labelledby="delete-dialog-title"><div className="danger-mark"><Trash2 size={19} /></div><h2 id="delete-dialog-title">{deleteTarget.kind === 'folder' ? 'Usuń folder?' : 'Usuń notatkę?'}</h2><p>{deleteTarget.kind === 'folder' ? <>Folder <strong>„{deleteTarget.label}”</strong> zostanie usunięty. {deleteTarget.noteCount ? `${deleteTarget.noteCount} ${deleteTarget.noteCount === 1 ? 'notatka trafi' : 'notatki trafią'} do kosza i będzie można je odzyskać przez 30 dni.` : 'Folder jest pusty.'}</> : <>Notatka <strong>„{deleteTarget.label}”</strong>, jej schematy SVG i załączniki trafią do kosza. Możesz je odzyskać przez 30 dni.</>}</p><div className="folder-dialog-actions"><button className="button secondary" onClick={() => setDeleteTarget(null)}>Anuluj</button><button className="button danger-button" onClick={() => void confirmDelete()}><Trash2 size={14} />Przenieś do kosza</button></div></section></div>}
       {colorTarget && <div className="modal-backdrop" role="presentation" onMouseDown={event => { if (event.target === event.currentTarget) setColorTarget(null) }}><section className="folder-dialog entry-color-dialog" role="dialog" aria-modal="true" aria-labelledby="entry-color-title"><div className="folder-dialog-mark"><Palette size={19} /></div><h2 id="entry-color-title">Ustaw kolor</h2><p>{colorTarget.kind === 'folder' ? <>Kolor folderu <strong>„{colorTarget.path.split('/').at(-1)}”</strong> będzie widoczny po lewej i na kartach jego notatek w bibliotece.</> : <>Kolor pliku <strong>„{notes.find(note => note.id === colorTarget.id)?.title ?? 'notatka'}”</strong> będzie widoczny po lewej i w bibliotece.</>}</p><div className="entry-color-grid">{entryColors.map(color => <button key={color.value} className="entry-color-option" type="button" aria-label={`Ustaw kolor: ${color.label}`} aria-pressed={(colorTarget.kind === 'note' ? notes.find(note => note.id === colorTarget.id)?.color : folderColors[colorTarget.path]) === color.value} onClick={() => applyEntryColor(color.value)}><span className="entry-color-swatch" style={{ backgroundColor: color.value }} /><span>{color.label}</span></button>)}</div><div className="folder-dialog-actions"><button className="button secondary" onClick={() => applyEntryColor(undefined)}>Domyślny / kolor folderu</button><button className="button secondary" onClick={() => setColorTarget(null)}>Zamknij</button></div></section></div>}
       {showOllamaSettings && <div className="modal-backdrop" role="presentation" onMouseDown={event => { if (event.target === event.currentTarget) setShowOllamaSettings(false) }}><section className="folder-dialog ollama-settings-dialog" role="dialog" aria-modal="true" aria-labelledby="ollama-settings-title"><div className="folder-dialog-mark"><MessageCircle size={19} /></div><h2 id="ollama-settings-title">Lokalny model Ollama</h2><p>Podłącz uruchomiony serwer Ollama. Domyślny adres lokalny to <code>http://localhost:11434</code>.</p><form onSubmit={event => { event.preventDefault(); saveOllamaSettings() }}><label htmlFor="ollama-base-url">Adres serwera</label><input id="ollama-base-url" autoFocus type="url" value={ollamaDraftUrl} onChange={event => { setOllamaDraftUrl(event.target.value); setOllamaModels([]); setOllamaSettingsMessage('') }} placeholder="http://localhost:11434" /><div className="ollama-model-label"><label htmlFor="ollama-model-name">Model</label><button type="button" className="link-button" onClick={() => void discoverOllamaModels()} disabled={checkingOllama}><span>{checkingOllama ? 'Łączenie…' : 'Pobierz listę modeli'}</span></button></div><input id="ollama-model-name" list="ollama-model-options" value={ollamaDraftModel} onChange={event => setOllamaDraftModel(event.target.value)} placeholder="np. llama3.2" /><datalist id="ollama-model-options">{ollamaModels.map(model => <option key={model.name} value={model.name} />)}</datalist>{featureFlags.semanticSearch && <><label htmlFor="ollama-embedding-model">Model embeddingów do wyszukiwania semantycznego</label><input id="ollama-embedding-model" list="ollama-model-options" value={embeddingDraftModel} onChange={event => setEmbeddingDraftModel(event.target.value)} placeholder="nomic-embed-text" /></>}{featureFlags.audioNotes && <><label htmlFor="audio-transcription-url">Lokalny serwer transkrypcji audio</label><input id="audio-transcription-url" type="url" value={transcriptionDraftUrl} onChange={event => setTranscriptionDraftUrl(event.target.value)} placeholder="http://localhost:8000/v1/audio/transcriptions" /><small className="ollama-settings-help">Wskaż pełny adres endpointu zgodnego z OpenAI Whisper API, np. serwera faster-whisper-server. Odpowiedź powinna zawierać `text`; znaczniki i identyfikatory mówców są opcjonalne. Ollama samo nie transkrybuje plików audio.</small></>}{ollamaSettingsMessage && <p className="ollama-settings-status" role="status">{ollamaSettingsMessage}</p>}{ollamaSettingsError && <p className="ollama-settings-error" role="alert">{ollamaSettingsError}</p>}<p className="ollama-settings-help">Modele pobierzesz poleceniem <code>ollama pull llama3.2</code>. Rozmowy są obsługiwane przez lokalny serwer.</p><div className="folder-dialog-actions"><button type="button" className="button secondary" onClick={() => setShowOllamaSettings(false)}>Anuluj</button><button type="submit" className="button primary">Zapisz ustawienia</button></div></form></section></div>}
-      {showDailyNotes && <DailyNotesDialog notes={notes} onSelect={openDailyNote} onClose={() => setShowDailyNotes(false)} />}
-      {showBackupTrash && <BackupTrashDialog backups={autoBackups} trash={trashEntries} busy={backupBusy} onCreateBackup={() => void createAutomaticBackup(false)} onDownloadBackup={fileName => void downloadAutomaticBackup(fileName)} onRestoreBackup={fileName => void restoreAutomaticBackup(fileName)} onDeleteBackup={fileName => void removeAutomaticBackup(fileName)} onRestoreTrash={entryId => void restoreTrashEntry(entryId)} onDeleteTrash={entryId => void deleteTrashEntry(entryId)} onEmptyTrash={() => void emptyTrash()} onClose={() => setShowBackupTrash(false)} />}
-      {showKnowledgeGraph && <KnowledgeGraphDialog notes={notes} onOpen={note => { setShowKnowledgeGraph(false); openLinkedNote(note.id) }} onClose={() => setShowKnowledgeGraph(false)} />}
+      {showDailyNotes && <DailyNotesDialog notes={notesWithAvailableContent} onSelect={openDailyNote} onClose={() => setShowDailyNotes(false)} />}
+      {showBackupTrash && <BackupTrashDialog backups={autoBackups} trash={trashEntries} busy={backupBusy || backupsLoading || !libraryPayloadsReady} onCreateBackup={() => void createAutomaticBackup(false)} onDownloadBackup={fileName => void downloadAutomaticBackup(fileName)} onRestoreBackup={fileName => void restoreAutomaticBackup(fileName)} onDeleteBackup={fileName => void removeAutomaticBackup(fileName)} onRestoreTrash={entryId => void restoreTrashEntry(entryId)} onDeleteTrash={entryId => void deleteTrashEntry(entryId)} onEmptyTrash={() => void emptyTrash()} onClose={() => setShowBackupTrash(false)} />}
+      {showKnowledgeGraph && <KnowledgeGraphDialog notes={notesWithAvailableContent} onOpen={note => { setShowKnowledgeGraph(false); openLinkedNote(note.id) }} onClose={() => setShowKnowledgeGraph(false)} />}
       {showQuickSearch && <NoteSearchDialog
         query={query}
         tag={searchTag}
@@ -3625,7 +4157,7 @@ function App() {
       />}
       {showNoteEmbedDialog && notes.find(note => note.id === noteActionTargetId) && <NoteLinkDialog notes={notes} currentNoteId={noteActionTargetId} purpose="embed" onSelect={note => { dispatchWikiEmbedInsert({ noteId: noteActionTargetId, target: note.title || note.id }); setShowNoteEmbedDialog(false) }} onClose={() => setShowNoteEmbedDialog(false)} />}
       {showAiEdit && aiEditTarget && <AiSelectionEditDialog selectedText={aiEditTarget.text} model={ollamaModel} baseUrl={ollamaBaseUrl} preferences={aiPreferences} onRunTask={runAiTask} onDiagnostic={saveAiDiagnostic} onRateOutput={(rating, comment) => rateAiOutput('selection-edit', rating, comment)} onApply={replacement => dispatchAiReplaceSelection({ noteId: aiEditTarget.noteId, replacement })} onClose={() => { setShowAiEdit(false); setAiEditTarget(null) }} />}
-      {aiNoteTool && aiDialogNote && <AiNoteToolsDialog kind={aiNoteTool} note={aiDialogNote} canUseAi={aiCanAccessNote(aiDialogNote)} attachments={attachments.filter(attachment => attachment.noteId === aiDialogNote.id && (featureFlags.audioNotes || !attachment.mimeType.startsWith('audio/')))} existingQuestions={flashcards.filter(card => card.noteId === aiDialogNote.id).map(card => card.question)} sourceText={flashcardGenerationScope?.kind === 'selection' ? flashcardGenerationScope.text : undefined} sourcePage={flashcardGenerationScope?.kind === 'pdf-page' ? { attachmentId: flashcardGenerationScope.attachmentId, page: flashcardGenerationScope.page } : undefined} sourceLabel={flashcardGenerationScope?.label} baseUrl={ollamaBaseUrl} model={ollamaModel} preferences={aiPreferences} onRunTask={runAiTask} onDiagnostic={saveAiDiagnostic} onRateOutput={rateAiOutput} onOpenSource={(attachment, page) => { openLinkedNote(attachment.noteId); openAttachment(attachment.fileName, attachment.noteId, page) }} onApply={value => appendAiTextToNote(value, aiNoteTool, aiDialogNote.id)} onApplyMetadata={applyAiMetadata} onCreateFlashcard={(noteId, question, answer, metadata) => createFlashcard(noteId, question, answer, 'basic', [], undefined, metadata)} onTranscribeAudio={featureFlags.audioNotes ? transcribeAudioAttachment : undefined} onMinimizedChange={setAiNoteGeneratorMinimized} onClose={() => { setAiNoteTool(null); setAiNoteGeneratorMinimized(false); setFlashcardGenerationScope(null); setNoteActionTargetId('') }} />}
+      {aiNoteTool && aiDialogNote && aiDialogNote.contentLoaded !== false && <AiNoteToolsDialog kind={aiNoteTool} note={aiDialogNote} canUseAi={aiCanAccessNote(aiDialogNote)} attachments={attachments.filter(attachment => attachment.noteId === aiDialogNote.id && (featureFlags.audioNotes || !attachment.mimeType.startsWith('audio/')))} existingQuestions={flashcards.filter(card => card.noteId === aiDialogNote.id).map(card => card.question)} sourceText={flashcardGenerationScope?.kind === 'selection' ? flashcardGenerationScope.text : undefined} sourcePage={flashcardGenerationScope?.kind === 'pdf-page' ? { attachmentId: flashcardGenerationScope.attachmentId, page: flashcardGenerationScope.page } : undefined} sourceLabel={flashcardGenerationScope?.label} baseUrl={ollamaBaseUrl} model={ollamaModel} preferences={aiPreferences} onRunTask={runAiTask} onDiagnostic={saveAiDiagnostic} onRateOutput={rateAiOutput} onOpenSource={(attachment, page) => { openLinkedNote(attachment.noteId); openAttachment(attachment.fileName, attachment.noteId, page) }} onApply={value => appendAiTextToNote(value, aiNoteTool, aiDialogNote.id)} onApplyMetadata={applyAiMetadata} onCreateFlashcard={(noteId, question, answer, metadata) => createFlashcard(noteId, question, answer, 'basic', [], undefined, metadata)} onTranscribeAudio={featureFlags.audioNotes ? transcribeAudioAttachment : undefined} onMinimizedChange={setAiNoteGeneratorMinimized} onClose={() => { setAiNoteTool(null); setAiNoteGeneratorMinimized(false); setFlashcardGenerationScope(null); setNoteActionTargetId('') }} />}
       {showAiWorkspace && <AiWorkspaceDialog preferences={aiPreferences} folders={folders} availableModels={ollamaModels.map(item => item.name)} onChange={updateAiPreferences} onClose={() => setShowAiWorkspace(false)} />}
       {showAiTaskQueue && <AiTaskQueueDialog tasks={aiTaskQueue} onMove={moveAiTask} onCancel={cancelAiTask} onClose={() => setShowAiTaskQueue(false)} />}
       {selectedTextFlashcard && notes.find(note => note.id === selectedTextFlashcard.noteId) && <SelectedTextFlashcardDialog noteTitle={notes.find(note => note.id === selectedTextFlashcard.noteId)?.title ?? ''} selectedText={selectedTextFlashcard.text} onSave={(question, answer) => { createFlashcard(selectedTextFlashcard.noteId, question, answer); setSelectedTextFlashcard(null) }} onClose={() => setSelectedTextFlashcard(null)} />}
@@ -3635,7 +4167,8 @@ function App() {
       {showLockSetup && featureFlags.appLock && <AppLockDialog mode="setup" onSetPin={configureAppLockPin} onUnlock={async () => false} onClose={() => setShowLockSetup(false)} />}
       {appLocked && featureFlags.appLock && hasLockPin && <AppLockDialog mode="unlock" onSetPin={async () => {}} onUnlock={unlockApp} />}
       {showNoteReminder && selectedNote && featureFlags.noteReminders && <NoteReminderDialog note={selectedNote} onSave={value => setNoteReminder(selectedNote.id, value)} onClose={() => setShowNoteReminder(false)} />}
-      {showDuplicateManager && featureFlags.duplicateManager && <DuplicateManagerDialog notes={notes} onOpen={id => { setShowDuplicateManager(false); openLinkedNote(id) }} onMerge={(targetId, sourceId) => void mergeDuplicateNotes(targetId, sourceId)} onClose={() => setShowDuplicateManager(false)} />}
+      {showDuplicateManager && featureFlags.duplicateManager && <DuplicateManagerDialog notes={notesWithAvailableContent} onOpen={id => { setShowDuplicateManager(false); openLinkedNote(id) }} onMerge={(targetId, sourceId) => void mergeDuplicateNotes(targetId, sourceId)} onClose={() => setShowDuplicateManager(false)} />}
+      </Suspense>
       {!!flashcardAiTasks.length && <div className="flashcard-ai-task-notification-stack" style={{ top: `calc(env(safe-area-inset-top, 0px) + ${aiNoteGeneratorMinimized ? 154 : 122}px)`, maxHeight: `calc(100dvh - env(safe-area-inset-top, 0px) - ${aiNoteGeneratorMinimized ? 170 : 138}px)` }}>
         {flashcardAiTasks.map(task => {
           const stateLabel = task.state === 'running' ? 'AI pracuje' : task.state === 'error' ? 'AI zakończyło się błędem' : 'AI zakończyło zadanie'

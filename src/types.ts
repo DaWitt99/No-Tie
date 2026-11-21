@@ -2,6 +2,8 @@ export type Note = {
   id: string
   title: string
   content: string
+  /** False for metadata-only notes whose Markdown body has not been read yet. */
+  contentLoaded?: boolean
   folder: string
   color?: string
   aliases?: string[]
@@ -150,8 +152,8 @@ export type SavedWorkspaceLayout = {
   noteGridEnabled: boolean
   noteGridIds: string[]
   editorMode: 'rendered' | 'source'
-  showLibrary: boolean
   showMainSidebar: boolean
+  showFoldersPanel?: boolean
   showChat: boolean
   createdAt: number
 }
