@@ -1,6 +1,6 @@
 import { useDeferredValue, useMemo, useState } from 'react'
 import type { CSSProperties } from 'react'
-import { BookOpen, CalendarDays, Check, CheckSquare2, Clock3, FileText, Folder, GripVertical, LoaderCircle, Palette, Paperclip, RotateCcw, Search, SlidersHorizontal, Sparkles, Star, Tag, ArrowDown, ArrowUp, Trash2 } from 'lucide-react'
+import { BookOpen, CalendarDays, Check, CheckSquare2, ChevronDown, Clock3, FileText, Folder, GripVertical, LoaderCircle, Palette, Paperclip, RotateCcw, Search, SlidersHorizontal, Sparkles, Star, Tag, ArrowDown, ArrowUp, Trash2 } from 'lucide-react'
 import type { Note, NoteAttachment } from './types'
 import { searchNotes } from './noteSearch'
 import { VirtualizedGrid } from './VirtualizedGrid'
@@ -55,7 +55,7 @@ function cachedNotePreview(note: Note, contentByNote?: ReadonlyMap<string, strin
   return preview
 }
 
-export function AllNotesPage({ notes, attachments, searchAttachments = attachments, contentByNote, normalizedContentByNote, onVisibleNotes, advancedSearch = true, preset = 'all', onFolderChange, query, onQueryChange, tag, onTagChange, folder, semanticSearchEnabled = false, onSemanticSearchChange, semanticScores = {}, semanticSearchBusy = false, semanticSearchError = '', searchIndexProgress, onQuickSearch, bulkActionsEnabled = false, bulkSelectMode = false, onToggleBulkSelect, bulkSelectedIds = [], onBulkSelectedIdsChange, bulkTargetFolder = '', onBulkTargetFolderChange, bulkTagDraft = '', onBulkTagDraftChange, onMoveSelected, onApplySelectedTag, onDeleteSelected, foldersForBulk = [], noteOrder = [], onReorder, getNoteColor, noteColors, colorOptions, onOpen }: {
+export function AllNotesPage({ notes, attachments, searchAttachments = attachments, contentByNote, normalizedContentByNote, onVisibleNotes, advancedSearch = true, preset = 'all', onFolderChange, query, onQueryChange, tag, onTagChange, folder, semanticSearchEnabled = false, onSemanticSearchChange, semanticScores = {}, semanticSearchBusy = false, semanticSearchError = '', searchIndexProgress, bulkActionsEnabled = false, bulkSelectMode = false, onToggleBulkSelect, bulkSelectedIds = [], onBulkSelectedIdsChange, bulkTargetFolder = '', onBulkTargetFolderChange, bulkTagDraft = '', onBulkTagDraftChange, onMoveSelected, onApplySelectedTag, onDeleteSelected, foldersForBulk = [], noteOrder = [], onReorder, getNoteColor, noteColors, colorOptions, onOpen }: {
   notes: Note[]
   attachments: NoteAttachment[]
   searchAttachments?: NoteAttachment[]
@@ -76,7 +76,6 @@ export function AllNotesPage({ notes, attachments, searchAttachments = attachmen
   semanticSearchBusy?: boolean
   semanticSearchError?: string
   searchIndexProgress?: { done: number; total: number } | null
-  onQuickSearch?: () => void
   bulkActionsEnabled?: boolean
   bulkSelectMode?: boolean
   onToggleBulkSelect?: () => void
@@ -106,6 +105,7 @@ export function AllNotesPage({ notes, attachments, searchAttachments = attachmen
     return Number.isInteger(stored) && stored >= 1 && stored <= 4 ? stored : 0
   })
   const [colorFilter, setColorFilter] = useState('')
+  const colorFilterLabel = colorFilter === '__none__' ? 'Bez koloru' : colorOptions.find(color => color.value === colorFilter)?.label ?? 'Wszystkie kolory'
   const [sortMode, setSortMode] = useState<SortMode>(preset === 'recent' ? 'updated-desc' : 'manual')
   const [favoritesOnly, setFavoritesOnly] = useState(preset === 'favorites')
   const [attachmentsOnly, setAttachmentsOnly] = useState(false)
@@ -199,12 +199,18 @@ export function AllNotesPage({ notes, attachments, searchAttachments = attachmen
         <Search size={17} aria-hidden="true" />
         <input value={query} onChange={event => onQueryChange(event.target.value)} placeholder="Szukaj w tytułach, treści i tagach…" aria-label="Szukaj w notatkach" />
         {query && <button type="button" onClick={() => onQueryChange('')} aria-label="Wyczyść wyszukiwanie">×</button>}
-        {onQuickSearch && <button type="button" className="all-notes-quick-search" onClick={onQuickSearch} aria-label="Otwórz szybkie wyszukiwanie" title="Szybkie wyszukiwanie (Ctrl+K)"><Search size={15} /><span>Szybkie</span></button>}
       </label>
       <div className="all-notes-filter-controls">
         <label className="all-notes-select"><span><Tag size={13} />Tag</span><select value={tag} onChange={event => onTagChange(event.target.value)}><option value="">Wszystkie tagi</option>{tags.map(value => <option value={value} key={value}>{value}</option>)}</select></label>
         <label className="all-notes-select"><span><Folder size={13} />Folder</span><select value={folder} onChange={event => changeFolder(event.target.value)}><option value="">Wszystkie foldery</option><option value="__root__">Poziom główny</option>{folders.map(value => <option value={value} key={value}>{value}</option>)}</select></label>
-        <label className="all-notes-select all-notes-color-filter"><span><Palette size={13} />Kolor notatki</span><select value={colorFilter} onChange={event => setColorFilter(event.target.value)} aria-label="Filtruj notatki według koloru"><option value="">Wszystkie kolory</option><option value="__none__">Bez koloru</option>{colorOptions.map(color => <option value={color.value} key={color.value}>{color.label}</option>)}</select></label>
+        <div className="all-notes-select all-notes-color-filter"><span><Palette size={13} />Kolor notatki</span><details className="all-notes-color-dropdown" onBlur={event => { if (!event.currentTarget.contains(event.relatedTarget as Node | null)) event.currentTarget.removeAttribute('open') }}>
+          <summary aria-label="Filtruj notatki według koloru"><span className="all-notes-color-current">{colorFilter && colorFilter !== '__none__' ? <i className="all-notes-color-swatch" style={{ backgroundColor: colorFilter }} /> : colorFilter === '__none__' ? <i className="all-notes-color-swatch is-empty" /> : <Palette size={14} />}{colorFilterLabel}</span><ChevronDown size={14} /></summary>
+          <div className="all-notes-color-options" role="group" aria-label="Kolor notatki">
+            <button type="button" aria-pressed={!colorFilter} onClick={event => { setColorFilter(''); event.currentTarget.closest('details')?.removeAttribute('open') }}><Palette size={14} />Wszystkie kolory{!colorFilter && <Check size={13} />}</button>
+            <button type="button" aria-pressed={colorFilter === '__none__'} onClick={event => { setColorFilter('__none__'); event.currentTarget.closest('details')?.removeAttribute('open') }}><i className="all-notes-color-swatch is-empty" />Bez koloru{colorFilter === '__none__' && <Check size={13} />}</button>
+            {colorOptions.map(color => <button type="button" key={color.value} aria-pressed={colorFilter === color.value} onClick={event => { setColorFilter(color.value); event.currentTarget.closest('details')?.removeAttribute('open') }}><i className="all-notes-color-swatch" style={{ backgroundColor: color.value }} />{color.label}{colorFilter === color.value && <Check size={13} />}</button>)}
+          </div>
+        </details></div>
         <label className="all-notes-select all-notes-sort"><span><SlidersHorizontal size={13} />Sortuj</span><select value={sortMode} onChange={event => setSortMode(event.target.value as SortMode)}>{Object.entries(sortLabels).map(([value, label]) => <option value={value} key={value}>{label}</option>)}</select></label>
       </div>
       <div className="all-notes-toggles">
@@ -235,7 +241,7 @@ export function AllNotesPage({ notes, attachments, searchAttachments = attachmen
     <div className="all-notes-results-heading">
       <div><h2>{hasFilters ? 'Wyniki wyszukiwania' : 'Biblioteka'}</h2><span>{filteredNotes.length} z {notes.length} {noteCountLabel(notes.length)}</span></div>
       <div className="all-notes-results-actions">
-        <label className="all-notes-display-select"><span>Widok</span><select value={displayMode} onChange={event => changeDisplayMode(event.target.value as DisplayMode)} aria-label="Sposób wyświetlania notatek"><option value="cards">Karty</option><option value="full">Treść i tagi</option><option value="names-tags">Nazwy i tagi</option><option value="names">Same nazwy</option></select></label>
+        <label className="all-notes-display-select"><span>Widok wyników</span><select value={displayMode} onChange={event => changeDisplayMode(event.target.value as DisplayMode)} aria-label="Sposób wyświetlania wyników wyszukiwania"><option value="cards">Siatka</option><option value="full">Lista: treść i tagi</option><option value="names-tags">Lista: nazwy i tagi</option><option value="names">Lista: same nazwy</option></select></label>
         {displayMode === 'cards' && <label className="all-notes-display-select"><span>Kolumny</span><select value={gridColumns || 'auto'} onChange={event => changeGridColumns(event.target.value === 'auto' ? 0 : Number(event.target.value))} aria-label="Szerokość siatki wyników"><option value="auto">Auto</option><option value="1">1</option><option value="2">2</option><option value="3">3</option><option value="4">4</option></select></label>}
         {hasSemanticScores
           ? <span className="all-notes-sort-summary"><Sparkles size={13} />Dopasowanie semantyczne</span>
