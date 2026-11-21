@@ -367,8 +367,8 @@ function normalizeOrganizationSettings(value: unknown): OrganizationSettings {
       noteGridEnabled: layout.noteGridEnabled === true,
       noteGridIds: Array.isArray(layout.noteGridIds) ? [...new Set(layout.noteGridIds.filter((id): id is string => typeof id === 'string'))].slice(0, 4) : [],
       editorMode: layout.editorMode === 'source' ? 'source' : 'rendered',
-      showLibrary: layout.showLibrary !== false,
       showMainSidebar: layout.showMainSidebar !== false,
+      showFoldersPanel: layout.showFoldersPanel !== false,
       showChat: layout.showChat === true,
       createdAt: typeof layout.createdAt === 'number' && Number.isFinite(layout.createdAt) ? layout.createdAt : Date.now(),
     }]

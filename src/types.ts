@@ -152,7 +152,6 @@ export type SavedWorkspaceLayout = {
   noteGridEnabled: boolean
   noteGridIds: string[]
   editorMode: 'rendered' | 'source'
-  showLibrary: boolean
   showMainSidebar: boolean
   showFoldersPanel?: boolean
   showChat: boolean

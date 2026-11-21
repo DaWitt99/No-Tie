@@ -1,11 +1,13 @@
-import { useDeferredValue, useEffect, useMemo, useState } from 'react'
+import { useDeferredValue, useMemo, useState } from 'react'
 import type { CSSProperties } from 'react'
-import { BookOpen, CalendarDays, Clock3, FileText, Folder, GripVertical, Paperclip, RotateCcw, Search, SlidersHorizontal, Star, Tag, ArrowDown, ArrowUp } from 'lucide-react'
+import { BookOpen, CalendarDays, Check, CheckSquare2, Clock3, FileText, Folder, GripVertical, LoaderCircle, Paperclip, RotateCcw, Search, SlidersHorizontal, Sparkles, Star, Tag, ArrowDown, ArrowUp, Trash2 } from 'lucide-react'
 import type { Note, NoteAttachment } from './types'
-import { searchNotes, searchQueryNeedsContent } from './noteSearch'
+import { searchNotes } from './noteSearch'
 import { VirtualizedGrid } from './VirtualizedGrid'
+import { VirtualizedList } from './VirtualizedList'
 
 type SortMode = 'manual' | 'updated-desc' | 'updated-asc' | 'created-desc' | 'created-asc' | 'title-asc' | 'title-desc' | 'folder-asc' | 'folder-desc'
+type DisplayMode = 'cards' | 'full' | 'names-tags' | 'names'
 export type AllNotesPreset = 'all' | 'favorites' | 'recent'
 
 const sortLabels: Record<SortMode, string> = {
@@ -52,35 +54,56 @@ function cachedNotePreview(note: Note, contentByNote?: ReadonlyMap<string, strin
   return preview
 }
 
-export function AllNotesPage({ notes, attachments, searchAttachments = attachments, contentByNote, normalizedContentByNote, onSearchContentChange, onVisibleNotes, advancedSearch = true, preset = 'all', initialFolder = '', onFolderChange, noteOrder = [], onReorder, getNoteColor, onOpen }: {
+export function AllNotesPage({ notes, attachments, searchAttachments = attachments, contentByNote, normalizedContentByNote, onVisibleNotes, advancedSearch = true, preset = 'all', onFolderChange, query, onQueryChange, tag, onTagChange, folder, semanticSearchEnabled = false, onSemanticSearchChange, semanticScores = {}, semanticSearchBusy = false, semanticSearchError = '', searchIndexProgress, onQuickSearch, bulkActionsEnabled = false, bulkSelectMode = false, onToggleBulkSelect, bulkSelectedIds = [], onBulkSelectedIdsChange, bulkTargetFolder = '', onBulkTargetFolderChange, bulkTagDraft = '', onBulkTagDraftChange, onMoveSelected, onApplySelectedTag, onDeleteSelected, foldersForBulk = [], noteOrder = [], onReorder, getNoteColor, onOpen }: {
   notes: Note[]
   attachments: NoteAttachment[]
   searchAttachments?: NoteAttachment[]
   contentByNote?: ReadonlyMap<string, string>
   normalizedContentByNote?: ReadonlyMap<string, string>
-  onSearchContentChange?: (needsContent: boolean) => void
   onVisibleNotes?: (notes: Note[]) => void
   advancedSearch?: boolean
   preset?: AllNotesPreset
-  initialFolder?: string
   onFolderChange?: (folder: string) => void
+  query: string
+  onQueryChange: (query: string) => void
+  tag: string
+  onTagChange: (tag: string) => void
+  folder: string
+  semanticSearchEnabled?: boolean
+  onSemanticSearchChange?: (enabled: boolean) => void
+  semanticScores?: Record<string, number>
+  semanticSearchBusy?: boolean
+  semanticSearchError?: string
+  searchIndexProgress?: { done: number; total: number } | null
+  onQuickSearch?: () => void
+  bulkActionsEnabled?: boolean
+  bulkSelectMode?: boolean
+  onToggleBulkSelect?: () => void
+  bulkSelectedIds?: string[]
+  onBulkSelectedIdsChange?: (ids: string[]) => void
+  bulkTargetFolder?: string
+  onBulkTargetFolderChange?: (folder: string) => void
+  bulkTagDraft?: string
+  onBulkTagDraftChange?: (value: string) => void
+  onMoveSelected?: () => void
+  onApplySelectedTag?: () => void
+  onDeleteSelected?: () => void
+  foldersForBulk?: string[]
   noteOrder?: string[]
   onReorder?: (sourceId: string, targetId: string) => void
   getNoteColor: (note: Note) => string | undefined
   onOpen: (noteId: string) => void
 }) {
-  const [query, setQuery] = useState('')
-  const [tag, setTag] = useState('')
-  const [folder, setFolder] = useState(initialFolder)
-  const [sortMode, setSortMode] = useState<SortMode>('manual')
+  const [displayMode, setDisplayMode] = useState<DisplayMode>(() => {
+    const stored = localStorage.getItem('no-tie-note-display-mode')
+    return stored === 'names' || stored === 'names-tags' || stored === 'full' ? stored : 'cards'
+  })
+  const [sortMode, setSortMode] = useState<SortMode>(preset === 'recent' ? 'updated-desc' : 'manual')
   const [favoritesOnly, setFavoritesOnly] = useState(preset === 'favorites')
   const [attachmentsOnly, setAttachmentsOnly] = useState(false)
+  const [advancedHelpOpen, setAdvancedHelpOpen] = useState(false)
   const deferredQuery = useDeferredValue(query)
-
-  useEffect(() => {
-    onSearchContentChange?.(searchQueryNeedsContent(deferredQuery, advancedSearch))
-    return () => onSearchContentChange?.(false)
-  }, [deferredQuery, advancedSearch, onSearchContentChange])
+  const hasSemanticScores = semanticSearchEnabled && Boolean(deferredQuery.trim()) && Object.keys(semanticScores).length > 0
 
   const tags = useMemo(() => [...new Set(notes.flatMap(note => note.tags))].sort(collator.compare), [notes])
   const folders = useMemo(() => [...new Set(notes.map(note => note.folder).filter(Boolean))].sort(collator.compare), [notes])
@@ -93,7 +116,7 @@ export function AllNotesPage({ notes, attachments, searchAttachments = attachmen
 
   const filteredNotes = useMemo(() => {
     const results = searchNotes(notes, {
-      query: deferredQuery,
+      query: semanticSearchEnabled ? '' : deferredQuery,
       tag,
       folder,
       attachments: searchAttachments,
@@ -102,8 +125,12 @@ export function AllNotesPage({ notes, attachments, searchAttachments = attachmen
       advanced: advancedSearch,
       sortByUpdated: false,
     }).filter(note => (!favoritesOnly || note.favorite) && (!attachmentsOnly || (attachmentCounts.get(note.id) ?? 0) > 0))
+      .filter(note => !hasSemanticScores || (semanticScores[note.id] ?? -1) >= .12)
 
     return results.sort((a, b) => {
+      if (hasSemanticScores) {
+        return (semanticScores[b.id] ?? -1) - (semanticScores[a.id] ?? -1)
+      }
       if (sortMode === 'manual') {
         return (noteOrderIndex.get(a.id) ?? Number.MAX_SAFE_INTEGER) - (noteOrderIndex.get(b.id) ?? Number.MAX_SAFE_INTEGER) || b.updatedAt - a.updatedAt
       }
@@ -116,20 +143,28 @@ export function AllNotesPage({ notes, attachments, searchAttachments = attachmen
       if (sortMode === 'folder-desc') return collator.compare(b.folder || 'Poziom główny', a.folder || 'Poziom główny') || collator.compare(a.title, b.title)
       return b.updatedAt - a.updatedAt
     })
-  }, [notes, deferredQuery, tag, folder, searchAttachments, contentByNote, normalizedContentByNote, advancedSearch, favoritesOnly, attachmentsOnly, attachmentCounts, sortMode, noteOrderIndex])
+  }, [notes, deferredQuery, tag, folder, searchAttachments, contentByNote, normalizedContentByNote, advancedSearch, favoritesOnly, attachmentsOnly, attachmentCounts, sortMode, noteOrderIndex, semanticSearchEnabled, semanticScores, hasSemanticScores])
 
   const hasFilters = Boolean(query.trim() || tag || folder || favoritesOnly || attachmentsOnly)
+  const selectedIds = new Set(bulkSelectedIds)
+  const toggleSelected = (noteId: string, checked?: boolean) => {
+    const shouldSelect = checked ?? !selectedIds.has(noteId)
+    onBulkSelectedIdsChange?.(shouldSelect ? [...new Set([...bulkSelectedIds, noteId])] : bulkSelectedIds.filter(id => id !== noteId))
+  }
+  const changeDisplayMode = (mode: DisplayMode) => {
+    setDisplayMode(mode)
+    if (mode === 'full' || mode === 'names-tags' || mode === 'names') localStorage.setItem('no-tie-note-display-mode', mode)
+    else localStorage.removeItem('no-tie-note-display-mode')
+  }
   const resetFilters = () => {
-    setQuery('')
-    setTag('')
-    setFolder('')
+    onQueryChange('')
+    onTagChange('')
     onFolderChange?.('')
     setFavoritesOnly(false)
     setAttachmentsOnly(false)
   }
 
   const changeFolder = (value: string) => {
-    setFolder(value)
     onFolderChange?.(value)
   }
 
@@ -137,9 +172,9 @@ export function AllNotesPage({ notes, attachments, searchAttachments = attachmen
     <header className="all-notes-heading">
       <span className="all-notes-mark"><BookOpen size={21} /></span>
       <div className="all-notes-heading-copy">
-        <p className="eyebrow">BIBLIOTEKA</p>
-        <h1>Wszystkie notatki</h1>
-        <p>Przeszukuj bibliotekę, zawężaj wyniki i układaj je tak, jak Ci wygodnie.</p>
+        <p className="eyebrow">TWOJA PRZESTRZEŃ</p>
+        <h1>Biblioteka</h1>
+        <p>Wyszukuj, filtruj i porządkuj wszystkie notatki w jednym widoku.</p>
       </div>
       <div className="all-notes-total"><strong>{notes.length}</strong><span>{noteCountLabel(notes.length)} w bibliotece</span></div>
     </header>
@@ -147,11 +182,12 @@ export function AllNotesPage({ notes, attachments, searchAttachments = attachmen
     <div className="all-notes-filter-panel">
       <label className="all-notes-search">
         <Search size={17} aria-hidden="true" />
-        <input value={query} onChange={event => setQuery(event.target.value)} placeholder="Szukaj w tytułach, treści i tagach…" aria-label="Szukaj w notatkach" />
-        {query && <button type="button" onClick={() => setQuery('')} aria-label="Wyczyść wyszukiwanie">×</button>}
+        <input value={query} onChange={event => onQueryChange(event.target.value)} placeholder="Szukaj w tytułach, treści i tagach…" aria-label="Szukaj w notatkach" />
+        {query && <button type="button" onClick={() => onQueryChange('')} aria-label="Wyczyść wyszukiwanie">×</button>}
+        {onQuickSearch && <button type="button" className="all-notes-quick-search" onClick={onQuickSearch} aria-label="Otwórz szybkie wyszukiwanie" title="Szybkie wyszukiwanie (Ctrl+K)"><Search size={15} /><span>Szybkie</span></button>}
       </label>
       <div className="all-notes-filter-controls">
-        <label className="all-notes-select"><span><Tag size={13} />Tag</span><select value={tag} onChange={event => setTag(event.target.value)}><option value="">Wszystkie tagi</option>{tags.map(value => <option value={value} key={value}>{value}</option>)}</select></label>
+        <label className="all-notes-select"><span><Tag size={13} />Tag</span><select value={tag} onChange={event => onTagChange(event.target.value)}><option value="">Wszystkie tagi</option>{tags.map(value => <option value={value} key={value}>{value}</option>)}</select></label>
         <label className="all-notes-select"><span><Folder size={13} />Folder</span><select value={folder} onChange={event => changeFolder(event.target.value)}><option value="">Wszystkie foldery</option><option value="__root__">Poziom główny</option>{folders.map(value => <option value={value} key={value}>{value}</option>)}</select></label>
         <label className="all-notes-select all-notes-sort"><span><SlidersHorizontal size={13} />Sortuj</span><select value={sortMode} onChange={event => setSortMode(event.target.value as SortMode)}>{Object.entries(sortLabels).map(([value, label]) => <option value={value} key={value}>{label}</option>)}</select></label>
       </div>
@@ -160,14 +196,37 @@ export function AllNotesPage({ notes, attachments, searchAttachments = attachmen
         <label className="all-notes-toggle"><input type="checkbox" checked={attachmentsOnly} onChange={event => setAttachmentsOnly(event.target.checked)} /><span className="all-notes-toggle-check"><Paperclip size={12} /></span>Z załącznikami</label>
         {hasFilters && <button type="button" className="all-notes-reset" onClick={resetFilters}><RotateCcw size={13} />Wyczyść filtry</button>}
       </div>
+      {(advancedSearch || onSemanticSearchChange) && <div className="all-notes-search-options">
+        {advancedSearch && <button className="all-notes-advanced-toggle" type="button" aria-expanded={advancedHelpOpen} onClick={() => setAdvancedHelpOpen(open => !open)}><SlidersHorizontal size={13} />Składnia wyszukiwania</button>}
+        {onSemanticSearchChange && <label className="all-notes-toggle all-notes-semantic-toggle"><input type="checkbox" checked={semanticSearchEnabled} onChange={event => onSemanticSearchChange(event.target.checked)} /><span className="all-notes-toggle-check"><Sparkles size={12} /></span>Szukaj semantycznie{semanticSearchBusy && <LoaderCircle size={12} className="all-notes-spinner" />}</label>}
+        {advancedHelpOpen && advancedSearch && <p className="all-notes-query-help">Użyj <code>tag:projekt</code>, <code>folder:Praca</code>, <code>title:spotkanie</code>, <code>content:ustalenia</code>, <code>after:2026-01-01</code>, <code>has:pdf</code>, <code>OR</code> lub <code>NOT</code>.</p>}
+        {semanticSearchError && <span className="all-notes-search-error" role="status">{semanticSearchError}</span>}
+      </div>}
     </div>
+
+    {searchIndexProgress && <div className="all-notes-index-status" role="status"><LoaderCircle size={13} />Wczytuję treść do wyszukiwania: {searchIndexProgress.done.toLocaleString('pl-PL')} / {searchIndexProgress.total.toLocaleString('pl-PL')}</div>}
+    {bulkActionsEnabled && <div className="all-notes-bulk-toolbar">
+      <button type="button" className={`button ${bulkSelectMode ? 'primary' : 'secondary'}`} onClick={onToggleBulkSelect}><CheckSquare2 size={14} />{bulkSelectMode ? 'Zakończ zaznaczanie' : 'Zaznacz notatki'}</button>
+      {bulkSelectMode && <><span className="all-notes-selected-count">{bulkSelectedIds.length} zaznaczono</span><button type="button" className="link-button" onClick={() => onBulkSelectedIdsChange?.(filteredNotes.map(note => note.id))}>Zaznacz wyniki</button>
+        <label className="all-notes-bulk-field"><span>Przenieś do</span><select aria-label="Przenieś zaznaczone notatki do folderu" value={bulkTargetFolder} onChange={event => onBulkTargetFolderChange?.(event.target.value)}><option value="">Poziom główny</option>{foldersForBulk.map(value => <option key={value} value={value}>{value}</option>)}</select></label>
+        <button type="button" className="button secondary" disabled={!bulkSelectedIds.length} onClick={onMoveSelected}>Przenieś</button>
+        <label className="all-notes-bulk-field all-notes-tag-field"><span>Tag do dodania lub usunięcia</span><input aria-label="Tag dla zaznaczonych notatek" value={bulkTagDraft} onChange={event => onBulkTagDraftChange?.(event.target.value)} placeholder="Nazwa tagu" /></label>
+        <button type="button" className="button secondary" disabled={!bulkTagDraft.trim() || !bulkSelectedIds.length} onClick={onApplySelectedTag}>Zastosuj tag</button>
+        <button type="button" className="button danger-button" disabled={!bulkSelectedIds.length} onClick={onDeleteSelected}><Trash2 size={13} />Do kosza</button>
+      </>}
+    </div>}
 
     <div className="all-notes-results-heading">
       <div><h2>{hasFilters ? 'Wyniki wyszukiwania' : 'Biblioteka'}</h2><span>{filteredNotes.length} z {notes.length} {noteCountLabel(notes.length)}</span></div>
-      <span className="all-notes-sort-summary"><Clock3 size={13} />{sortLabels[sortMode]}</span>
+      <div className="all-notes-results-actions">
+        <label className="all-notes-display-select"><span>Widok</span><select value={displayMode} onChange={event => changeDisplayMode(event.target.value as DisplayMode)} aria-label="Sposób wyświetlania notatek"><option value="cards">Karty</option><option value="full">Treść i tagi</option><option value="names-tags">Nazwy i tagi</option><option value="names">Same nazwy</option></select></label>
+        {hasSemanticScores
+          ? <span className="all-notes-sort-summary"><Sparkles size={13} />Dopasowanie semantyczne</span>
+          : <span className="all-notes-sort-summary"><Clock3 size={13} />{sortLabels[sortMode]}</span>}
+      </div>
     </div>
 
-    {filteredNotes.length ? <VirtualizedGrid
+    {filteredNotes.length && displayMode === 'cards' ? <VirtualizedGrid
       className="all-notes-grid"
       items={filteredNotes}
       keyOf={note => note.id}
@@ -176,9 +235,9 @@ export function AllNotesPage({ notes, attachments, searchAttachments = attachmen
       const preview = cachedNotePreview(note, contentByNote)
       const attachmentCount = attachmentCounts.get(note.id) ?? 0
       const color = getNoteColor(note)
-      return <article draggable={sortMode === 'manual' && Boolean(onReorder)} onDragStart={event => event.dataTransfer.setData('text/no-tie-note-id', note.id)} onDragOver={event => { if (sortMode === 'manual') event.preventDefault() }} onDrop={event => { event.preventDefault(); const sourceId = event.dataTransfer.getData('text/no-tie-note-id'); if (sourceId && sourceId !== note.id) onReorder?.(sourceId, note.id) }} className={`all-notes-card ${color ? 'has-entry-color' : ''}`} style={entryColorStyle(color)}>
-        <div className="all-notes-card-top"><span className="all-notes-card-folder"><Folder size={13} />{note.folder || 'Poziom główny'}</span><span className="all-notes-card-top-actions">{sortMode === 'manual' && <><GripVertical size={14} className="all-notes-drag-handle" aria-hidden="true" /><button type="button" className="all-notes-move-button" title="Przenieś wyżej" aria-label={`Przenieś notatkę ${note.title} wyżej`} disabled={!noteIndex} onClick={() => onReorder?.(note.id, filteredNotes[noteIndex - 1]!.id)}><ArrowUp size={13} /></button><button type="button" className="all-notes-move-button" title="Przenieś niżej" aria-label={`Przenieś notatkę ${note.title} niżej`} disabled={noteIndex === filteredNotes.length - 1} onClick={() => onReorder?.(note.id, filteredNotes[noteIndex + 1]!.id)}><ArrowDown size={13} /></button></>}{note.favorite && <Star className="all-notes-card-star" size={15} fill="currentColor" aria-label="Ulubiona notatka" />}</span></div>
-        <button type="button" className="all-notes-card-open" onClick={() => onOpen(note.id)}>
+      return <article draggable={sortMode === 'manual' && Boolean(onReorder) && !bulkSelectMode} onDragStart={event => event.dataTransfer.setData('text/no-tie-note-id', note.id)} onDragOver={event => { if (sortMode === 'manual') event.preventDefault() }} onDrop={event => { event.preventDefault(); const sourceId = event.dataTransfer.getData('text/no-tie-note-id'); if (sourceId && sourceId !== note.id) onReorder?.(sourceId, note.id) }} className={`all-notes-card ${selectedIds.has(note.id) ? 'is-bulk-selected' : ''} ${color ? 'has-entry-color' : ''}`} style={entryColorStyle(color)}>
+        <div className="all-notes-card-top">{bulkSelectMode && <label className="all-notes-card-select"><input type="checkbox" checked={selectedIds.has(note.id)} onChange={event => toggleSelected(note.id, event.target.checked)} aria-label={`Zaznacz notatkę ${note.title || 'Bez tytułu'}`} /><span><Check size={11} /></span></label>}<span className="all-notes-card-folder"><Folder size={13} />{note.folder || 'Poziom główny'}</span><span className="all-notes-card-top-actions">{sortMode === 'manual' && !bulkSelectMode && <><GripVertical size={14} className="all-notes-drag-handle" aria-hidden="true" /><button type="button" className="all-notes-move-button" title="Przenieś wyżej" aria-label={`Przenieś notatkę ${note.title} wyżej`} disabled={!noteIndex} onClick={() => onReorder?.(note.id, filteredNotes[noteIndex - 1]!.id)}><ArrowUp size={13} /></button><button type="button" className="all-notes-move-button" title="Przenieś niżej" aria-label={`Przenieś notatkę ${note.title} niżej`} disabled={noteIndex === filteredNotes.length - 1} onClick={() => onReorder?.(note.id, filteredNotes[noteIndex + 1]!.id)}><ArrowDown size={13} /></button></>}{note.favorite && <Star className="all-notes-card-star" size={15} fill="currentColor" aria-label="Ulubiona notatka" />}</span></div>
+        <button type="button" className="all-notes-card-open" onClick={() => bulkSelectMode ? toggleSelected(note.id) : onOpen(note.id)}>
         <strong className="all-notes-card-title">{note.title || 'Bez tytułu'}</strong>
         <span className="all-notes-card-preview">{preview || 'Ta notatka nie ma jeszcze treści.'}</span>
         <span className="all-notes-card-tags">{note.tags.length ? <>{note.tags.slice(0, 3).map(value => <span className="all-notes-tag" key={value}>{value}</span>)}{note.tags.length > 3 && <span className="all-notes-tag-more">+{note.tags.length - 3}</span>}</> : <span className="all-notes-no-tags">Bez tagów</span>}</span>
@@ -186,6 +245,22 @@ export function AllNotesPage({ notes, attachments, searchAttachments = attachmen
         </button>
       </article>
     }}
+    /> : filteredNotes.length ? <VirtualizedList
+      className="all-notes-list"
+      items={filteredNotes}
+      itemHeight={displayMode === 'full' ? 128 : displayMode === 'names-tags' ? 86 : 50}
+      keyOf={note => note.id}
+      onItemsRendered={(start, end) => onVisibleNotes?.(filteredNotes.slice(start, end))}
+      renderItem={note => {
+        const color = getNoteColor(note)
+        const content = contentByNote?.get(note.id) ?? note.content
+        return <div className="all-notes-row-select">{bulkSelectMode && <input type="checkbox" className="all-notes-row-checkbox" aria-label={`Zaznacz notatkę ${note.title || 'Bez tytułu'}`} checked={selectedIds.has(note.id)} onPointerDown={event => event.stopPropagation()} onClick={event => event.stopPropagation()} onChange={event => toggleSelected(note.id, event.target.checked)} />}<button type="button" className={`all-notes-row note-card view-${displayMode} ${color ? 'has-entry-color' : ''}`} style={entryColorStyle(color)} onClick={() => bulkSelectMode ? toggleSelected(note.id) : onOpen(note.id)}>
+          {displayMode === 'full' && <span className="note-card-top"><span className="note-date">{dateLabel.format(note.updatedAt)}</span>{note.favorite && <Star size={14} className="favorite-mini" fill="currentColor" />}</span>}
+          <strong>{note.title || 'Bez tytułu'}</strong>
+          {displayMode === 'full' && <p>{content || note.contentLoaded !== false ? cachedNotePreview(note, contentByNote) || 'Ta notatka nie ma jeszcze treści.' : 'Wczytuję podgląd…'}</p>}
+          {displayMode !== 'names' && <span className="note-card-bottom">{displayMode === 'full' && note.folder && <span className="folder-pill"><Folder size={12} />{note.folder}</span>}{note.tags.map(value => <span className="tag-pill" key={value}>{value}</span>)}</span>}
+        </button></div>
+      }}
     /> : <div className="all-notes-empty"><span><Search size={20} /></span><strong>{notes.length ? 'Nie znaleziono pasujących notatek' : 'Twoja biblioteka jest pusta'}</strong><p>{notes.length ? 'Zmień hasło lub usuń część filtrów, aby zobaczyć więcej wyników.' : 'Utwórz pierwszą notatkę, a pojawi się tutaj.'}</p>{hasFilters && <button type="button" className="button secondary" onClick={resetFilters}><RotateCcw size={14} />Wyczyść filtry</button>}</div>}
   </section>
 }
