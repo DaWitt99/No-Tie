@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from 'react'
 import { zipSync } from 'fflate'
 import {
-  AlignCenterHorizontal, AlignEndHorizontal, AlignStartHorizontal, ArrowDownWideNarrow, ArrowRight, Check, Circle, Combine,
+  AlignCenterHorizontal, AlignEndHorizontal, AlignStartHorizontal, ArrowDownWideNarrow, ArrowRight, Check, Circle, Combine, Eraser,
   ClipboardCopy, ClipboardPaste, Copy, Download, Eye, EyeOff, Grid3X3, Group, History, ImagePlus, Layers,
   Lasso, Lock, MessageSquare, Minus, MousePointer2, Palette, Pencil, Pipette, Plus, RectangleHorizontal,
   RectangleVertical, Redo2, RotateCw, Ruler, Shapes, Trash2, Triangle, Type, Undo2, Ungroup, Unlock, Waypoints, X,
@@ -12,17 +12,18 @@ import { sanitizeSvg } from './content'
 import { shapeById, shapeCategories, shapeLibrary } from './shapeLibrary'
 import { findGeometrySnap, lassoIntersectsBox, outlineOpenStroke, reversePathData } from './svgEditorGeometry'
 
-type Tool = 'select' | 'lasso' | 'shapeBuilder' | 'rect' | 'roundRect' | 'ellipse' | 'line' | 'arrow' | 'polygon' | 'shape' | 'freehand' | 'text' | 'pen'
+type Tool = 'select' | 'lasso' | 'eraser' | 'shapeBuilder' | 'rect' | 'roundRect' | 'ellipse' | 'line' | 'arrow' | 'polygon' | 'shape' | 'freehand' | 'text' | 'pen'
 type ArrowMode = 'end' | 'start' | 'both' | 'none'
 type Box = { x: number; y: number; width: number; height: number }
 type ViewBox = Box
-type Point = { x: number; y: number; pressure?: number }
+type Point = { x: number; y: number; pressure?: number; tiltX?: number; tiltY?: number }
 type ResizeHandle = 'n' | 'ne' | 'e' | 'se' | 's' | 'sw' | 'w' | 'nw'
 type GeometryDraft = { x: string; y: string; width: string; height: string }
 type Snap = { delta: number; target: number } | undefined
 type Interaction =
   | { type: 'draw'; tool: Tool; element: any; id: string; x: number; y: number; keepTool: boolean; startTarget?: string; startAnchor?: string }
-  | { type: 'freehand'; element: any; id: string; points: Point[]; keepTool: boolean; pressureSensitive: boolean }
+  | { type: 'freehand'; element: any; id: string; points: Point[]; pressureSensitive: boolean }
+  | { type: 'eraser'; changed: boolean; last: Point }
   | { type: 'connect'; line: SVGLineElement; id: string; side: 'start' | 'end'; x: number; y: number; moved: boolean }
   | { type: 'move'; ids: string[]; elements: SVGElement[]; others: Box[]; startX: number; startY: number; lastX: number; lastY: number; bounds: Box; moved: boolean }
   | { type: 'resize'; ids: string[]; targets: { element: SVGElement; source: SVGElement; box: Box }[]; startBounds: Box; handle: ResizeHandle; moved: boolean }
@@ -51,7 +52,8 @@ type DocumentUnit = 'px' | 'mm' | 'in'
 type EditorGuide = { axis: 'x' | 'y'; value: number; locked?: boolean }
 type SvgLibraryItem = { id: string; name: string; markup: string; kind?: 'component' | 'template'; packageId?: string }
 type SvgPalettePreset = { id: string; name: string; colors: string[] }
-type StylusProfile = { smoothing: number; pressureSensitivity: number }
+type StylusProfile = { smoothing: number; pressureSensitivity: number; tiltSensitivity: number; palmRejection: boolean }
+type BrushPreset = { id: string; name: string; color: string; width: number; smoothing: number; pressureSensitivity: number; tiltSensitivity: number }
 type SvgExtensionPackage = { id: string; name: string; category: string; description: string; items: SvgLibraryItem[] }
 type EditorViewOptions = { grid: boolean; gridSize: number; snap: boolean; snapGeometry: boolean; smartGuides: boolean; rulers: boolean; guides: EditorGuide[] }
 
@@ -65,7 +67,11 @@ const HEIGHT = 500
 const SNAP_DISTANCE = 4
 const OBJECT_TAGS = new Set(['g', 'rect', 'circle', 'ellipse', 'line', 'polygon', 'polyline', 'path', 'text', 'image', 'use'])
 const SVG_NS = 'http://www.w3.org/2000/svg'
-const DEFAULT_STYLUS_PROFILE: StylusProfile = { smoothing: .85, pressureSensitivity: 1 }
+const DEFAULT_STYLUS_PROFILE: StylusProfile = { smoothing: .85, pressureSensitivity: 1, tiltSensitivity: 1, palmRejection: true }
+const BUILTIN_BRUSH_PRESETS: BrushPreset[] = [
+  { id: 'pencil', name: 'Ołówek', color: '#596fd8', width: 2, smoothing: .9, pressureSensitivity: 1.15, tiltSensitivity: .7 },
+  { id: 'marker', name: 'Marker', color: '#2b9a83', width: 8, smoothing: .35, pressureSensitivity: .45, tiltSensitivity: 1.5 },
+]
 
 function readLocalJson<T>(key: string, fallback: T): T {
   try { return (JSON.parse(localStorage.getItem(key) ?? 'null') as T | null) ?? fallback } catch { return fallback }
@@ -277,12 +283,13 @@ function smoothStroke(points: Point[], smoothing = 1): string {
   return path
 }
 
-function pressureStroke(points: Point[], width: number, sensitivity = 1): string {
+function pressureStroke(points: Point[], width: number, sensitivity = 1, tiltSensitivity = 1): string {
   if (!points.length) return ''
   const roundedPoint = (value: number) => Number(value.toFixed(2))
   if (points.length === 1) {
     const pressure = Math.max(.08, Math.min(1, .5 + ((points[0].pressure ?? .5) - .5) * sensitivity))
-    const radius = Math.max(.1, width * (.18 + pressure * 1.22) / 2)
+    const tilt = Math.min(1, Math.hypot(points[0].tiltX ?? 0, points[0].tiltY ?? 0) / 90)
+    const radius = Math.max(.1, width * (.18 + pressure * 1.22) / 2 * (1 + tilt * tiltSensitivity * .32))
     const x = roundedPoint(points[0].x); const y = roundedPoint(points[0].y); const r = roundedPoint(radius)
     return `M ${x - r} ${y} a ${r} ${r} 0 1 0 ${r * 2} 0 a ${r} ${r} 0 1 0 ${-r * 2} 0 Z`
   }
@@ -295,7 +302,14 @@ function pressureStroke(points: Point[], width: number, sensitivity = 1): string
     const dy = after.y - before.y
     const length = Math.hypot(dx, dy) || 1
     const pressure = Math.max(.08, Math.min(1, .5 + ((point.pressure ?? .5) - .5) * sensitivity))
-    const radius = Math.max(.1, width * (.18 + pressure * 1.22) / 2)
+    const baseRadius = Math.max(.1, width * (.18 + pressure * 1.22) / 2)
+    const tilt = Math.min(1, Math.hypot(point.tiltX ?? 0, point.tiltY ?? 0) / 90)
+    const tiltAngle = Math.atan2(point.tiltY ?? 0, point.tiltX ?? 0)
+    const normalAngle = Math.atan2(-dx, dy)
+    const alignment = Math.cos(normalAngle - tiltAngle)
+    const majorRadius = baseRadius * (1 + tilt * tiltSensitivity)
+    const minorRadius = baseRadius * Math.max(.45, 1 - tilt * tiltSensitivity * .3)
+    const radius = Math.sqrt((majorRadius * alignment) ** 2 + (minorRadius * Math.sqrt(Math.max(0, 1 - alignment ** 2))) ** 2)
     const nx = -dy / length * radius
     const ny = dx / length * radius
     left.push({ x: point.x + nx, y: point.y + ny })
@@ -624,6 +638,14 @@ function toHexColor(value: string): string | undefined {
 
 function moveElementBy(element: SVGElement, deltaX: number, deltaY: number) {
   ;(SVG(element) as any).dmove(deltaX, deltaY)
+  const rawPointData = element.getAttribute('data-freehand-points')
+  if (rawPointData) {
+    try {
+      const parsed = JSON.parse(rawPointData) as Point[] | Point[][]
+      const groups = Array.isArray(parsed[0]) ? parsed as Point[][] : [parsed as Point[]]
+      element.setAttribute('data-freehand-points', JSON.stringify(groups.map(points => points.map(point => ({ ...point, x: point.x + deltaX, y: point.y + deltaY })))))
+    } catch { /* The visible path can still move if its optional eraser cache is damaged. */ }
+  }
   for (const name of ['x', 'y', 'x1', 'x2', 'y1', 'y2', 'cx', 'cy']) {
     const value = element.getAttribute(name)
     if (value !== null && Number.isFinite(Number(value))) element.setAttribute(name, rounded(Number(value)))
@@ -1324,6 +1346,7 @@ export function VectorEditor({
   const redoHistory = useRef<string[]>([])
   const interaction = useRef<Interaction | null>(null)
   const interactionPointerId = useRef<number | null>(null)
+  const activeStylusPointerId = useRef<number | null>(null)
   const textEdit = useRef<TextEdit | null>(null)
   const activePen = useRef<ActivePen | null>(null)
   const finishPenAction = useRef<() => void>(() => {})
@@ -1360,6 +1383,10 @@ export function VectorEditor({
   const fontItalicRef = useRef(false)
   const smoothingRef = useRef(DEFAULT_STYLUS_PROFILE.smoothing)
   const pressureSensitivityRef = useRef(DEFAULT_STYLUS_PROFILE.pressureSensitivity)
+  const tiltSensitivityRef = useRef(DEFAULT_STYLUS_PROFILE.tiltSensitivity)
+  const palmRejectionRef = useRef(DEFAULT_STYLUS_PROFILE.palmRejection)
+  const eraserSizeRef = useRef(18)
+  const eraserModeRef = useRef<'partial' | 'whole'>('partial')
   const [activePanel, setActivePanel] = useState<EditorPanel>('canvas')
   const [tool, setTool] = useState<Tool>('select')
   const [shapeId, setShapeId] = useState('flow-process')
@@ -1369,7 +1396,16 @@ export function VectorEditor({
   const [fillColor, setFillColor] = useState('#dfe4ff')
   const [fillEnabled, setFillEnabled] = useState(true)
   const [strokeWidth, setStrokeWidth] = useState(3)
-  const [stylusProfile, setStylusProfile] = useState<StylusProfile>(() => readLocalJson('no-tie-svg-stylus-profile', DEFAULT_STYLUS_PROFILE))
+  const [eraserSize, setEraserSize] = useState(18)
+  const [eraserMode, setEraserMode] = useState<'partial' | 'whole'>('partial')
+  const [stylusProfile, setStylusProfile] = useState<StylusProfile>(() => ({ ...DEFAULT_STYLUS_PROFILE, ...readLocalJson<Partial<StylusProfile>>('no-tie-svg-stylus-profile', {}) }))
+  const [brushPresets, setBrushPresets] = useState<BrushPreset[]>(() => {
+    const saved = readLocalJson<unknown>('no-tie-svg-brush-presets', [])
+    if (!Array.isArray(saved)) return []
+    return (saved as Partial<BrushPreset>[]).filter((item): item is BrushPreset => Boolean(item && typeof item.id === 'string' && typeof item.name === 'string' && typeof item.color === 'string' && /^#[\da-f]{6}$/i.test(item.color) && Number.isFinite(item.width) && Number.isFinite(item.smoothing) && Number.isFinite(item.pressureSensitivity) && Number.isFinite(item.tiltSensitivity))).map(item => ({ ...item, width: Math.max(.5, Math.min(24, item.width)), smoothing: Math.max(0, Math.min(1.5, item.smoothing)), pressureSensitivity: Math.max(0, Math.min(2, item.pressureSensitivity)), tiltSensitivity: Math.max(0, Math.min(2, item.tiltSensitivity)) }))
+  })
+  const [brushPresetId, setBrushPresetId] = useState('current')
+  const [brushPresetName, setBrushPresetName] = useState('')
   const [fontSize, setFontSize] = useState(24)
   const [polygonSides, setPolygonSides] = useState(6)
   const [arrowMode, setArrowMode] = useState<ArrowMode>('end')
@@ -1507,6 +1543,8 @@ export function VectorEditor({
   useEffect(() => { fillColorRef.current = fillColor }, [fillColor])
   useEffect(() => { fillEnabledRef.current = fillEnabled }, [fillEnabled])
   useEffect(() => { strokeWidthRef.current = strokeWidth }, [strokeWidth])
+  useEffect(() => { eraserSizeRef.current = eraserSize }, [eraserSize])
+  useEffect(() => { eraserModeRef.current = eraserMode }, [eraserMode])
   useEffect(() => { fontSizeRef.current = fontSize }, [fontSize])
   useEffect(() => { polygonSidesRef.current = polygonSides }, [polygonSides])
   useEffect(() => { arrowModeRef.current = arrowMode }, [arrowMode])
@@ -1521,8 +1559,13 @@ export function VectorEditor({
   useEffect(() => {
     smoothingRef.current = stylusProfile.smoothing
     pressureSensitivityRef.current = stylusProfile.pressureSensitivity
+    tiltSensitivityRef.current = stylusProfile.tiltSensitivity
+    palmRejectionRef.current = stylusProfile.palmRejection
     try { localStorage.setItem('no-tie-svg-stylus-profile', JSON.stringify(stylusProfile)) } catch { /* The active profile remains available in memory. */ }
   }, [stylusProfile])
+  useEffect(() => {
+    try { localStorage.setItem('no-tie-svg-brush-presets', JSON.stringify(brushPresets.slice(-20))) } catch { /* Presets remain available during this editor session. */ }
+  }, [brushPresets])
   useEffect(() => { eyedropperRef.current = eyedropper; if (drawing.current) renderOverlay(drawing.current, selectedIdsRef.current) }, [eyedropper])
 
   useEffect(() => {
@@ -1821,12 +1864,15 @@ export function VectorEditor({
     const point = (event: PointerEvent, snap = true) => {
       const bounds = stage.node.getBoundingClientRect()
       const visible = viewBoxRef.current
-      const pressure = event.pointerType === 'pen' ? (event.pressure > 0 ? event.pressure : .5) : undefined
+      const isStylus = event.pointerType === 'pen'
+      const pressure = isStylus ? (event.pressure > 0 ? event.pressure : .5) : undefined
+      const tiltX = isStylus ? event.tiltX : undefined
+      const tiltY = isStylus ? event.tiltY : undefined
       const location = {
         x: Number((visible.x + (event.clientX - bounds.left) * visible.width / bounds.width).toFixed(1)),
         y: Number((visible.y + (event.clientY - bounds.top) * visible.height / bounds.height).toFixed(1)),
       }
-      const withPressure = (value: Point): Point => pressure === undefined ? value : { ...value, pressure }
+      const withPressure = (value: Point): Point => pressure === undefined ? value : { ...value, pressure, tiltX, tiltY }
       if (snap && viewOptionsRef.current.snapGeometry) {
         const threshold = Math.max(visible.width / Math.max(bounds.width, 1), visible.height / Math.max(bounds.height, 1)) * 9
         const excludedIds = toolRef.current === 'select' ? selectedIdsRef.current : []
@@ -1838,6 +1884,134 @@ export function VectorEditor({
         return withPressure({ x: Math.round(location.x / size) * size, y: Math.round(location.y / size) * size })
       }
       return withPressure(location)
+    }
+
+    const eraseAt = (event: PointerEvent, location: Point, previous: Point = location): boolean => {
+      const scale = Math.max(viewBoxRef.current.width / Math.max(stage.node.clientWidth, 1), viewBoxRef.current.height / Math.max(stage.node.clientHeight, 1))
+      const radius = Math.max(2, eraserSizeRef.current * scale / 2)
+      const distanceToSegment = (point: Point, start: Point, end: Point) => {
+        const dx = end.x - start.x; const dy = end.y - start.y
+        const length = dx * dx + dy * dy
+        const ratio = length ? Math.max(0, Math.min(1, ((point.x - start.x) * dx + (point.y - start.y) * dy) / length)) : 0
+        return Math.hypot(point.x - (start.x + ratio * dx), point.y - (start.y + ratio * dy))
+      }
+      const segmentsNear = (a: Point, b: Point, c: Point, d: Point, distance: number) => {
+        const cross = (first: Point, second: Point, third: Point) => (second.x - first.x) * (third.y - first.y) - (second.y - first.y) * (third.x - first.x)
+        const abC = cross(a, b, c); const abD = cross(a, b, d); const cdA = cross(c, d, a); const cdB = cross(c, d, b)
+        const onSegment = (point: Point, start: Point, end: Point) => point.x >= Math.min(start.x, end.x) - 1e-8 && point.x <= Math.max(start.x, end.x) + 1e-8 && point.y >= Math.min(start.y, end.y) - 1e-8 && point.y <= Math.max(start.y, end.y) + 1e-8
+        if ((abC * abD < 0 && cdA * cdB < 0)
+          || (Math.abs(abC) < 1e-8 && onSegment(c, a, b))
+          || (Math.abs(abD) < 1e-8 && onSegment(d, a, b))
+          || (Math.abs(cdA) < 1e-8 && onSegment(a, c, d))
+          || (Math.abs(cdB) < 1e-8 && onSegment(b, c, d))) return true
+        return Math.min(distanceToSegment(a, c, d), distanceToSegment(b, c, d), distanceToSegment(c, a, b), distanceToSegment(d, a, b)) <= distance
+      }
+      const rawTarget = document.elementFromPoint(event.clientX, event.clientY)
+      const hitTarget = findObjectTarget(stage.node, rawTarget)
+      const wholeStrokeTargets = new Set<SVGElement>()
+      if (hitTarget) wholeStrokeTargets.add(hitTarget)
+      if (eraserModeRef.current === 'whole') {
+        const bounds = stage.node.getBoundingClientRect()
+        const view = viewBoxRef.current
+        const toClient = (point: Point) => ({ x: bounds.left + (point.x - view.x) * bounds.width / view.width, y: bounds.top + (point.y - view.y) * bounds.height / view.height })
+        const startClient = toClient(previous); const endClient = toClient(location)
+        const length = Math.hypot(endClient.x - startClient.x, endClient.y - startClient.y)
+        const steps = Math.max(1, Math.ceil(length / Math.max(3, eraserSizeRef.current * .35)))
+        const offset = eraserSizeRef.current / 2
+        const diagonal = offset * Math.SQRT1_2
+        const offsets = [[0, 0], [offset, 0], [-offset, 0], [0, offset], [0, -offset], [diagonal, diagonal], [diagonal, -diagonal], [-diagonal, diagonal], [-diagonal, -diagonal]]
+        for (let index = 0; index <= steps; index++) {
+          const ratio = index / steps
+          const x = startClient.x + (endClient.x - startClient.x) * ratio
+          const y = startClient.y + (endClient.y - startClient.y) * ratio
+          offsets.forEach(([dx, dy]) => {
+            const target = findObjectTarget(stage.node, document.elementFromPoint(x + dx, y + dy))
+            if (target) wholeStrokeTargets.add(target)
+          })
+        }
+      }
+      let changed = false
+      directObjects(stage.node).forEach(element => {
+        if (element.getAttribute('data-layer-locked') === 'true' || element.getAttribute('visibility') === 'hidden') return
+        if (eraserModeRef.current === 'whole') {
+          if (wholeStrokeTargets.has(element)) { element.remove(); changed = true }
+          return
+        }
+        const rawPoints = element.getAttribute('data-freehand-points')
+        if (rawPoints) {
+          let localPrevious = previous
+          let localLocation = location
+          let scaleToLocal = 1
+          let scaleToRoot = 1
+          try {
+            const elementMatrix = (element as SVGGraphicsElement).getScreenCTM()
+            const rootMatrix = stage.node.getScreenCTM()
+            if (elementMatrix && rootMatrix) {
+              const localToRoot = rootMatrix.inverse().multiply(elementMatrix)
+              const rootToLocal = localToRoot.inverse()
+              localPrevious = new DOMPoint(previous.x, previous.y).matrixTransform(rootToLocal)
+              localLocation = new DOMPoint(location.x, location.y).matrixTransform(rootToLocal)
+              scaleToLocal = Math.max(Math.hypot(rootToLocal.a, rootToLocal.b), Math.hypot(rootToLocal.c, rootToLocal.d))
+              scaleToRoot = Math.max(Math.hypot(localToRoot.a, localToRoot.b), Math.hypot(localToRoot.c, localToRoot.d))
+            }
+          } catch { /* Use the SVG's untransformed coordinates if a matrix is unavailable. */ }
+          const strokeWidth = Number(element.getAttribute('stroke-width')) || strokeWidthRef.current
+          const effectiveRadius = radius * scaleToLocal + Math.max(.5, strokeWidth * .55)
+          const boundsRadius = radius + Math.max(.5, strokeWidth * .55 * scaleToRoot)
+          const bounds = getBox(element)
+          const sweepBounds = { left: Math.min(previous.x, location.x), right: Math.max(previous.x, location.x), top: Math.min(previous.y, location.y), bottom: Math.max(previous.y, location.y) }
+          if (bounds && (sweepBounds.right < bounds.x - boundsRadius || sweepBounds.left > bounds.x + bounds.width + boundsRadius || sweepBounds.bottom < bounds.y - boundsRadius || sweepBounds.top > bounds.y + bounds.height + boundsRadius)) return
+          let pointGroups: Point[][] = []
+          try {
+            const parsed = JSON.parse(rawPoints) as Point[] | Point[][]
+            pointGroups = Array.isArray(parsed[0]) ? parsed as Point[][] : [parsed as Point[]]
+          } catch { /* Treat a damaged point cache as a regular path and allow whole-stroke erasing. */ }
+          if (pointGroups.length) {
+            let erased = false
+            const remainingGroups = pointGroups.flatMap(points => {
+              if (points.length === 1) {
+                if (distanceToSegment(points[0], localPrevious, localLocation) <= effectiveRadius) { erased = true; return [] }
+                return [points]
+              }
+              if (points.length < 2) return [points]
+              const removed = new Set<number>()
+              points.forEach((point, index) => {
+                if (distanceToSegment(point, localPrevious, localLocation) <= effectiveRadius) removed.add(index)
+                if (index && segmentsNear(localPrevious, localLocation, points[index - 1], point, effectiveRadius)) { removed.add(index - 1); removed.add(index) }
+              })
+              if (!removed.size) return [points]
+              erased = true
+              const chunks: Point[][] = []
+              let chunk: Point[] = []
+              points.forEach((point, index) => {
+                if (removed.has(index)) {
+                  if (chunk.length > 1) chunks.push(chunk)
+                  chunk = []
+                } else chunk.push(point)
+              })
+              if (chunk.length > 1) chunks.push(chunk)
+              return chunks
+            })
+            if (erased) {
+              if (!remainingGroups.length) element.remove()
+              else {
+                const pressureStrokeElement = element.hasAttribute('data-pressure-stroke')
+                const width = Number(element.getAttribute('stroke-width')) || strokeWidthRef.current
+                const smoothing = Number(element.getAttribute('data-freehand-smoothing'))
+                const pressureSensitivity = Number(element.getAttribute('data-freehand-pressure-sensitivity'))
+                const tiltSensitivity = Number(element.getAttribute('data-freehand-tilt-sensitivity'))
+                const pathData = remainingGroups.map(points => pressureStrokeElement
+                  ? pressureStroke(points, width, Number.isFinite(pressureSensitivity) ? pressureSensitivity : pressureSensitivityRef.current, Number.isFinite(tiltSensitivity) ? tiltSensitivity : tiltSensitivityRef.current)
+                  : smoothStroke(points, Number.isFinite(smoothing) ? smoothing : smoothingRef.current)).join(' ')
+                element.setAttribute('d', pathData)
+                element.setAttribute('data-freehand-points', JSON.stringify(remainingGroups))
+              }
+              changed = true
+            }
+          }
+        }
+      })
+      return changed
     }
 
     const beginTextEdit = (location: { x: number; y: number }, existing?: SVGElement, keepTool = false) => {
@@ -1949,7 +2123,12 @@ export function VectorEditor({
         event.preventDefault()
         return
       }
+      if (event.pointerType === 'pen') activeStylusPointerId.current = event.pointerId
       const currentTool = toolRef.current
+      if (event.pointerType === 'touch' && (activeStylusPointerId.current !== null || (palmRejectionRef.current && currentTool === 'freehand'))) {
+        event.preventDefault()
+        return
+      }
       const clickedObject = findObjectTarget(stage.node, event.target)
       const allowTextDoubleClick = currentTool === 'select'
         && (event.pointerType === 'mouse' || event.pointerType === 'pen')
@@ -2036,6 +2215,11 @@ export function VectorEditor({
         renderOverlay(stage, selectedIdsRef.current, { lasso: [location] })
         return
       }
+      if (currentTool === 'eraser') {
+        const location = point(event, false)
+        interaction.current = { type: 'eraser', changed: eraseAt(event, location), last: location }
+        return
+      }
       if (currentTool === 'shapeBuilder') {
         const id = clickedObject?.getAttribute('data-object-id')
         if (!id || clickedObject?.getAttribute('data-layer-locked') === 'true') { if (!event.shiftKey && !id) select([]); return }
@@ -2055,9 +2239,15 @@ export function VectorEditor({
           if (currentTool === 'freehand') {
             const pressureSensitive = event.pointerType === 'pen'
             if (pressureSensitive) {
-              created.element.attr({ d: pressureStroke([startPoint], strokeWidthRef.current, pressureSensitivityRef.current), fill: strokeColorRef.current, stroke: 'none', 'data-pressure-stroke': 'true' })
+              created.element.attr({ d: pressureStroke([startPoint], strokeWidthRef.current, pressureSensitivityRef.current, tiltSensitivityRef.current), fill: strokeColorRef.current, stroke: 'none', 'data-pressure-stroke': 'true' })
             }
-            interaction.current = { type: 'freehand', element: created.element, id: created.id, points: [startPoint], keepTool: event.ctrlKey, pressureSensitive }
+            created.element.attr({
+              'data-freehand-points': JSON.stringify([[startPoint]]),
+              'data-freehand-smoothing': `${smoothingRef.current}`,
+              'data-freehand-pressure-sensitivity': `${pressureSensitivityRef.current}`,
+              'data-freehand-tilt-sensitivity': `${tiltSensitivityRef.current}`,
+            })
+            interaction.current = { type: 'freehand', element: created.element, id: created.id, points: [startPoint], pressureSensitive }
           } else {
             if (anchor && anchorPoint) created.element.attr({ 'data-start-target': anchor.id, 'data-start-anchor': anchor.anchor })
             interaction.current = { type: 'draw', tool: currentTool, element: created.element, id: created.id, x: startPoint.x, y: startPoint.y, keepTool: event.ctrlKey, startTarget: anchor?.id, startAnchor: anchor?.anchor }
@@ -2177,7 +2367,7 @@ export function VectorEditor({
       if (interactionPointerId.current !== null && interactionPointerId.current !== event.pointerId) return
       const current = interaction.current
       if (!current) return
-      const location = point(event, current.type !== 'pan' && current.type !== 'lasso')
+      const location = point(event, current.type !== 'pan' && current.type !== 'lasso' && current.type !== 'eraser')
       if (current.type === 'pan') {
         const bounds = stage.node.getBoundingClientRect()
         const dx = (event.clientX - current.startClientX) * current.viewBox.width / Math.max(1, bounds.width)
@@ -2192,6 +2382,9 @@ export function VectorEditor({
         if (Math.hypot(location.x - last.x, location.y - last.y) >= 2 && current.points.length < 1600) current.points.push(location)
         current.moved = current.moved || current.points.length > 2
         renderOverlay(stage, selectedIdsRef.current, { lasso: current.points })
+      } else if (current.type === 'eraser') {
+        current.changed = eraseAt(event, location, current.last) || current.changed
+        current.last = location
       } else if (current.type === 'gradient-handle') {
         current.moved = true
         if (current.index === 2) {
@@ -2219,14 +2412,13 @@ export function VectorEditor({
         }
         renderOverlay(stage, [current.element.getAttribute('data-object-id') ?? ''])
       } else if (current.type === 'freehand') {
-        current.keepTool = current.keepTool || event.ctrlKey
         const samples = typeof event.getCoalescedEvents === 'function' ? event.getCoalescedEvents() : [event]
         samples.forEach(sample => {
           const samplePoint = point(sample)
           const last = current.points.at(-1)!
           if (Math.hypot(samplePoint.x - last.x, samplePoint.y - last.y) >= 1.2 && current.points.length < 1600) current.points.push(samplePoint)
         })
-        current.element.attr('d', current.pressureSensitive ? pressureStroke(current.points, strokeWidthRef.current, pressureSensitivityRef.current) : smoothStroke(current.points, smoothingRef.current))
+        current.element.attr('d', current.pressureSensitive ? pressureStroke(current.points, strokeWidthRef.current, pressureSensitivityRef.current, tiltSensitivityRef.current) : smoothStroke(current.points, smoothingRef.current))
         const bounds = pointsBounds(current.points)
         renderOverlay(stage, [current.id], { dimensions: bounds })
       } else if (current.type === 'pen-node') {
@@ -2361,6 +2553,7 @@ export function VectorEditor({
     }
 
     const finish = (event: PointerEvent) => {
+      if (activeStylusPointerId.current === event.pointerId) activeStylusPointerId.current = null
       if (interactionPointerId.current !== null && interactionPointerId.current !== event.pointerId) return
       const current = interaction.current
       if (!current) {
@@ -2371,6 +2564,12 @@ export function VectorEditor({
       interactionPointerId.current = null
       if (current.type === 'pan') {
         stage.node.removeAttribute('data-panning')
+      } else if (current.type === 'eraser') {
+        if (current.changed) {
+          updateConnectors(stage.node)
+          select([])
+          recordHistory(stage)
+        }
       } else if (current.type === 'guide') {
         if (!current.moved && !current.created && current.index < viewOptionsRef.current.guides.length) setViewOptions(options => ({ ...options, guides: options.guides.filter((_guide, index) => index !== current.index) }))
       } else if (current.type === 'lasso') {
@@ -2391,13 +2590,14 @@ export function VectorEditor({
         if (current.moved) recordHistory(stage)
         select([current.element.getAttribute('data-object-id') ?? ''])
       } else if (current.type === 'freehand') {
-        current.keepTool = current.keepTool || event.ctrlKey
         const location = point(event)
         const last = current.points.at(-1)!
         if (Math.hypot(location.x - last.x, location.y - last.y) >= 0.5 && current.points.length < 1600) current.points.push(location)
-        current.element.attr('d', current.pressureSensitive ? pressureStroke(current.points, strokeWidthRef.current, pressureSensitivityRef.current) : smoothStroke(current.points, smoothingRef.current))
+        current.element.attr('d', current.pressureSensitive ? pressureStroke(current.points, strokeWidthRef.current, pressureSensitivityRef.current, tiltSensitivityRef.current) : smoothStroke(current.points, smoothingRef.current))
+        current.element.attr('data-freehand-points', JSON.stringify([current.points]))
         const bounds = pointsBounds(current.points)
-        if (smartDrawingRef.current) {
+        const hasStylusDynamics = current.pressureSensitive && current.points.some(point => Math.abs((point.pressure ?? .5) - .5) > .08 || Math.hypot(point.tiltX ?? 0, point.tiltY ?? 0) > 8)
+        if (smartDrawingRef.current && !hasStylusDynamics) {
           if (smartShapeIdRef.current !== 'auto') {
             const replacement = createLibraryShapeNode(smartShapeIdRef.current, bounds, current.element.node, current.id)
             replacement.setAttribute('fill', fillEnabledRef.current ? fillColorRef.current : 'none')
@@ -2435,7 +2635,6 @@ export function VectorEditor({
         updateConnectors(stage.node)
         recordHistory(stage)
         select([current.id])
-        if (!current.keepTool) chooseTool('select')
       } else if (current.type === 'pen-node') {
         if (current.moved) recordHistory(stage)
         select([current.element.getAttribute('data-object-id') ?? ''])
@@ -2833,6 +3032,7 @@ export function VectorEditor({
   function applyStrokeColor(value: string) {
     strokeColorRef.current = value
     setStrokeColor(value)
+    if (toolRef.current === 'freehand') setBrushPresetId('current')
     const stage = drawing.current
     if (!stage) return
     elementsForIds(stage.node, selectedIdsRef.current).forEach(element => {
@@ -2875,10 +3075,42 @@ export function VectorEditor({
   function applyStrokeWidth(value: number) {
     strokeWidthRef.current = value
     setStrokeWidth(value)
+    if (toolRef.current === 'freehand') setBrushPresetId('current')
     const stage = drawing.current
     if (!stage) return
     elementsForIds(stage.node, selectedIdsRef.current).forEach(element => element.setAttribute('stroke-width', `${value}`))
     recordHistory(stage)
+  }
+
+  function applyBrushPreset(preset: BrushPreset) {
+    strokeColorRef.current = preset.color
+    strokeWidthRef.current = preset.width
+    smoothingRef.current = preset.smoothing
+    pressureSensitivityRef.current = preset.pressureSensitivity
+    tiltSensitivityRef.current = preset.tiltSensitivity
+    setStrokeColor(preset.color)
+    setStrokeWidth(preset.width)
+    setStylusProfile(current => ({ ...current, smoothing: preset.smoothing, pressureSensitivity: preset.pressureSensitivity, tiltSensitivity: preset.tiltSensitivity }))
+    setBrushPresetId(preset.id)
+  }
+
+  function saveBrushPreset() {
+    const name = brushPresetName.trim().slice(0, 32)
+    if (!name) return
+    const preset: BrushPreset = {
+      id: crypto.randomUUID(), name, color: strokeColor, width: strokeWidth,
+      smoothing: stylusProfile.smoothing, pressureSensitivity: stylusProfile.pressureSensitivity,
+      tiltSensitivity: stylusProfile.tiltSensitivity,
+    }
+    setBrushPresets(current => [...current.filter(item => item.name.toLocaleLowerCase('pl') !== name.toLocaleLowerCase('pl')), preset].slice(-20))
+    setBrushPresetId(preset.id)
+    setBrushPresetName('')
+  }
+
+  function removeBrushPreset() {
+    if (BUILTIN_BRUSH_PRESETS.some(item => item.id === brushPresetId)) return
+    setBrushPresets(current => current.filter(item => item.id !== brushPresetId))
+    setBrushPresetId('current')
   }
 
   function applyFontSize(value: number) {
@@ -4478,6 +4710,7 @@ export function VectorEditor({
   const tools: { id: Tool; label: string; icon: typeof RectangleHorizontal }[] = [
     { id: 'select', label: 'Zaznacz i przesuń', icon: MousePointer2 },
     { id: 'lasso', label: 'Zaznacz lasso', icon: Lasso },
+    { id: 'eraser', label: 'Gumka · usuwa fragmenty pociągnięć lub cały obiekt', icon: Eraser },
     { id: 'shapeBuilder', label: 'Buduj kształt przez wybór obszarów', icon: Combine },
     { id: 'rect', label: 'Prostokąt', icon: RectangleHorizontal },
     { id: 'roundRect', label: 'Zaokrąglony prostokąt', icon: RectangleVertical },
@@ -4486,7 +4719,7 @@ export function VectorEditor({
     { id: 'arrow', label: 'Strzałka', icon: ArrowRight },
     { id: 'polygon', label: 'Wielokąt', icon: Triangle },
     { id: 'shape', label: 'Kształty biblioteczne', icon: Shapes },
-    { id: 'freehand', label: 'Pędzel odręczny · nacisk rysika zmienia szerokość kreski', icon: Pencil },
+    { id: 'freehand', label: 'Pędzel odręczny · pozostaje aktywny; nacisk rysika zmienia szerokość', icon: Pencil },
     { id: 'pen', label: 'Pióro Béziera, kliknij punkty i Enter, aby zakończyć', icon: Pencil },
     { id: 'text', label: 'Tekst na planszy', icon: Type },
   ]
@@ -4557,7 +4790,8 @@ export function VectorEditor({
             </div>
           </div>
           <div className="drawing-toolbar-row drawing-toolbar-properties">
-            {tool === 'lasso' && <span className="feature-help toolbar-tool-hint">Obrysuj obiekty, aby je zaznaczyć · Shift dodaje do zaznaczenia</span>}
+            {tool === 'lasso' && <span className="feature-help toolbar-tool-hint">Obrysuj pociągnięcia lub obiekty · Shift dodaje do zaznaczenia; potem możesz je przesuwać, obracać i skalować</span>}
+            {tool === 'eraser' && <div className="eraser-controls"><label className="drawing-select-control"><span>Tryb gumki</span><select value={eraserMode} onChange={event => setEraserMode(event.target.value as typeof eraserMode)}><option value="partial">Częściowe wymazywanie</option><option value="whole">Cały pociągnięty obiekt</option></select></label><label className="line-width-control eraser-size-control"><span>Rozmiar gumki</span><input type="range" min="4" max="64" step="1" value={eraserSize} onChange={event => setEraserSize(Number(event.target.value))} /><output>{eraserSize}px</output></label></div>}
             {tool === 'shapeBuilder' && <div className="drawing-shape-builder-actions" role="group" aria-label="Operacje budowania kształtu">
               <span className="feature-help">Klikaj obszary, Shift dodaje je do wyboru.</span>
               <label className="drawing-select-control"><span>Operacja</span><select value={shapeBuilderOperation} onChange={event => setShapeBuilderOperation(event.target.value as typeof shapeBuilderOperation)}><option value="union">Scal</option><option value="subtract">Odejmij</option><option value="intersect">Część wspólna</option><option value="exclude">Wyklucz</option></select></label>
@@ -4565,6 +4799,17 @@ export function VectorEditor({
             </div>}
             {tool === 'shape' && <label className="drawing-select-control shape-picker"><span>Kształt</span><select value={shapeId} onChange={event => setShapeId(event.target.value)} aria-label="Wybierz kształt z biblioteki">{shapeCategories.map(category => <optgroup key={category} label={category}>{shapeLibrary.filter(shape => shape.category === category).map(shape => <option key={shape.id} value={shape.id}>{shape.label}</option>)}</optgroup>)}</select></label>}
             {tool === 'freehand' && <>
+              <div className="freehand-brush-presets">
+                <label className="drawing-select-control"><span>Pędzel</span><select value={brushPresetId} onChange={event => {
+                  const id = event.target.value
+                  setBrushPresetId(id)
+                  const preset = [...BUILTIN_BRUSH_PRESETS, ...brushPresets].find(item => item.id === id)
+                  if (preset) applyBrushPreset(preset)
+                }} aria-label="Wybierz ustawienie pędzla"><option value="current">Bieżące ustawienia</option>{BUILTIN_BRUSH_PRESETS.map(preset => <option key={preset.id} value={preset.id}>{preset.name}</option>)}{brushPresets.map(preset => <option key={preset.id} value={preset.id}>{preset.name}</option>)}</select></label>
+                <input className="brush-preset-name" value={brushPresetName} onChange={event => setBrushPresetName(event.target.value)} maxLength={32} placeholder="Nazwa presetu" aria-label="Nazwa własnego pędzla" />
+                <button className="button secondary compact-feature-button" onClick={saveBrushPreset} disabled={!brushPresetName.trim()} title="Zapisz bieżące ustawienia pędzla">Zapisz pędzel</button>
+                {!BUILTIN_BRUSH_PRESETS.some(preset => preset.id === brushPresetId) && brushPresetId !== 'current' && <button className="tool-button delete-tool" onClick={removeBrushPreset} title="Usuń własny preset pędzla" aria-label="Usuń własny preset pędzla"><Trash2 size={14} /></button>}
+              </div>
               <label className="fill-toggle smart-drawing-toggle"><input type="checkbox" checked={smartDrawing} onChange={event => setSmartDrawing(event.target.checked)} aria-label="Włącz inteligentną korektę rysunku" />Inteligentny rysunek</label>
               <label className="drawing-select-control shape-picker"><span>Koryguj do</span><select value={smartShapeId} disabled={!smartDrawing} onChange={event => setSmartShapeId(event.target.value)} aria-label="Figura do inteligentnej korekty"><option value="auto">Automatycznie rozpoznaj</option>{shapeCategories.map(category => <optgroup key={category} label={category}>{shapeLibrary.filter(shape => shape.category === category).map(shape => <option key={shape.id} value={shape.id}>{shape.label}</option>)}</optgroup>)}</select></label>
             </>}
@@ -4641,10 +4886,13 @@ export function VectorEditor({
               })}
             </div></details>
             <details className="drawing-feature-group drawing-feature-group-wide drawing-feature-dropdown"><summary>Pióro i rysik · wygładzanie i nacisk</summary><div className="drawing-feature-group-controls drawing-stylus-controls">
-              <label className="line-width-control"><span>Wygładzanie</span><input type="range" min="0" max="1.5" step="0.05" value={stylusProfile.smoothing} onChange={event => setStylusProfile(current => ({ ...current, smoothing: Number(event.target.value) }))} /><output>{stylusProfile.smoothing.toFixed(2)}</output></label>
-              <label className="line-width-control"><span>Czułość nacisku</span><input type="range" min="0" max="2" step="0.1" value={stylusProfile.pressureSensitivity} onChange={event => setStylusProfile(current => ({ ...current, pressureSensitivity: Number(event.target.value) }))} /><output>{stylusProfile.pressureSensitivity.toFixed(1)}×</output></label>
+              <label className="line-width-control"><span>Wygładzanie</span><input type="range" min="0" max="1.5" step="0.05" value={stylusProfile.smoothing} onChange={event => { setBrushPresetId('current'); setStylusProfile(current => ({ ...current, smoothing: Number(event.target.value) })) }} /><output>{stylusProfile.smoothing.toFixed(2)}</output></label>
+              <label className="line-width-control"><span>Czułość nacisku</span><input type="range" min="0" max="2" step="0.1" value={stylusProfile.pressureSensitivity} onChange={event => { setBrushPresetId('current'); setStylusProfile(current => ({ ...current, pressureSensitivity: Number(event.target.value) })) }} /><output>{stylusProfile.pressureSensitivity.toFixed(1)}×</output></label>
+              <label className="line-width-control"><span>Wpływ pochylenia</span><input type="range" min="0" max="2" step="0.1" value={stylusProfile.tiltSensitivity} onChange={event => { setBrushPresetId('current'); setStylusProfile(current => ({ ...current, tiltSensitivity: Number(event.target.value) })) }} /><output>{stylusProfile.tiltSensitivity.toFixed(1)}×</output></label>
+              <label className="fill-toggle"><input type="checkbox" checked={stylusProfile.palmRejection} onChange={event => setStylusProfile(current => ({ ...current, palmRejection: event.target.checked }))} />Odrzucaj dotyk dłoni przy rysowaniu</label>
+              <div className="stylus-stroke-preview" aria-label="Podgląd wygładzania kreski"><span>Podgląd kreski</span><svg viewBox="0 0 150 34" role="img" aria-label="Podgląd aktualnego wygładzania"><path d={smoothStroke([{ x: 4, y: 25 }, { x: 23, y: 6 }, { x: 42, y: 27 }, { x: 64, y: 11 }, { x: 83, y: 22 }, { x: 108, y: 5 }, { x: 145, y: 20 }], stylusProfile.smoothing)} /></svg></div>
               <button className="button secondary compact-feature-button" onClick={() => setStylusProfile(DEFAULT_STYLUS_PROFILE)}>Przywróć profil domyślny</button>
-              <span className="feature-help">Profil zapisuje się lokalnie. Rysik z naciskiem zmienia szerokość kreski; mysz używa stałego nacisku.</span>
+              <span className="feature-help">Profil zapisuje się lokalnie. Nacisk zmienia szerokość, pochylenie nadaje kresce kształt markera, a dotyk jest ignorowany podczas rysowania rysikiem.</span>
             </div></details>
           </div>}
 

@@ -1319,6 +1319,14 @@
 .drawing-a11y-report p { margin: 0 0 3px; }
 .drawing-stylus-controls { align-items: center; }
 .drawing-stylus-controls .line-width-control { flex: 1 1 210px; }
+.drawing-stylus-controls > .fill-toggle { flex: 1 1 220px; }
+.stylus-stroke-preview { display: flex; min-width: 175px; flex: 1 1 220px; align-items: center; gap: 8px; padding: 4px 8px; border: 1px solid #e9ebf2; border-radius: 7px; color: #7d8698; background: #fbfcff; font-size: 9px; }
+.stylus-stroke-preview svg { width: min(150px, 45%); height: 34px; overflow: visible; }
+.stylus-stroke-preview path { fill: none; stroke: #596fd8; stroke-width: 3; stroke-linecap: round; stroke-linejoin: round; }
+.freehand-brush-presets { display: flex; min-width: 0; align-items: center; flex-wrap: wrap; gap: 5px; }
+.brush-preset-name { width: 112px; min-width: 72px; height: 27px; padding: 0 7px; border: 1px solid #e4e7ef; border-radius: 5px; color: #58637a; font-size: 9px; }
+.eraser-controls { display: flex; min-width: 0; align-items: center; flex-wrap: wrap; gap: 8px; }
+.eraser-size-control { padding: 3px 7px; border: 1px solid #e9ebf2; border-radius: 7px; background: #fafbfe; }
 .drawing-palette-manager { align-items: end; }
 .drawing-palette-draft { align-items: center; gap: 7px; }
 .drawing-custom-palette-row, .drawing-symbol-row { display: flex; width: 100%; min-width: 0; align-items: center; gap: 5px; padding: 3px 0; border-bottom: 1px solid #f0f1f5; }
