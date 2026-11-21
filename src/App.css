@@ -3048,6 +3048,58 @@
 .app-shell.note-focus-mode .editor-panel { grid-column: 1; grid-row: 1; width: 100%; }
 .app-shell.note-focus-mode .note-editor { min-height: 100dvh; }
 .app-shell.note-focus-mode .editor-scroll { padding: clamp(24px, 5vh, 52px) clamp(18px, 5vw, 56px); }
+
+.drawing-editor-backdrop { padding: 0; overflow: hidden; background: #fff; backdrop-filter: none; }
+.drawing-editor-backdrop .advanced-drawing-modal { width: 100%; height: 100dvh; max-height: 100dvh; border: 0; border-radius: 0; }
+.drawing-editor-backdrop .modal-heading { flex: 0 0 auto; padding: 8px 15px; }
+.drawing-editor-backdrop .vector-editor-controls { max-height: min(32dvh, 310px); overflow: auto; }
+.drawing-editor-backdrop .drawing-feature-panel { max-height: min(24dvh, 250px); }
+.drawing-editor-backdrop .drawing-feature-panel.collapsed { display: none; }
+.drawing-editor-backdrop .drawing-stage-wrap { min-height: 0; flex: 1 1 0; align-items: stretch; justify-content: stretch; overflow: hidden; padding: 10px; }
+.drawing-canvas-workspace { display: flex; width: 100%; height: 100%; min-width: 0; min-height: 0; flex: 1 1 auto; gap: 9px; container-type: size; }
+.drawing-tool-sidebar { display: flex; min-width: 52px; min-height: 0; flex: 0 0 auto; align-items: stretch; gap: 7px; }
+.drawing-tool-rail { display: flex; width: 52px; min-height: 0; flex: 0 0 52px; flex-direction: column; align-items: center; gap: 4px; overflow-x: hidden; overflow-y: auto; padding: 5px; border: 1px solid #e7eaf2; border-radius: 10px; background: #fff; box-shadow: 0 3px 12px #222b400a; scrollbar-width: thin; }
+.drawing-tool-rail .tool-button { width: 40px; height: 38px; flex: 0 0 auto; }
+.drawing-rail-divider { width: 25px; height: 1px; flex: 0 0 auto; margin: 2px 0; background: #e7eaf2; }
+.drawing-shapes-toggle { display: flex; width: 40px; min-height: 48px; flex: 0 0 auto; flex-direction: column; align-items: center; justify-content: center; gap: 3px; padding: 4px 1px; border: 0; border-radius: 7px; color: #737b8c; background: transparent; font: inherit; font-size: 8px; cursor: pointer; }
+.drawing-shapes-toggle:hover, .drawing-shapes-toggle.selected { color: #5369d2; background: #f0f2ff; }
+.drawing-shape-browser { display: flex; width: min(260px, 30vw); min-width: 185px; min-height: 0; flex: 0 1 260px; flex-direction: column; gap: 5px; overflow: auto; padding: 9px; border: 1px solid #e7eaf2; border-radius: 10px; background: #fff; box-shadow: 0 3px 12px #222b400a; scrollbar-width: thin; }
+.drawing-shape-browser-heading { position: sticky; top: -9px; z-index: 1; display: flex; min-height: 31px; align-items: center; justify-content: space-between; padding: 0 3px; border-bottom: 1px solid #edf0f5; color: #4e5b76; background: #fff; font-size: 11px; }
+.drawing-shape-browser-heading span, .drawing-shape-category summary span { color: #939bad; font-size: 9px; }
+.drawing-shape-category { min-width: 0; }
+.drawing-shape-category > summary { display: flex; min-height: 28px; align-items: center; justify-content: space-between; gap: 8px; color: #67728a; font-size: 9px; font-weight: 700; cursor: pointer; list-style: none; }
+.drawing-shape-category > summary::-webkit-details-marker { display: none; }
+.drawing-shape-list { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 4px; }
+.drawing-shape-item { display: flex; min-width: 0; min-height: 62px; flex-direction: column; align-items: center; justify-content: center; gap: 3px; padding: 4px; border: 1px solid #edf0f5; border-radius: 7px; color: #69748b; background: #fff; font: inherit; font-size: 8px; text-align: center; cursor: pointer; }
+.drawing-shape-item:hover { border-color: #aab6eb; color: #4f64cb; background: #f7f8ff; }
+.drawing-shape-item svg { width: 32px; height: 32px; flex: 0 0 auto; overflow: visible; }
+.drawing-shape-item span { display: -webkit-box; max-width: 100%; overflow: hidden; -webkit-box-orient: vertical; -webkit-line-clamp: 2; line-height: 1.25; }
+.drawing-canvas-area { position: relative; display: grid; width: auto; height: 100%; min-width: 0; min-height: 0; flex: 1 1 auto; aspect-ratio: auto; place-items: center; }
+.drawing-canvas-area .drawing-stage { width: 100%; height: 100%; min-height: 0; aspect-ratio: auto; }
+@supports (width: 1cqw) {
+  .drawing-canvas-area .drawing-stage { width: min(100%, calc(100cqh * var(--drawing-ratio))); height: min(100%, calc(100cqw / var(--drawing-ratio))); aspect-ratio: var(--drawing-ratio); }
+}
+
+@media (max-width: 700px) {
+  .drawing-editor-backdrop .vector-editor-controls { max-height: min(34dvh, 280px); }
+  .drawing-editor-backdrop .drawing-feature-panel { max-height: min(24dvh, 210px); }
+  .drawing-editor-backdrop .drawing-stage-wrap { padding: 7px; }
+  .drawing-canvas-workspace { gap: 6px; }
+  .drawing-tool-sidebar { min-width: 48px; gap: 5px; }
+  .drawing-tool-rail { width: 48px; flex-basis: 48px; padding: 3px; }
+  .drawing-tool-rail .tool-button { width: 40px; height: 40px; }
+  .drawing-shapes-toggle { width: 40px; }
+  .drawing-shape-browser { width: min(220px, 47vw); min-width: 150px; flex-basis: min(220px, 47vw); padding: 7px; }
+  .drawing-shape-list { grid-template-columns: minmax(0, 1fr); }
+  .drawing-shape-item { min-height: 44px; flex-direction: row; justify-content: flex-start; gap: 7px; padding: 4px 6px; text-align: left; }
+  .drawing-shape-item svg { width: 30px; height: 30px; }
+}
+
+@media (any-pointer: coarse) {
+  .drawing-tool-rail .tool-button { width: 42px; height: 42px; }
+  .drawing-shapes-toggle { width: 42px; min-height: 48px; }
+  .drawing-shape-item { min-height: 46px; }
+}
 .app-shell.note-focus-mode .note-title-input,
 .app-shell.note-focus-mode .markdown-assist,
 .app-shell.note-focus-mode .markdown-source-toolbar,

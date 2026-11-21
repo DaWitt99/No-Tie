@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react'
+import { useEffect, useRef, useState, type CSSProperties } from 'react'
 import { zipSync } from 'fflate'
 import {
   AlignCenterHorizontal, AlignEndHorizontal, AlignStartHorizontal, ArrowDownWideNarrow, ArrowRight, Check, Circle, Combine, Eraser,
@@ -12,7 +12,7 @@ import { sanitizeSvg } from './content'
 import { shapeById, shapeCategories, shapeLibrary } from './shapeLibrary'
 import { findGeometrySnap, lassoIntersectsBox, outlineOpenStroke, reversePathData } from './svgEditorGeometry'
 
-type Tool = 'select' | 'lasso' | 'eraser' | 'shapeBuilder' | 'rect' | 'roundRect' | 'ellipse' | 'line' | 'arrow' | 'polygon' | 'shape' | 'freehand' | 'text' | 'pen'
+type Tool = 'select' | 'lasso' | 'eraser' | 'shapeBuilder' | 'rect' | 'roundRect' | 'ellipse' | 'line' | 'arrow' | 'polygon' | 'freehand' | 'text' | 'pen'
 type ArrowMode = 'end' | 'start' | 'both' | 'none'
 type Box = { x: number; y: number; width: number; height: number }
 type ViewBox = Box
@@ -47,7 +47,7 @@ type OverlayOptions = {
 type EditorComment = { id: string; x: number; y: number; text: string }
 type Checkpoint = { id: string; label: string; createdAt: number; content: string }
 type MiniObject = { id: string; box: Box; color: string }
-type EditorPanel = 'canvas' | 'style' | 'layers' | 'workflow'
+type EditorPanel = 'canvas' | 'style' | 'layers' | 'workflow' | null
 type DocumentUnit = 'px' | 'mm' | 'in'
 type EditorGuide = { axis: 'x' | 'y'; value: number; locked?: boolean }
 type SvgLibraryItem = { id: string; name: string; markup: string; kind?: 'component' | 'template'; packageId?: string }
@@ -65,6 +65,7 @@ type ActivePen = { id: string; element: SVGPathElement; points: PenNode[] }
 const WIDTH = 800
 const HEIGHT = 500
 const SNAP_DISTANCE = 4
+const MAX_FREEHAND_POINTS = 1600
 const OBJECT_TAGS = new Set(['g', 'rect', 'circle', 'ellipse', 'line', 'polygon', 'polyline', 'path', 'text', 'image', 'use'])
 const SVG_NS = 'http://www.w3.org/2000/svg'
 const DEFAULT_STYLUS_PROFILE: StylusProfile = { smoothing: .85, pressureSensitivity: 1, tiltSensitivity: 1, palmRejection: true }
@@ -316,6 +317,19 @@ function pressureStroke(points: Point[], width: number, sensitivity = 1, tiltSen
     right.push({ x: point.x - nx, y: point.y - ny })
   })
   return [...left, ...right.reverse()].map((point, index) => `${index ? 'L' : 'M'} ${roundedPoint(point.x)} ${roundedPoint(point.y)}`).join(' ') + ' Z'
+}
+
+function appendFreehandSample(points: Point[], next: Point, minDistance: number) {
+  const last = points.at(-1)
+  if (last && Math.hypot(next.x - last.x, next.y - last.y) < minDistance) return
+  points.push(next)
+  if (points.length <= MAX_FREEHAND_POINTS) return
+
+  // Keep the whole path and its newest point while bounding redraw cost on long strokes.
+  const newest = points.at(-1)!
+  const reduced = points.filter((_point, index) => index % 2 === 0)
+  if (reduced.at(-1) !== newest) reduced.push(newest)
+  points.splice(0, points.length, ...reduced)
 }
 
 function simplifyStroke(points: Point[], tolerance: number): Point[] {
@@ -1361,7 +1375,6 @@ export function VectorEditor({
   const ungroupAction = useRef<() => void>(() => {})
   const clipboard = useRef<SVGElement[]>([])
   const toolRef = useRef<Tool>('select')
-  const shapeIdRef = useRef('flow-process')
   const smartShapeIdRef = useRef('auto')
   const smartDrawingRef = useRef(true)
   const strokeColorRef = useRef('#596fd8')
@@ -1388,8 +1401,8 @@ export function VectorEditor({
   const eraserSizeRef = useRef(18)
   const eraserModeRef = useRef<'partial' | 'whole'>('partial')
   const [activePanel, setActivePanel] = useState<EditorPanel>('canvas')
+  const [shapeLibraryOpen, setShapeLibraryOpen] = useState(false)
   const [tool, setTool] = useState<Tool>('select')
-  const [shapeId, setShapeId] = useState('flow-process')
   const [smartShapeId, setSmartShapeId] = useState('auto')
   const [smartDrawing, setSmartDrawing] = useState(true)
   const [strokeColor, setStrokeColor] = useState('#596fd8')
@@ -1536,7 +1549,6 @@ export function VectorEditor({
   const [loadedColorsKey, setLoadedColorsKey] = useState('')
 
   useEffect(() => { toolRef.current = tool }, [tool])
-  useEffect(() => { shapeIdRef.current = shapeId }, [shapeId])
   useEffect(() => { smartShapeIdRef.current = smartShapeId }, [smartShapeId])
   useEffect(() => { smartDrawingRef.current = smartDrawing }, [smartDrawing])
   useEffect(() => { strokeColorRef.current = strokeColor }, [strokeColor])
@@ -1625,6 +1637,7 @@ export function VectorEditor({
 
   const chooseTool = (nextTool: Tool) => {
     if (activePen.current && nextTool !== 'pen') finishPenAction.current()
+    if (nextTool === 'freehand') select([])
     toolRef.current = nextTool
     setTool(nextTool)
     if (drawing.current) {
@@ -2097,14 +2110,6 @@ export function VectorEditor({
         }
       } else if (currentTool === 'polygon') {
         element = stage.polygon(`${location.x},${location.y} ${location.x},${location.y} ${location.x},${location.y}`)
-      } else if (currentTool === 'shape') {
-        const definition = shapeById(shapeIdRef.current)
-        element = stage.group()
-        definition.paths.forEach(item => {
-          const child = element.path(item.d)
-          if (item.fill) child.attr('fill', item.fill)
-        })
-        element.attr({ 'data-shape-key': definition.id, transform: shapeTransform({ x: location.x, y: location.y, width: 0.1, height: 0.1 }) })
       } else if (currentTool === 'freehand') {
         element = stage.path(`M ${rounded(location.x)} ${rounded(location.y)} l 0.1 0`)
       }
@@ -2114,7 +2119,7 @@ export function VectorEditor({
       if (currentTool === 'arrow' && autoRouteRef.current) element.attr('data-auto-route', 'true')
       const id = crypto.randomUUID()
       element.attr({ 'data-object-id': id, 'pointer-events': 'all' })
-      select([id])
+      select(currentTool === 'freehand' ? [] : [id])
       return { element, id }
     }
 
@@ -2414,13 +2419,10 @@ export function VectorEditor({
       } else if (current.type === 'freehand') {
         const samples = typeof event.getCoalescedEvents === 'function' ? event.getCoalescedEvents() : [event]
         samples.forEach(sample => {
-          const samplePoint = point(sample)
-          const last = current.points.at(-1)!
-          if (Math.hypot(samplePoint.x - last.x, samplePoint.y - last.y) >= 1.2 && current.points.length < 1600) current.points.push(samplePoint)
+          appendFreehandSample(current.points, point(sample), 1.2)
         })
         current.element.attr('d', current.pressureSensitive ? pressureStroke(current.points, strokeWidthRef.current, pressureSensitivityRef.current, tiltSensitivityRef.current) : smoothStroke(current.points, smoothingRef.current))
-        const bounds = pointsBounds(current.points)
-        renderOverlay(stage, [current.id], { dimensions: bounds })
+        renderOverlay(stage, [])
       } else if (current.type === 'pen-node') {
         current.moved = true
         const node = current.points[current.index]
@@ -2455,7 +2457,6 @@ export function VectorEditor({
         const height = Math.max(0.1, Math.abs(location.y - current.y))
         if (current.tool === 'rect' || current.tool === 'roundRect') current.element.attr({ x: rounded(x), y: rounded(y), width: rounded(width), height: rounded(height) })
         else if (current.tool === 'ellipse') current.element.attr({ cx: rounded(x + width / 2), cy: rounded(y + height / 2), rx: rounded(width / 2), ry: rounded(height / 2) })
-        else if (current.tool === 'shape') current.element.attr('transform', shapeTransform({ x, y, width, height }))
         else if (current.tool === 'line' || current.tool === 'arrow') {
           const hovered = document.elementFromPoint(event.clientX, event.clientY)
           const hit = findAnchorHit(hovered)
@@ -2591,8 +2592,7 @@ export function VectorEditor({
         select([current.element.getAttribute('data-object-id') ?? ''])
       } else if (current.type === 'freehand') {
         const location = point(event)
-        const last = current.points.at(-1)!
-        if (Math.hypot(location.x - last.x, location.y - last.y) >= 0.5 && current.points.length < 1600) current.points.push(location)
+        appendFreehandSample(current.points, location, .5)
         current.element.attr('d', current.pressureSensitive ? pressureStroke(current.points, strokeWidthRef.current, pressureSensitivityRef.current, tiltSensitivityRef.current) : smoothStroke(current.points, smoothingRef.current))
         current.element.attr('data-freehand-points', JSON.stringify([current.points]))
         const bounds = pointsBounds(current.points)
@@ -2634,7 +2634,7 @@ export function VectorEditor({
         }
         updateConnectors(stage.node)
         recordHistory(stage)
-        select([current.id])
+        select([])
       } else if (current.type === 'pen-node') {
         if (current.moved) recordHistory(stage)
         select([current.element.getAttribute('data-object-id') ?? ''])
@@ -3080,6 +3080,32 @@ export function VectorEditor({
     if (!stage) return
     elementsForIds(stage.node, selectedIdsRef.current).forEach(element => element.setAttribute('stroke-width', `${value}`))
     recordHistory(stage)
+  }
+
+  function insertLibraryShape(shapeId: string) {
+    const stage = drawing.current
+    if (!stage) return
+    const viewport = viewBoxRef.current
+    const width = Math.min(140, viewport.width * .42)
+    const height = Math.min(110, viewport.height * .42)
+    const id = crypto.randomUUID()
+    const group = createLibraryShapeNode(shapeId, {
+      x: viewport.x + (viewport.width - width) / 2,
+      y: viewport.y + (viewport.height - height) / 2,
+      width,
+      height,
+    }, undefined, id)
+    group.setAttribute('fill', fillEnabledRef.current ? fillColorRef.current : 'none')
+    group.setAttribute('stroke', strokeColorRef.current)
+    group.setAttribute('stroke-width', `${strokeWidthRef.current}`)
+    group.setAttribute('stroke-linecap', 'round')
+    group.setAttribute('stroke-linejoin', 'round')
+    stage.node.append(group)
+    updateConnectors(stage.node)
+    recordHistory(stage)
+    chooseTool('select')
+    select([id])
+    setLayerRevision(value => value + 1)
   }
 
   function applyBrushPreset(preset: BrushPreset) {
@@ -4718,7 +4744,6 @@ export function VectorEditor({
     { id: 'line', label: 'Linia', icon: Minus },
     { id: 'arrow', label: 'Strzałka', icon: ArrowRight },
     { id: 'polygon', label: 'Wielokąt', icon: Triangle },
-    { id: 'shape', label: 'Kształty biblioteczne', icon: Shapes },
     { id: 'freehand', label: 'Pędzel odręczny · pozostaje aktywny; nacisk rysika zmienia szerokość', icon: Pencil },
     { id: 'pen', label: 'Pióro Béziera, kliknij punkty i Enter, aby zakończyć', icon: Pencil },
     { id: 'text', label: 'Tekst na planszy', icon: Type },
@@ -4761,7 +4786,7 @@ export function VectorEditor({
   ].filter(command => command.label.toLowerCase().includes(commandQuery.trim().toLowerCase()))
 
   return (
-    <div className="modal-backdrop" role="presentation" onMouseDown={event => { if (event.target === event.currentTarget) onClose() }}>
+    <div className="modal-backdrop drawing-editor-backdrop" role="presentation" onMouseDown={event => { if (event.target === event.currentTarget) onClose() }}>
       <section className="drawing-modal advanced-drawing-modal" role="dialog" aria-modal="true" aria-labelledby="drawing-title">
         <header className="modal-heading">
           <div><p className="eyebrow">EDYTOR SVG</p><h2 id="drawing-title">{asset ? 'Edytuj schemat' : 'Nowy schemat'}</h2></div>
@@ -4769,13 +4794,6 @@ export function VectorEditor({
         </header>
         <div className="vector-editor-controls">
           <div className="drawing-toolbar-row drawing-toolbar-tools">
-            <div className="drawing-tool-group" role="group" aria-label="Narzędzia rysowania">
-              {tools.map(item => {
-                const Icon = item.icon
-                return <button key={item.id} className={`tool-button ${tool === item.id ? 'selected' : ''}`} onClick={() => chooseTool(item.id)} title={item.label} aria-label={item.label} aria-pressed={tool === item.id}><Icon size={17} /></button>
-              })}
-            </div>
-            <span className="toolbar-divider" />
             <div className="drawing-selection-actions" role="group" aria-label="Operacje na zaznaczeniu">
               <span className="selection-count">{selectedIds.length ? `${selectedIds.length} zazn.` : 'Brak zaznaczenia'}</span>
               <button className="tool-button" onClick={toggleSelectedLock} disabled={!selectedIds.length} title="Zablokuj lub odblokuj zaznaczenie" aria-label="Zablokuj lub odblokuj zaznaczenie">{selectedElements().length && selectedElements().every(element => element.getAttribute('data-layer-locked') === 'true') ? <Unlock size={16} /> : <Lock size={16} />}</button>
@@ -4797,7 +4815,6 @@ export function VectorEditor({
               <label className="drawing-select-control"><span>Operacja</span><select value={shapeBuilderOperation} onChange={event => setShapeBuilderOperation(event.target.value as typeof shapeBuilderOperation)}><option value="union">Scal</option><option value="subtract">Odejmij</option><option value="intersect">Część wspólna</option><option value="exclude">Wyklucz</option></select></label>
               <button className="button secondary compact-feature-button" onClick={() => applyBoolean(shapeBuilderOperation)} disabled={selectedIds.length < 2 || (shapeBuilderOperation === 'exclude' && selectedIds.length !== 2)}>Zbuduj kształt</button>
             </div>}
-            {tool === 'shape' && <label className="drawing-select-control shape-picker"><span>Kształt</span><select value={shapeId} onChange={event => setShapeId(event.target.value)} aria-label="Wybierz kształt z biblioteki">{shapeCategories.map(category => <optgroup key={category} label={category}>{shapeLibrary.filter(shape => shape.category === category).map(shape => <option key={shape.id} value={shape.id}>{shape.label}</option>)}</optgroup>)}</select></label>}
             {tool === 'freehand' && <>
               <div className="freehand-brush-presets">
                 <label className="drawing-select-control"><span>Pędzel</span><select value={brushPresetId} onChange={event => {
@@ -4833,12 +4850,12 @@ export function VectorEditor({
             <label className="fill-toggle fit-content-toggle" title="Dopasuj rozmiar SVG do rysunku"><input type="checkbox" checked={fitToContent} onChange={event => setFitToContent(event.target.checked)} aria-label="Dopasuj obszar SVG do treści" />Przytnij SVG</label>
           </div>
         </div>
-        <nav className="drawing-feature-tabs" aria-label="Panele edytora SVG">
+        <nav className="drawing-feature-tabs" role="tablist" aria-label="Panele edytora SVG">
           {([
             ['canvas', 'Płótno', Grid3X3], ['style', 'Styl', Palette], ['layers', 'Warstwy i układ', Layers], ['workflow', 'Import, historia i eksport', History],
-          ] as const).map(([id, label, Icon]) => <button key={id} className={activePanel === id ? 'selected' : ''} onClick={() => setActivePanel(id)} aria-pressed={activePanel === id}><Icon size={15} />{label}</button>)}
+          ] as const).map(([id, label, Icon]) => <button key={id} id={`drawing-tab-${id}`} className={activePanel === id ? 'selected' : ''} onClick={() => setActivePanel(current => current === id ? null : id)} aria-controls="drawing-feature-panel" aria-selected={activePanel === id} role="tab" title={activePanel === id ? `Ukryj panel: ${label}` : `Pokaż panel: ${label}`}><Icon size={15} />{label}</button>)}
         </nav>
-        <div className="drawing-feature-panel" role="tabpanel" data-revision={layerRevision}>
+        <div id="drawing-feature-panel" className={`drawing-feature-panel ${activePanel ? '' : 'collapsed'}`} role="tabpanel" aria-labelledby={activePanel ? `drawing-tab-${activePanel}` : undefined} aria-hidden={!activePanel} data-revision={layerRevision}>
           {activePanel === 'canvas' && <div className="drawing-feature-groups">
             <details className="drawing-feature-group drawing-feature-dropdown"><summary>Widok i nawigacja</summary><div className="drawing-feature-group-controls">
               <button className="button secondary compact-feature-button" onClick={() => zoomAtCenter(1.2)} title="Powiększ"><Plus size={13} /></button>
@@ -5217,14 +5234,39 @@ export function VectorEditor({
           </section>
         </div>}
         <div className="drawing-stage-wrap">
-          <div className="drawing-canvas-area" style={{ aspectRatio: `${documentSize.width} / ${documentSize.height}` }}>
-            <div ref={mount} className="drawing-stage" />
-            {comments.map(comment => <div key={comment.id} className="drawing-comment-pin" style={{ left: `${comment.x / documentSize.width * 100}%`, top: `${comment.y / documentSize.height * 100}%` }}>
-              <button onClick={() => setActiveCommentId(activeCommentId === comment.id ? null : comment.id)} title={comment.text} aria-label="Pokaż komentarz"><MessageSquare size={13} /></button>
-              {activeCommentId === comment.id && <div className="drawing-comment-popover">{comment.text}<button onClick={() => setComments(current => current.filter(item => item.id !== comment.id))}><X size={12} /></button></div>}
-            </div>)}
-            {commentDraft && <CommentComposer onSave={saveComment} onCancel={() => setCommentDraft(null)} />}
-            {showMinimap && <div className="drawing-minimap" aria-label="Mini mapa planszy"><svg style={{ aspectRatio: `${documentSize.width} / ${documentSize.height}` }} viewBox={`0 0 ${documentSize.width} ${documentSize.height}`} role="img" aria-label="Podgląd całej planszy"><rect width={documentSize.width} height={documentSize.height} fill="#fff" stroke="#ccd2df" />{miniObjects.map(item => <rect key={item.id} x={item.box.x} y={item.box.y} width={Math.max(2, item.box.width)} height={Math.max(2, item.box.height)} fill={item.color} opacity=".8" />)}</svg><span>{miniObjects.length} elementów</span></div>}
+          <div className="drawing-canvas-workspace" style={{ '--drawing-ratio': documentSize.width / documentSize.height } as CSSProperties}>
+            <aside className="drawing-tool-sidebar" aria-label="Narzędzia rysunku">
+              <div className="drawing-tool-rail" role="group" aria-label="Narzędzia rysowania">
+                {tools.map(item => {
+                  const Icon = item.icon
+                  return <button key={item.id} className={`tool-button ${tool === item.id ? 'selected' : ''}`} onClick={() => chooseTool(item.id)} title={item.label} aria-label={item.label} aria-pressed={tool === item.id}><Icon size={17} /></button>
+                })}
+                <span className="drawing-rail-divider" />
+                <button className={`drawing-shapes-toggle ${shapeLibraryOpen ? 'selected' : ''}`} onClick={() => setShapeLibraryOpen(open => !open)} title="Pokaż lub ukryj kształty" aria-label="Kształty" aria-expanded={shapeLibraryOpen} aria-controls={shapeLibraryOpen ? 'drawing-shape-browser' : undefined}><Shapes size={17} /><span>Kształty</span></button>
+              </div>
+              {shapeLibraryOpen && <div id="drawing-shape-browser" className="drawing-shape-browser" aria-label="Biblioteka kształtów">
+                <div className="drawing-shape-browser-heading"><strong>Kształty</strong><span>{shapeLibrary.length}</span></div>
+                {shapeCategories.map(category => {
+                  const categoryShapes = shapeLibrary.filter(shape => shape.category === category)
+                  return <details key={category} className="drawing-shape-category" open>
+                    <summary>{category}<span>{categoryShapes.length}</span></summary>
+                    <div className="drawing-shape-list">{categoryShapes.map(shape => <button key={shape.id} className="drawing-shape-item" onClick={() => insertLibraryShape(shape.id)} title={`Dodaj ${shape.label} na środek planszy`} aria-label={`Dodaj kształt: ${shape.label}`}>
+                      <svg viewBox="0 0 100 100" aria-hidden="true">{shape.paths.map((path, index) => <path key={`${shape.id}-${index}`} d={path.d} fill={path.fill === 'none' ? 'none' : '#e8edff'} stroke="#596fd8" strokeWidth="3" strokeLinecap="round" strokeLinejoin="round" />)}</svg>
+                      <span>{shape.label}</span>
+                    </button>)}</div>
+                  </details>
+                })}
+              </div>}
+            </aside>
+            <div className="drawing-canvas-area">
+              <div ref={mount} className="drawing-stage" />
+              {comments.map(comment => <div key={comment.id} className="drawing-comment-pin" style={{ left: `${comment.x / documentSize.width * 100}%`, top: `${comment.y / documentSize.height * 100}%` }}>
+                <button onClick={() => setActiveCommentId(activeCommentId === comment.id ? null : comment.id)} title={comment.text} aria-label="Pokaż komentarz"><MessageSquare size={13} /></button>
+                {activeCommentId === comment.id && <div className="drawing-comment-popover">{comment.text}<button onClick={() => setComments(current => current.filter(item => item.id !== comment.id))}><X size={12} /></button></div>}
+              </div>)}
+              {commentDraft && <CommentComposer onSave={saveComment} onCancel={() => setCommentDraft(null)} />}
+              {showMinimap && <div className="drawing-minimap" aria-label="Mini mapa planszy"><svg style={{ aspectRatio: `${documentSize.width} / ${documentSize.height}` }} viewBox={`0 0 ${documentSize.width} ${documentSize.height}`} role="img" aria-label="Podgląd całej planszy"><rect width={documentSize.width} height={documentSize.height} fill="#fff" stroke="#ccd2df" />{miniObjects.map(item => <rect key={item.id} x={item.box.x} y={item.box.y} width={Math.max(2, item.box.width)} height={Math.max(2, item.box.height)} fill={item.color} opacity=".8" />)}</svg><span>{miniObjects.length} elementów</span></div>}
+            </div>
           </div>
         </div>
         <footer className="modal-footer advanced-modal-footer"><p>Pióro: klikaj węzły, przeciągaj uchwyty; Enter kończy ścieżkę. Pędzel wygładza szkice · Ctrl+G grupuje · Ctrl+Shift+G rozgrupowuje</p><div><button className="button secondary" onClick={onClose}>Anuluj</button><button className="button primary" onClick={save}>Zapisz grafikę</button></div></footer>
