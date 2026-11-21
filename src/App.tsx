@@ -23,7 +23,7 @@ import { archiveAttachment, deleteAutoBackup, getAssets, getAttachmentHistory, g
 import type { AutoBackupInfo } from './storage'
 import { DEFAULT_AI_PREFERENCES, type AiDiagnostic, type AiOutputRating, type AiPreferences, type AiTaskType, type Flashcard, type FlashcardImageOcclusion, type FlashcardKind, type FlashcardTrashEntry, type Note, type NoteAsset, type NoteAttachment, type NoteAttachmentHistory, type NoteAttachmentReference, type NoteTemplate, type NoteVersion, type OrganizationSettings, type ReviewSession, type SavedSearch, type SavedWorkspaceLayout, type TrashEntry } from './types'
 import { readFeatureFlags, type FeatureFlags, type FeatureId } from './features'
-import { dispatchAiReplaceSelection, dispatchWikiEmbedInsert, dispatchWikiLinkInsert, replaceWikiLinkTarget } from './wikiLinks'
+import { dispatchAiReplaceSelection, dispatchWikiEmbedInsert, dispatchWikiLinkInsert, FLUSH_NOTE_EDITOR_EVENT, replaceWikiLinkTarget, type FlushNoteEditorDetail } from './wikiLinks'
 import { fileFingerprint } from './fileFingerprint'
 import { reviewFlashcard, type FlashcardGrade, type FlashcardReviewMeta } from './flashcards'
 import { VirtualizedList } from './VirtualizedList'
@@ -2116,16 +2116,21 @@ function App() {
   }
 
   function insertTextIntoNote(text: string, noteId = selectedId) {
+    if (!text.trim()) return
+    window.dispatchEvent(new CustomEvent<FlushNoteEditorDetail>(FLUSH_NOTE_EDITOR_EVENT, { detail: { noteId } }))
     const targetNote = notes.find(note => note.id === noteId)
-    if (!targetNote || !text.trim()) return
-    const append = (note: Note) => {
-      const separator = note.content.endsWith('\n') ? '\n' : '\n\n'
-      patchNote(note.id, { content: `${note.content}${separator}${text.trim()}\n` })
-      setEditorRevision(value => value + 1)
+    if (!targetNote) return
+    const append = (body: string) => {
+      const latestBody = pendingContentPatches.current.get(noteId)?.content ?? noteBodiesRef.current.get(noteId) ?? body
+      const separator = latestBody.endsWith('\n') ? '\n' : '\n\n'
+      const content = `${latestBody}${separator}${text.trim()}\n`
+      patchNote(noteId, { content })
+      cacheNoteBody(noteId, content)
+      if (noteId === selectedId) setEditorRevision(value => value + 1)
     }
-    const loadedContent = pendingContentPatches.current.get(noteId)?.content ?? noteBodiesRef.current.get(noteId)
-    if (loadedContent !== undefined || targetNote.contentLoaded !== false) append({ ...targetNote, content: loadedContent ?? targetNote.content, contentLoaded: true })
-    else void ensureNoteBody(noteId).then(content => append({ ...targetNote, content, contentLoaded: true })).catch(reportDiskSaveError)
+    const loadedContent = pendingContentPatches.current.get(noteId)?.content ?? noteBodiesRef.current.get(noteId) ?? (targetNote.contentLoaded === false ? undefined : targetNote.content)
+    if (loadedContent !== undefined) append(loadedContent)
+    else void ensureNoteBody(noteId).then(append).catch(reportDiskSaveError)
   }
 
   function saveAttachmentTranscript(attachment: NoteAttachment, transcript: string, transcriptSegments?: NoteAttachment['transcriptSegments']) {
@@ -3834,8 +3839,12 @@ function App() {
     setSaved(true)
     setAssets(current => editingAsset ? current.map(item => item.id === asset.id ? asset : item) : [...current, asset])
     if (!editingAsset) {
+      window.dispatchEvent(new CustomEvent<FlushNoteEditorDetail>(FLUSH_NOTE_EDITOR_EVENT, { detail: { noteId: selectedNote.id } }))
       const image = `\n\n![Schemat](./assets/${asset.fileName})\n`
-      patchNote(selectedNote.id, { content: `${selectedNote.content.trimEnd()}${image}` })
+      const currentContent = pendingContentPatches.current.get(selectedNote.id)?.content ?? noteBodiesRef.current.get(selectedNote.id) ?? selectedNote.content
+      const content = `${currentContent.trimEnd()}${image}`
+      patchNote(selectedNote.id, { content })
+      cacheNoteBody(selectedNote.id, content)
     }
     setEditorRevision(value => value + 1)
     setShowDrawing(false)

@@ -30,7 +30,7 @@ import { MarkdownTableMenu, type MarkdownTableAction } from './MarkdownTableMenu
 import { highlightSchema, markdownMarkupPlugins, noteCommentSchema, underlineSchema } from './markdownMarkup'
 import { applyTableColumnWidths, applyTableRowHeights, markdownWithTableColumnWidths, parseTableColumnWidths, parseTableRowHeights, stripTableWidthMetadata } from './markdownTableWidths'
 import { noteEmbedPlugins, refreshNoteEmbeds } from './noteEmbeds'
-import { AI_REPLACE_SELECTION_EVENT, WIKI_EMBED_INSERT_EVENT, WIKI_LINK_INSERT_EVENT, markdownToWikiLinks, wikiLinksToMarkdown, wikiNoteHref, wikiNoteTargetFromHref, type AiReplaceSelectionDetail, type WikiEmbedInsertDetail, type WikiLinkInsertDetail } from './wikiLinks'
+import { AI_REPLACE_SELECTION_EVENT, FLUSH_NOTE_EDITOR_EVENT, WIKI_EMBED_INSERT_EVENT, WIKI_LINK_INSERT_EVENT, markdownToWikiLinks, wikiLinksToMarkdown, wikiNoteHref, wikiNoteTargetFromHref, type AiReplaceSelectionDetail, type FlushNoteEditorDetail, type WikiEmbedInsertDetail, type WikiLinkInsertDetail } from './wikiLinks'
 import type { NoteAsset, NoteAttachment } from './types'
 
 type ContextMenuState = { left: number; top: number; opensLeft: boolean; opensUp: boolean }
@@ -353,6 +353,17 @@ export function MarkdownEditor({
       void editor.destroy()
     }
   }, [noteId, revision, initialDocument, readOnly])
+
+  useEffect(() => {
+    const flushForNote = (event: Event) => {
+      const detail = (event as CustomEvent<FlushNoteEditorDetail>).detail
+      if (detail?.noteId !== noteId) return
+      const editor = editorRef.current
+      if (editor) saveEditorMarkdown(editor)
+    }
+    window.addEventListener(FLUSH_NOTE_EDITOR_EVENT, flushForNote)
+    return () => window.removeEventListener(FLUSH_NOTE_EDITOR_EVENT, flushForNote)
+  }, [noteId])
 
   useEffect(() => {
     try { localStorage.setItem(SHORTCUTS_STORAGE_KEY, JSON.stringify(shortcuts)) } catch { /* Browser storage can be disabled. */ }

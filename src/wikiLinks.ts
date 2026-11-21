@@ -1,11 +1,13 @@
 export const WIKI_LINK_INSERT_EVENT = 'no-tie:insert-wiki-link'
 export const WIKI_EMBED_INSERT_EVENT = 'no-tie:insert-wiki-embed'
 export const AI_REPLACE_SELECTION_EVENT = 'no-tie:replace-selection'
+export const FLUSH_NOTE_EDITOR_EVENT = 'no-tie:flush-note-editor'
 const NOTE_LINK_PREFIX = '#no-tie-note/'
 
 export type WikiLinkInsertDetail = { noteId: string; target: string }
 export type WikiEmbedInsertDetail = { noteId: string; target: string }
 export type AiReplaceSelectionDetail = { noteId: string; replacement: string }
+export type FlushNoteEditorDetail = { noteId: string }
 
 export function wikiNoteHref(target: string): string {
   const encoded = encodeURIComponent(target).replace(/[!'()*]/g, character => `%${character.charCodeAt(0).toString(16).toUpperCase()}`)

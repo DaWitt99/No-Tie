@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState, type MouseEvent as ReactMouseEvent } from 'react'
 import { MarkdownContextMenu, type MarkdownMenuAction, type MarkdownNoteAction } from './MarkdownContextMenu'
-import { AI_REPLACE_SELECTION_EVENT, WIKI_EMBED_INSERT_EVENT, WIKI_LINK_INSERT_EVENT, type AiReplaceSelectionDetail, type WikiEmbedInsertDetail, type WikiLinkInsertDetail } from './wikiLinks'
+import { AI_REPLACE_SELECTION_EVENT, FLUSH_NOTE_EDITOR_EVENT, WIKI_EMBED_INSERT_EVENT, WIKI_LINK_INSERT_EVENT, type AiReplaceSelectionDetail, type FlushNoteEditorDetail, type WikiEmbedInsertDetail, type WikiLinkInsertDetail } from './wikiLinks'
 
 type ContextMenuPosition = { left: number; top: number; opensLeft: boolean; opensUp: boolean }
 
@@ -96,6 +96,15 @@ export function MarkdownSourceEditor({
     if (immediate) flushPendingChange()
     else changeTimer.current = window.setTimeout(flushPendingChange, 180)
   }
+
+  useEffect(() => {
+    const flushForNote = (event: Event) => {
+      const detail = (event as CustomEvent<FlushNoteEditorDetail>).detail
+      if (detail?.noteId === noteId) flushPendingChange()
+    }
+    window.addEventListener(FLUSH_NOTE_EDITOR_EVENT, flushForNote)
+    return () => window.removeEventListener(FLUSH_NOTE_EDITOR_EVENT, flushForNote)
+  }, [noteId])
 
   useEffect(() => {
     if (latestNoteId.current !== noteId) {

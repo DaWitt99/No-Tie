@@ -1,15 +1,15 @@
-import { useEffect, useRef, useState, type CSSProperties } from 'react'
+import { useEffect, useMemo, useRef, useState, type CSSProperties } from 'react'
 import {
   AlignCenterHorizontal, AlignEndHorizontal, AlignStartHorizontal, ArrowDownWideNarrow, ArrowRight, Check, Combine, Eraser,
   ClipboardCopy, ClipboardPaste, Copy, Download, Eye, EyeOff, Grid3X3, Group, History, ImagePlus, Layers,
   Hand, Lasso, Lock, MessageSquare, Minus, MousePointer2, Palette, Pencil, Pipette, Plus, RectangleHorizontal,
-  Redo2, RotateCw, Ruler, Shapes, Trash2, Type, Undo2, Ungroup, Unlock, Waypoints, X,
+  Redo2, RotateCw, Ruler, Shapes, Spline, Trash2, Type, Undo2, Ungroup, Unlock, Waypoints, X,
 } from 'lucide-react'
 import { SVG, type Svg } from '@svgdotjs/svg.js'
 import type { NoteAsset } from './types'
 import { sanitizeSvg } from './content'
 import { shapeById, shapeCategories, shapeLibrary } from './shapeLibrary'
-import { findGeometrySnap, lassoIntersectsBox, outlineOpenStroke, reversePathData } from './svgEditorGeometry'
+import { findGeometrySnap, lassoIntersectsBox, outlineOpenStroke, pointInPolygon, reversePathData } from './svgEditorGeometry'
 
 type Tool = 'select' | 'pan' | 'lasso' | 'eraser' | 'shapeBuilder' | 'rect' | 'roundRect' | 'ellipse' | 'line' | 'arrow' | 'polygon' | 'freehand' | 'text' | 'pen'
 type ArrowMode = 'end' | 'start' | 'both' | 'none'
@@ -22,6 +22,7 @@ type Snap = { delta: number; target: number } | undefined
 type Interaction =
   | { type: 'draw'; tool: Tool; element: any; id: string; x: number; y: number; keepTool: boolean; startTarget?: string; startAnchor?: string }
   | { type: 'freehand'; element: any; id: string; points: Point[]; pressureSensitive: boolean }
+  | { type: 'freehand-samples'; element: SVGPathElement; id: string; sourceGroups: Point[][]; indices: number[]; startX: number; startY: number; moved: boolean }
   | { type: 'eraser'; changed: boolean; last: Point }
   | { type: 'connect'; line: SVGLineElement; id: string; side: 'start' | 'end'; x: number; y: number; moved: boolean }
   | { type: 'move'; ids: string[]; elements: SVGElement[]; others: Box[]; startX: number; startY: number; lastX: number; lastY: number; bounds: Box; moved: boolean }
@@ -69,6 +70,7 @@ const MAX_VIEW_EXTENT = 10_000_000
 const OBJECT_TAGS = new Set(['g', 'rect', 'circle', 'ellipse', 'line', 'polygon', 'polyline', 'path', 'text', 'image', 'use'])
 const SVG_NS = 'http://www.w3.org/2000/svg'
 const DEFAULT_STYLUS_PROFILE: StylusProfile = { smoothing: .85, pressureSensitivity: 1, tiltSensitivity: 1, palmRejection: true }
+const QUICK_COLOR_PALETTE = ['#000000', '#ffffff', '#e53935', '#f4511e', '#fb8c00', '#fdd835', '#7cb342', '#00897b', '#039be5', '#3949ab', '#8e24aa', '#8d6e63']
 const BUILTIN_BRUSH_PRESETS: BrushPreset[] = [
   { id: 'pencil', name: 'Ołówek', color: '#596fd8', width: 2, smoothing: .9, pressureSensitivity: 1.15, tiltSensitivity: .7 },
   { id: 'marker', name: 'Marker', color: '#2b9a83', width: 8, smoothing: .35, pressureSensitivity: .45, tiltSensitivity: 1.5 },
@@ -90,6 +92,45 @@ function readViewBox(stage: SVGSVGElement): ViewBox {
   return values.length === 4 && values.every(Number.isFinite) && values[2] > 0 && values[3] > 0
     ? { x: values[0], y: values[1], width: values[2], height: values[3] }
     : { x: 0, y: 0, width: WIDTH, height: HEIGHT }
+}
+
+function updateEraserPreview(stage: SVGSVGElement, location: Point | undefined, size: number, mode: 'partial' | 'whole') {
+  let preview = stage.querySelector<SVGGElement>(':scope > [data-eraser-preview]')
+  if (!location) {
+    preview?.remove()
+    return
+  }
+  if (!preview) {
+    preview = document.createElementNS(SVG_NS, 'g')
+    preview.setAttribute('data-eraser-preview', 'true')
+    preview.setAttribute('aria-hidden', 'true')
+    preview.setAttribute('pointer-events', 'none')
+    preview.append(document.createElementNS(SVG_NS, 'circle'))
+    stage.append(preview)
+  }
+  const box = stage.getBoundingClientRect()
+  const view = readViewBox(stage)
+  const scale = Math.max(view.width / Math.max(1, box.width), view.height / Math.max(1, box.height))
+  const radius = Math.max(2, size * scale / 2)
+  const circle = preview.firstElementChild as SVGCircleElement
+  const color = mode === 'whole' ? '#d88b28' : '#d65368'
+  circle.setAttribute('cx', `${location.x}`)
+  circle.setAttribute('cy', `${location.y}`)
+  circle.setAttribute('r', `${radius}`)
+  circle.setAttribute('fill', color)
+  circle.setAttribute('fill-opacity', '.12')
+  circle.setAttribute('stroke', color)
+  circle.setAttribute('stroke-width', `${1.5 * scale}`)
+  circle.setAttribute('stroke-dasharray', `${4 * scale} ${3 * scale}`)
+  preview.setAttribute('data-eraser-mode', mode)
+}
+
+function refreshEraserPreview(stage: SVGSVGElement, size: number, mode: 'partial' | 'whole') {
+  const circle = stage.querySelector<SVGCircleElement>(':scope > [data-eraser-preview] circle')
+  if (!circle) return
+  const x = Number(circle.getAttribute('cx'))
+  const y = Number(circle.getAttribute('cy'))
+  if (Number.isFinite(x) && Number.isFinite(y)) updateEraserPreview(stage, { x, y }, size, mode)
 }
 
 function colorContrastOnWhite(value: string): number | undefined {
@@ -121,6 +162,25 @@ function readPenPoints(element: SVGElement): PenNode[] {
     const points = JSON.parse(element.getAttribute('data-pen-points') ?? '[]') as PenNode[]
     return points.filter(point => Number.isFinite(point.x) && Number.isFinite(point.y))
   } catch { return [] }
+}
+
+function readFreehandPointGroups(element: SVGElement): Point[][] {
+  try {
+    const points = JSON.parse(element.getAttribute('data-freehand-points') ?? '[]') as Point[] | Point[][]
+    const groups = Array.isArray(points[0]) ? points as Point[][] : [points as Point[]]
+    return groups.map(group => group.filter(point => Number.isFinite(point.x) && Number.isFinite(point.y))).filter(group => group.length > 0)
+  } catch { return [] }
+}
+
+function freehandPathData(element: SVGElement, groups: Point[][], fallbackWidth: number, fallbackSmoothing: number): string {
+  const pressureStrokeElement = element.hasAttribute('data-pressure-stroke')
+  const width = Number(element.getAttribute('stroke-width')) || fallbackWidth
+  const smoothing = Number(element.getAttribute('data-freehand-smoothing'))
+  const pressureSensitivity = Number(element.getAttribute('data-freehand-pressure-sensitivity'))
+  const tiltSensitivity = Number(element.getAttribute('data-freehand-tilt-sensitivity'))
+  return groups.filter(group => group.length > 0).map(group => pressureStrokeElement
+    ? pressureStroke(group, width, Number.isFinite(pressureSensitivity) ? pressureSensitivity : DEFAULT_STYLUS_PROFILE.pressureSensitivity, Number.isFinite(tiltSensitivity) ? tiltSensitivity : DEFAULT_STYLUS_PROFILE.tiltSensitivity)
+    : smoothStroke(group, Number.isFinite(smoothing) ? smoothing : fallbackSmoothing)).join(' ')
 }
 
 function penPath(points: PenNode[]): string {
@@ -546,7 +606,9 @@ function boxDraft(box: Box): GeometryDraft {
 
 function snapshotContent(stage: Drawing): string {
   const copy = stage.node.cloneNode(true) as SVGSVGElement
-  copy.querySelectorAll('[data-editor-ui]').forEach(element => element.remove())
+  copy.querySelectorAll('[data-editor-ui], [data-eraser-preview]').forEach(element => element.remove())
+  copy.removeAttribute('data-selected-freehand-object')
+  copy.removeAttribute('data-selected-freehand-samples')
   return copy.innerHTML
 }
 
@@ -643,7 +705,7 @@ function directObjects(stage: SVGSVGElement): SVGElement[] {
     return Boolean(box && box.x <= 1 && box.y <= 1 && box.width >= WIDTH - 1 && box.height >= HEIGHT - 1)
   })
   background?.setAttribute('data-background', 'true')
-  return children.filter(child => OBJECT_TAGS.has(child.tagName.toLowerCase()) && !child.hasAttribute('data-background') && !child.hasAttribute('data-editor-ui') && !child.hasAttribute('data-connector-visual-for'))
+  return children.filter(child => OBJECT_TAGS.has(child.tagName.toLowerCase()) && !child.hasAttribute('data-background') && !child.hasAttribute('data-editor-ui') && !child.hasAttribute('data-eraser-preview') && !child.hasAttribute('data-connector-visual-for'))
 }
 
 function ensureObjectIds(stage: SVGSVGElement) {
@@ -736,14 +798,6 @@ function updateConnectors(stage: SVGSVGElement) {
     const endShape = endTarget ? elementsForIds(stage, [endTarget])[0] : undefined
     let start = startShape && startAnchor ? anchorPosition(startShape, startAnchor) : undefined
     let end = endShape && endAnchor ? anchorPosition(endShape, endAnchor) : undefined
-    const currentStart = start ?? { x: Number(line.getAttribute('x1')), y: Number(line.getAttribute('y1')) }
-    const currentEnd = end ?? { x: Number(line.getAttribute('x2')), y: Number(line.getAttribute('y2')) }
-    const length = Math.hypot(currentEnd.x - currentStart.x, currentEnd.y - currentStart.y)
-    if (length > 0) {
-      const gap = Math.min(9, length / 3)
-      if (start && line.hasAttribute('marker-start')) start = { x: start.x + (currentEnd.x - currentStart.x) * gap / length, y: start.y + (currentEnd.y - currentStart.y) * gap / length }
-      if (end && line.hasAttribute('marker-end')) end = { x: end.x - (currentEnd.x - currentStart.x) * gap / length, y: end.y - (currentEnd.y - currentStart.y) * gap / length }
-    }
     if (start) setLineEndpoint(line, 'start', start)
     if (end) setLineEndpoint(line, 'end', end)
     const lineId = line.getAttribute('data-object-id') ?? line.parentElement?.closest('[data-object-id]')?.getAttribute('data-object-id')
@@ -977,10 +1031,12 @@ function renderOverlay(stage: Drawing, ids: string[], options: OverlayOptions = 
   for (const element of elementsForIds(stage.node, ids)) {
     const box = getBox(element)
     if (!box) continue
-    layer.rect(Math.max(box.width, 1) + 8, Math.max(box.height, 1) + 8)
-      .move(box.x - 4, box.y - 4)
-      .fill('none')
-      .stroke({ color: '#5d73d8', width: 2, dasharray: '7 4' })
+    if (element.getAttribute('data-object-id') !== stage.node.getAttribute('data-selected-freehand-object')) {
+      layer.rect(Math.max(box.width, 1) + 8, Math.max(box.height, 1) + 8)
+        .move(box.x - 4, box.y - 4)
+        .fill('none')
+        .stroke({ color: '#5d73d8', width: 2, dasharray: '7 4' })
+    }
     if (element.hasAttribute('data-editor-pen')) {
       const points = readPenPoints(element)
       points.forEach((point, index) => {
@@ -1004,6 +1060,22 @@ function renderOverlay(stage: Drawing, ids: string[], options: OverlayOptions = 
         }
         layer.circle(10).center(point.x, point.y).fill(selectedPenNodes.has(index) || index === selectedPenNode ? '#d9f8ef' : '#fff').stroke({ color: selectedPenNodes.has(index) || index === selectedPenNode ? '#159879' : '#5066d2', width: 1.7 })
           .attr({ 'data-pen-node': `${index}`, 'data-pen-object': element.getAttribute('data-object-id') ?? '', 'pointer-events': 'all', cursor: 'move' })
+      })
+    }
+    const sampleObjectId = element.getAttribute('data-object-id')
+    if (element.hasAttribute('data-freehand-points') && sampleObjectId === stage.node.getAttribute('data-selected-freehand-object')) {
+      const selectedSamples = (() => {
+        try { return [...new Set(JSON.parse(stage.node.getAttribute('data-selected-freehand-samples') ?? '[]') as number[])] }
+        catch { return [] }
+      })()
+      const samples = readFreehandPointGroups(element).flat()
+      const validIndices = selectedSamples.filter(index => Number.isInteger(index) && index >= 0 && index < samples.length)
+      const markerStep = Math.max(1, Math.ceil(validIndices.length / 180))
+      validIndices.forEach((index, markerIndex) => {
+        if (markerIndex % markerStep) return
+        const point = samples[index]
+        layer.circle(9).center(point.x, point.y).fill('#fff0c7').stroke({ color: '#c58214', width: 2 })
+          .attr({ 'data-freehand-sample-index': `${index}`, 'data-freehand-sample-object': sampleObjectId ?? '', 'pointer-events': 'all', cursor: 'move' })
       })
     }
     if (stage.node.getAttribute('data-active-tool') === 'select') {
@@ -1038,9 +1110,36 @@ function renderOverlay(stage: Drawing, ids: string[], options: OverlayOptions = 
       }
     }
   }
-  const selectionBounds = unionBoxes(elementsForIds(stage.node, ids).map(getBox))
+  const activeTool = stage.node.getAttribute('data-active-tool')
+  const selectedObjects = elementsForIds(stage.node, ids)
+  const selectionBounds = unionBoxes(selectedObjects.map(getBox))
   if (selectionBounds && ids.length) {
     const { x, y, width, height } = selectionBounds
+    const single = selectedObjects.length === 1 ? selectedObjects[0] : undefined
+    const singleTag = single?.tagName.toLowerCase()
+    const canChangeShape = Boolean(single && !['line', 'text', 'image'].includes(singleTag ?? '') && (singleTag !== 'g' || single.hasAttribute('data-shape-key')))
+    if (activeTool === 'select' && !stage.node.hasAttribute('data-connector-dragging') && !stage.node.hasAttribute('data-selected-freehand-object')) {
+      const availableWidth = Math.max(54, viewport.width - 8)
+      const showShape = canChangeShape && availableWidth >= 124
+      const toolbarWidth = showShape ? 124 : Math.min(66, availableWidth)
+      const toolbarHeight = 27
+      const toolbarX = Math.max(viewport.x + 4, Math.min(viewport.x + viewport.width - toolbarWidth - 4, x + width / 2 - toolbarWidth / 2))
+      const toolbarY = Math.max(viewport.y + 4, y - toolbarHeight - 10)
+      const colorSource = single?.getAttribute('fill') && single.getAttribute('fill') !== 'none' ? single.getAttribute('fill') : single?.getAttribute('stroke')
+      const selectedColor = toHexColor(colorSource ?? '') ?? '#596fd8'
+      layer.rect(toolbarWidth, toolbarHeight).move(toolbarX, toolbarY).radius(7).fill('#fff').stroke({ color: '#dfe3ed', width: 1 })
+      const buttonGap = 4
+      const colorWidth = showShape ? (toolbarWidth - 12) / 2 : toolbarWidth - 8
+      const addQuickButton = (action: 'color' | 'shape', buttonX: number, buttonWidth: number, label: string, color?: string) => {
+        const buttonY = toolbarY + 3
+        layer.rect(buttonWidth, toolbarHeight - 6).move(buttonX, buttonY).radius(5).fill('#f7f8fc').stroke({ color: '#eceef4', width: .7 })
+          .attr({ 'data-quick-edit-action': action, 'pointer-events': 'all', cursor: 'pointer', 'aria-label': action === 'color' ? 'Otwórz szybki wybór koloru' : 'Otwórz wybór kształtu' })
+        if (color) layer.circle(9).center(buttonX + 13, toolbarY + toolbarHeight / 2).fill(color).stroke({ color: '#70788a', width: .6 }).attr({ 'pointer-events': 'none' })
+        layer.text(label).font({ family: 'sans-serif', size: 9, weight: 600 }).fill('#5b657b').center(buttonX + (color ? buttonWidth / 2 + 5 : buttonWidth / 2), toolbarY + toolbarHeight / 2).attr({ 'pointer-events': 'none' })
+      }
+      addQuickButton('color', toolbarX + 4, colorWidth, 'Kolor', selectedColor)
+      if (showShape) addQuickButton('shape', toolbarX + 4 + colorWidth + buttonGap, toolbarWidth - colorWidth - 12, 'Kształt')
+    }
     const points: Record<ResizeHandle, [number, number]> = {
       n: [x + width / 2, y - 6], ne: [x + width + 6, y - 6], e: [x + width + 6, y + height / 2], se: [x + width + 6, y + height + 6],
       s: [x + width / 2, y + height + 6], sw: [x - 6, y + height + 6], w: [x - 6, y + height / 2], nw: [x - 6, y - 6],
@@ -1053,7 +1152,6 @@ function renderOverlay(stage: Drawing, ids: string[], options: OverlayOptions = 
         .attr({ 'data-resize-handle': handle, 'pointer-events': 'all', cursor })
     }
   }
-  const activeTool = stage.node.getAttribute('data-active-tool')
   const selectedLines = elementsForIds(stage.node, ids).flatMap(element => {
     if (element.tagName.toLowerCase() === 'line') return [element as SVGLineElement]
     return Array.from(element.children).filter(child => child.tagName.toLowerCase() === 'line') as SVGLineElement[]
@@ -1113,6 +1211,8 @@ function renderOverlay(stage: Drawing, ids: string[], options: OverlayOptions = 
     if (horizontal && horizontal.gap <= 180) drawDistance(layer, horizontal.start, horizontal.end, horizontal.position, 'x')
     if (vertical && vertical.gap <= 180) drawDistance(layer, vertical.start, vertical.end, vertical.position, 'y')
   }
+  const eraserPreview = stage.node.querySelector(':scope > [data-eraser-preview]')
+  if (eraserPreview) stage.node.append(eraserPreview)
 }
 
 function findObjectTarget(stage: SVGSVGElement, target: EventTarget | null): SVGElement | undefined {
@@ -1287,7 +1387,9 @@ export function VectorEditor({
   const eraserModeRef = useRef<'partial' | 'whole'>('partial')
   const [activePanel, setActivePanel] = useState<EditorPanel>('canvas')
   const [shapeLibraryOpen, setShapeLibraryOpen] = useState(false)
+  const [quickEditPanel, setQuickEditPanel] = useState<'shape' | 'color' | null>(null)
   const [infiniteCanvas, setInfiniteCanvas] = useState(false)
+  const infiniteCanvasRef = useRef(false)
   const [tool, setTool] = useState<Tool>('select')
   const [smartShapeId, setSmartShapeId] = useState('auto')
   const [smartDrawing, setSmartDrawing] = useState(true)
@@ -1430,8 +1532,11 @@ export function VectorEditor({
   useEffect(() => { fillColorRef.current = fillColor }, [fillColor])
   useEffect(() => { fillEnabledRef.current = fillEnabled }, [fillEnabled])
   useEffect(() => { strokeWidthRef.current = strokeWidth }, [strokeWidth])
-  useEffect(() => { eraserSizeRef.current = eraserSize }, [eraserSize])
-  useEffect(() => { eraserModeRef.current = eraserMode }, [eraserMode])
+  useEffect(() => {
+    eraserSizeRef.current = eraserSize
+    eraserModeRef.current = eraserMode
+    if (drawing.current && toolRef.current === 'eraser') refreshEraserPreview(drawing.current.node, eraserSize, eraserMode)
+  }, [eraserSize, eraserMode])
   useEffect(() => { fontSizeRef.current = fontSize }, [fontSize])
   useEffect(() => { polygonSidesRef.current = polygonSides }, [polygonSides])
   useEffect(() => { arrowModeRef.current = arrowMode }, [arrowMode])
@@ -1587,8 +1692,14 @@ export function VectorEditor({
   const select = (ids: string[]) => {
     const stage = drawing.current
     const unique = [...new Set(stage ? expandGroupSelection(stage.node, ids) : ids)]
+    const selectedSampleObject = stage?.node.getAttribute('data-selected-freehand-object')
+    if (selectedSampleObject && !unique.includes(selectedSampleObject)) {
+      stage?.node.removeAttribute('data-selected-freehand-object')
+      stage?.node.removeAttribute('data-selected-freehand-samples')
+    }
     selectedIdsRef.current = unique
     setSelectedIds(unique)
+    if (!unique.length) setQuickEditPanel(null)
     if (stage) {
       setHasSelectedGroup(elementsForIds(stage.node, unique).some(element => element.hasAttribute('data-group-id')))
       const selectedElements = elementsForIds(stage.node, unique)
@@ -1748,7 +1859,7 @@ export function VectorEditor({
     setCanUndo(false)
     setCanRedo(false)
 
-    const point = (event: PointerEvent, snap = true) => {
+    const point = (event: PointerEvent, snap = true, clientX = event.clientX, clientY = event.clientY) => {
       const bounds = stage.node.getBoundingClientRect()
       const visible = viewBoxRef.current
       const isStylus = event.pointerType === 'pen'
@@ -1756,8 +1867,8 @@ export function VectorEditor({
       const tiltX = isStylus ? event.tiltX : undefined
       const tiltY = isStylus ? event.tiltY : undefined
       const location = {
-        x: Number((visible.x + (event.clientX - bounds.left) * visible.width / bounds.width).toFixed(1)),
-        y: Number((visible.y + (event.clientY - bounds.top) * visible.height / bounds.height).toFixed(1)),
+        x: Number((visible.x + (clientX - bounds.left) * visible.width / bounds.width).toFixed(1)),
+        y: Number((visible.y + (clientY - bounds.top) * visible.height / bounds.height).toFixed(1)),
       }
       const withPressure = (value: Point): Point => pressure === undefined ? value : { ...value, pressure, tiltX, tiltY }
       if (snap && viewOptionsRef.current.snapGeometry) {
@@ -1771,6 +1882,32 @@ export function VectorEditor({
         return withPressure({ x: Math.round(location.x / size) * size, y: Math.round(location.y / size) * size })
       }
       return withPressure(location)
+    }
+
+    const autoPanInfiniteCanvas = (event: PointerEvent) => {
+      if (!infiniteCanvasRef.current) return false
+      const bounds = stage.node.getBoundingClientRect()
+      if (!bounds.width || !bounds.height) return false
+      const edgeX = Math.min(64, Math.max(28, bounds.width * .08))
+      const edgeY = Math.min(64, Math.max(28, bounds.height * .08))
+      const progress = (value: number, start: number, end: number) => Math.max(0, Math.min(1, value / Math.max(1, end - start)))
+      const left = progress(bounds.left + edgeX - event.clientX, 0, edgeX)
+      const right = progress(event.clientX - (bounds.right - edgeX), 0, edgeX)
+      const top = progress(bounds.top + edgeY - event.clientY, 0, edgeY)
+      const bottom = progress(event.clientY - (bounds.bottom - edgeY), 0, edgeY)
+      const current = viewBoxRef.current
+      const x = (right - left) * current.width * .018
+      const y = (bottom - top) * current.height * .018
+      if (!x && !y) return false
+      changeViewBox({ ...current, x: current.x + x, y: current.y + y })
+      return true
+    }
+
+    const pointOnCanvasEdge = (event: PointerEvent) => {
+      const bounds = stage.node.getBoundingClientRect()
+      const clientX = Math.max(bounds.left, Math.min(bounds.right, event.clientX))
+      const clientY = Math.max(bounds.top, Math.min(bounds.bottom, event.clientY))
+      return point(event, true, clientX, clientY)
     }
 
     const eraseAt = (event: PointerEvent, location: Point, previous: Point = location): boolean => {
@@ -1976,6 +2113,11 @@ export function VectorEditor({
           child.setAttribute('font-size', `${editing.fontSize}`)
           child.setAttribute('font-weight', fontWeightRef.current)
           child.setAttribute('fill', strokeColorRef.current)
+          child.setAttribute('stroke', '#fff')
+          child.setAttribute('stroke-width', `${Math.max(2, editing.fontSize * .12)}`)
+          child.setAttribute('stroke-linejoin', 'round')
+          child.setAttribute('paint-order', 'stroke fill')
+          child.setAttribute('stroke-opacity', '1')
           child.setAttribute('pointer-events', 'all')
           if (fontItalicRef.current) child.setAttribute('font-style', 'italic')
           textParent.append(child)
@@ -2026,8 +2168,8 @@ export function VectorEditor({
         element = stage.line(location.x, location.y, location.x, location.y)
         if (currentTool === 'arrow' && arrowModeRef.current !== 'none') {
           const addMarker = (side: 'start' | 'end') => element.marker(side, 14, 14, (marker: any) => {
-            marker.attr({ refX: 14, refY: 7, orient: 'auto-start-reverse', markerUnits: 'userSpaceOnUse' })
-            marker.path('M 0 0 L 14 7 L 0 14 z').fill(color)
+            marker.attr({ viewBox: '0 0 14 14', markerWidth: 14, markerHeight: 14, refX: 14, refY: 7, orient: 'auto-start-reverse', markerUnits: 'userSpaceOnUse', overflow: 'visible' })
+            marker.path('M 0 1 L 14 7 L 0 13 z').fill(color)
           })
           if (arrowModeRef.current === 'start' || arrowModeRef.current === 'both') addMarker('start')
           if (arrowModeRef.current === 'end' || arrowModeRef.current === 'both') addMarker('end')
@@ -2064,14 +2206,20 @@ export function VectorEditor({
         && clickedObject?.tagName.toLowerCase() === 'text'
       if (!allowTextDoubleClick) event.preventDefault()
       stage.node.focus({ preventScroll: true })
-      const penPan = event.pointerType === 'pen' && event.button === 2
-      const wantsPan = currentTool === 'pan' || event.button === 1 || spacePanRef.current || penPan
+      const wantsPan = currentTool === 'pan' || event.button === 1 || event.button === 2 || spacePanRef.current
       const location = point(event, !wantsPan && currentTool !== 'lasso')
       if (wantsPan) {
         stage.node.setPointerCapture(event.pointerId)
         interactionPointerId.current = event.pointerId
         interaction.current = { type: 'pan', startClientX: event.clientX, startClientY: event.clientY, viewBox: { ...viewBoxRef.current } }
         stage.node.setAttribute('data-panning', 'true')
+        return
+      }
+      const quickEditHit = event.target instanceof Element ? event.target.closest('[data-quick-edit-action]') : null
+      const quickEditAction = quickEditHit?.getAttribute('data-quick-edit-action')
+      if (quickEditAction === 'color' || quickEditAction === 'shape') {
+        setShapeLibraryOpen(false)
+        setQuickEditPanel(current => current === quickEditAction ? null : quickEditAction)
         return
       }
       const guideHit = event.target instanceof Element ? event.target.closest('[data-editor-guide-index]') : null
@@ -2115,6 +2263,73 @@ export function VectorEditor({
         }
         return
       }
+      const sampleHandle = event.target instanceof Element ? event.target.closest('[data-freehand-sample-index][data-freehand-sample-object]') : null
+      if (sampleHandle) {
+        const id = sampleHandle.getAttribute('data-freehand-sample-object')
+        const index = Number(sampleHandle.getAttribute('data-freehand-sample-index'))
+        const element = id ? elementsForIds(stage.node, [id])[0] as SVGPathElement | undefined : undefined
+        const groups = element ? readFreehandPointGroups(element).map(group => group.map(point => ({ ...point }))) : []
+        const count = groups.reduce((sum, group) => sum + group.length, 0)
+        if (element && element.getAttribute('data-layer-locked') !== 'true' && Number.isInteger(index) && index >= 0 && index < count) {
+          let selectedIndices: number[] = []
+          if (stage.node.getAttribute('data-selected-freehand-object') === id) {
+            try { selectedIndices = JSON.parse(stage.node.getAttribute('data-selected-freehand-samples') ?? '[]') as number[] } catch { selectedIndices = [] }
+          }
+          if (event.shiftKey && selectedIndices.includes(index)) {
+            selectedIndices = selectedIndices.filter(value => value !== index)
+            if (selectedIndices.length) {
+              stage.node.setAttribute('data-selected-freehand-object', id!)
+              stage.node.setAttribute('data-selected-freehand-samples', JSON.stringify(selectedIndices))
+            } else {
+              stage.node.removeAttribute('data-selected-freehand-object')
+              stage.node.removeAttribute('data-selected-freehand-samples')
+            }
+            select([id!])
+            renderOverlay(stage, [id!])
+            return
+          }
+          if (!selectedIndices.includes(index)) selectedIndices = event.shiftKey ? [...selectedIndices, index] : [index]
+          stage.node.setAttribute('data-selected-freehand-object', id!)
+          stage.node.setAttribute('data-selected-freehand-samples', JSON.stringify(selectedIndices))
+          select([id!])
+          stage.node.setPointerCapture(event.pointerId)
+          interactionPointerId.current = event.pointerId
+          interaction.current = { type: 'freehand-samples', element, id: id!, sourceGroups: groups, indices: selectedIndices, startX: location.x, startY: location.y, moved: false }
+          renderOverlay(stage, [id!])
+          return
+        }
+      }
+      const penHandle = event.target instanceof Element ? event.target.closest('[data-pen-handle][data-pen-node-index][data-pen-object]') : null
+      const penNode = penHandle ?? (event.target instanceof Element ? event.target.closest('[data-pen-node][data-pen-object]') : null)
+      if (penNode) {
+        const id = penNode.getAttribute('data-pen-object')
+        const index = Number(penHandle?.getAttribute('data-pen-node-index') ?? penNode.getAttribute('data-pen-node'))
+        const handle = (penHandle?.getAttribute('data-pen-handle') ?? 'anchor') as 'anchor' | 'incoming' | 'outgoing'
+        const element = id ? elementsForIds(stage.node, [id])[0] as SVGPathElement | undefined : undefined
+        const points = id && activePen.current?.id === id ? activePen.current.points : element ? readPenPoints(element) : []
+        if (element && element.getAttribute('data-layer-locked') !== 'true' && points[index]) {
+          const currentNodes = selectedPenPathIdRef.current === id ? selectedPenNodeIndicesRef.current : []
+          const nextNodes = event.shiftKey
+            ? currentNodes.includes(index) ? currentNodes.filter(value => value !== index) : [...currentNodes, index]
+            : [index]
+          selectedPenNodeIndicesRef.current = nextNodes
+          setSelectedPenNodeIndices(nextNodes)
+          setSelectedPenNodeIndex(nextNodes.at(-1) ?? null)
+          setPenNodeMode(points[index].mode ?? 'smooth')
+          select([id!])
+          stage.node.setAttribute('data-selected-pen-nodes', JSON.stringify(nextNodes))
+          if (nextNodes.length) stage.node.setAttribute('data-selected-pen-node', `${nextNodes.at(-1)}`)
+          else stage.node.removeAttribute('data-selected-pen-node')
+          if (!event.shiftKey || nextNodes.includes(index)) {
+            stage.node.setPointerCapture(event.pointerId)
+            interactionPointerId.current = event.pointerId
+            interaction.current = { type: 'pen-node', element, index, indices: nextNodes, handle, points, moved: false }
+          }
+          renderOverlay(stage, [id!])
+          return
+        }
+      }
+
       if (currentTool === 'pen') {
         let pen = activePen.current
         if (!pen) {
@@ -2146,6 +2361,7 @@ export function VectorEditor({
       }
       if (currentTool === 'eraser') {
         const location = point(event, false)
+        updateEraserPreview(stage.node, location, eraserSizeRef.current, eraserModeRef.current)
         interaction.current = { type: 'eraser', changed: eraseAt(event, location), last: location }
         return
       }
@@ -2198,33 +2414,6 @@ export function VectorEditor({
         const bounds = element ? getBox(element) : undefined
         if (element && gradient && bounds) {
           interaction.current = { type: 'gradient-handle', element, gradient, bounds, index: Number(gradientHit.getAttribute('data-gradient-handle')) as 0 | 1 | 2, moved: false }
-          return
-        }
-      }
-
-      const penHandle = event.target instanceof Element ? event.target.closest('[data-pen-handle][data-pen-node-index][data-pen-object]') : null
-      const penNode = penHandle ?? (event.target instanceof Element ? event.target.closest('[data-pen-node][data-pen-object]') : null)
-      if (penNode) {
-        const id = penNode.getAttribute('data-pen-object')
-        const index = Number(penHandle?.getAttribute('data-pen-node-index') ?? penNode.getAttribute('data-pen-node'))
-        const handle = (penHandle?.getAttribute('data-pen-handle') ?? 'anchor') as 'anchor' | 'incoming' | 'outgoing'
-        const element = id ? elementsForIds(stage.node, [id])[0] as SVGPathElement | undefined : undefined
-        const points = element ? readPenPoints(element) : []
-        if (element && element.getAttribute('data-layer-locked') !== 'true' && points[index]) {
-          const currentNodes = selectedPenPathIdRef.current === id ? selectedPenNodeIndicesRef.current : []
-          const nextNodes = event.shiftKey
-            ? currentNodes.includes(index) ? currentNodes.filter(value => value !== index) : [...currentNodes, index]
-            : [index]
-          selectedPenNodeIndicesRef.current = nextNodes
-          setSelectedPenNodeIndices(nextNodes)
-          setSelectedPenNodeIndex(nextNodes.at(-1) ?? null)
-          setPenNodeMode(points[index].mode ?? 'smooth')
-          select([id!])
-          stage.node.setAttribute('data-selected-pen-nodes', JSON.stringify(nextNodes))
-          if (nextNodes.length) stage.node.setAttribute('data-selected-pen-node', `${nextNodes.at(-1)}`)
-          else stage.node.removeAttribute('data-selected-pen-node')
-          if (!event.shiftKey || nextNodes.includes(index)) interaction.current = { type: 'pen-node', element, index, indices: nextNodes, handle, points, moved: false }
-          renderOverlay(stage, [id!])
           return
         }
       }
@@ -2302,7 +2491,14 @@ export function VectorEditor({
     const move = (event: PointerEvent) => {
       if (interactionPointerId.current !== null && interactionPointerId.current !== event.pointerId) return
       const current = interaction.current
-      if (!current) return
+      if (!current) {
+        if (toolRef.current === 'eraser') {
+          const bounds = stage.node.getBoundingClientRect()
+          const inside = event.clientX >= bounds.left && event.clientX <= bounds.right && event.clientY >= bounds.top && event.clientY <= bounds.bottom
+          updateEraserPreview(stage.node, inside ? point(event, false) : undefined, eraserSizeRef.current, eraserModeRef.current)
+        }
+        return
+      }
       const location = point(event, current.type !== 'pan' && current.type !== 'lasso' && current.type !== 'eraser')
       if (current.type === 'pan') {
         const bounds = stage.node.getBoundingClientRect()
@@ -2318,7 +2514,23 @@ export function VectorEditor({
         if (Math.hypot(location.x - last.x, location.y - last.y) >= 2 && current.points.length < 1600) current.points.push(location)
         current.moved = current.moved || current.points.length > 2
         renderOverlay(stage, selectedIdsRef.current, { lasso: current.points })
+      } else if (current.type === 'freehand-samples') {
+        const deltaX = location.x - current.startX
+        const deltaY = location.y - current.startY
+        current.moved = current.moved || Math.abs(deltaX) + Math.abs(deltaY) > .1
+        const selected = new Set(current.indices)
+        let index = 0
+        const groups = current.sourceGroups.map(group => group.map(point => {
+          const movePoint = selected.has(index++)
+          return movePoint ? { ...point, x: point.x + deltaX, y: point.y + deltaY } : { ...point }
+        }))
+        current.element.setAttribute('data-freehand-points', JSON.stringify(groups))
+        current.element.setAttribute('d', freehandPathData(current.element, groups, strokeWidthRef.current, smoothingRef.current))
+        renderOverlay(stage, selectedIdsRef.current)
       } else if (current.type === 'eraser') {
+        const bounds = stage.node.getBoundingClientRect()
+        const inside = event.clientX >= bounds.left && event.clientX <= bounds.right && event.clientY >= bounds.top && event.clientY <= bounds.bottom
+        updateEraserPreview(stage.node, inside ? location : undefined, eraserSizeRef.current, eraserModeRef.current)
         current.changed = eraseAt(event, location, current.last) || current.changed
         current.last = location
       } else if (current.type === 'gradient-handle') {
@@ -2348,9 +2560,10 @@ export function VectorEditor({
         }
         renderOverlay(stage, [current.element.getAttribute('data-object-id') ?? ''])
       } else if (current.type === 'freehand') {
-        const samples = typeof event.getCoalescedEvents === 'function' ? event.getCoalescedEvents() : [event]
+        const autoPanned = autoPanInfiniteCanvas(event)
+        const samples = !autoPanned && typeof event.getCoalescedEvents === 'function' ? event.getCoalescedEvents() : [event]
         samples.forEach(sample => {
-          appendFreehandSample(current.points, point(sample), 1.2)
+          appendFreehandSample(current.points, infiniteCanvasRef.current ? pointOnCanvasEdge(sample) : point(sample), 1.2)
         })
         current.element.attr('d', current.pressureSensitive ? pressureStroke(current.points, strokeWidthRef.current, pressureSensitivityRef.current, tiltSensitivityRef.current) : smoothStroke(current.points, smoothingRef.current))
         renderOverlay(stage, [])
@@ -2509,20 +2722,50 @@ export function VectorEditor({
         const last = current.points.at(-1)!
         if (Math.hypot(location.x - last.x, location.y - last.y) >= 1) current.points.push(location)
         if (current.moved && current.points.length >= 3) {
-          const matches = directObjects(stage.node).filter(element => element.getAttribute('data-layer-locked') !== 'true' && element.getAttribute('visibility') !== 'hidden')
-            .filter(element => { const box = getBox(element); return box && lassoIntersectsBox(current.points, box) })
-            .map(element => element.getAttribute('data-object-id')).filter((id): id is string => Boolean(id))
-          select(current.additive ? [...current.initialIds, ...matches] : matches)
+          const sampleSelection = directObjects(stage.node)
+            .filter(element => element.hasAttribute('data-freehand-points') && element.getAttribute('data-layer-locked') !== 'true' && element.getAttribute('visibility') !== 'hidden')
+            .map(element => {
+              const id = element.getAttribute('data-object-id')
+              const samples = readFreehandPointGroups(element).flat()
+              const indices = samples.flatMap((sample, index) => pointInPolygon(sample, current.points) ? [index] : [])
+              return { id, indices }
+            })
+            .filter((selection): selection is { id: string; indices: number[] } => Boolean(selection.id && selection.indices.length))
+            .sort((a, b) => b.indices.length - a.indices.length)[0]
+          if (sampleSelection?.id) {
+            let indices = sampleSelection.indices
+            if (current.additive && stage.node.getAttribute('data-selected-freehand-object') === sampleSelection.id) {
+              try { indices = [...new Set([...JSON.parse(stage.node.getAttribute('data-selected-freehand-samples') ?? '[]') as number[], ...indices])] } catch { /* Use the samples inside this lasso. */ }
+            }
+            select(current.additive ? [...current.initialIds, sampleSelection.id] : [sampleSelection.id])
+            stage.node.setAttribute('data-selected-freehand-object', sampleSelection.id)
+            stage.node.setAttribute('data-selected-freehand-samples', JSON.stringify(indices))
+          } else {
+            stage.node.removeAttribute('data-selected-freehand-object')
+            stage.node.removeAttribute('data-selected-freehand-samples')
+            const matches = directObjects(stage.node).filter(element => element.getAttribute('data-layer-locked') !== 'true' && element.getAttribute('visibility') !== 'hidden')
+              .filter(element => { const box = getBox(element); return box && lassoIntersectsBox(current.points, box) })
+              .map(element => element.getAttribute('data-object-id')).filter((id): id is string => Boolean(id))
+            select(current.additive ? [...current.initialIds, ...matches] : matches)
+          }
         } else if (!current.additive) {
+          stage.node.removeAttribute('data-selected-freehand-object')
+          stage.node.removeAttribute('data-selected-freehand-samples')
           const target = findObjectTarget(stage.node, document.elementFromPoint(event.clientX, event.clientY))
           select(target?.getAttribute('data-object-id') ? [target.getAttribute('data-object-id')!] : [])
         }
+        renderOverlay(stage, selectedIdsRef.current)
+        if (current.moved && current.points.length >= 3) chooseTool('select')
+      } else if (current.type === 'freehand-samples') {
+        if (current.moved) recordHistory(stage)
+        select([current.id])
         renderOverlay(stage, selectedIdsRef.current)
       } else if (current.type === 'gradient-handle') {
         if (current.moved) recordHistory(stage)
         select([current.element.getAttribute('data-object-id') ?? ''])
       } else if (current.type === 'freehand') {
-        const location = point(event)
+        autoPanInfiniteCanvas(event)
+        const location = infiniteCanvasRef.current ? pointOnCanvasEdge(event) : point(event)
         appendFreehandSample(current.points, location, .5)
         current.element.attr('d', current.pressureSensitive ? pressureStroke(current.points, strokeWidthRef.current, pressureSensitivityRef.current, tiltSensitivityRef.current) : smoothStroke(current.points, smoothingRef.current))
         current.element.attr('data-freehand-points', JSON.stringify([current.points]))
@@ -2619,22 +2862,53 @@ export function VectorEditor({
         moveSelectionAction.current(event.key === 'ArrowLeft' ? -step : event.key === 'ArrowRight' ? step : 0, event.key === 'ArrowUp' ? -step : event.key === 'ArrowDown' ? step : 0)
       } else if ((event.key === 'Delete' || event.key === 'Backspace') && selectedIdsRef.current.length) {
         event.preventDefault()
-        const ids = new Set(elementsForIds(stage.node, selectedIdsRef.current).filter(element => element.getAttribute('data-layer-locked') !== 'true').map(element => element.getAttribute('data-object-id') ?? ''))
-        if (!ids.size) return
-        detachConnectors(stage.node, [...ids])
-        elementsForIds(stage.node, [...ids]).forEach(element => {
-          if (element.tagName.toLowerCase() === 'line') {
-            const id = element.getAttribute('data-object-id')
-            if (id) {
-              stage.node.querySelector(`[data-connector-visual-for="${CSS.escape(id)}"]`)?.remove()
-              stage.node.querySelector(`[data-connector-label-for="${CSS.escape(id)}"]`)?.remove()
+        const sampleObjectId = stage.node.getAttribute('data-selected-freehand-object')
+        let sampleIndices: number[] = []
+        try { sampleIndices = JSON.parse(stage.node.getAttribute('data-selected-freehand-samples') ?? '[]') as number[] } catch { sampleIndices = [] }
+        const sampleElement = sampleObjectId ? elementsForIds(stage.node, [sampleObjectId])[0] : undefined
+        if (sampleElement && sampleElement.getAttribute('data-layer-locked') !== 'true' && sampleIndices.length) {
+          const removed = new Set(sampleIndices)
+          const groups = readFreehandPointGroups(sampleElement)
+          let sampleIndex = 0
+          const remaining = groups.flatMap(group => {
+            const chunks: Point[][] = []
+            let chunk: Point[] = []
+            group.forEach(point => {
+              if (removed.has(sampleIndex++)) {
+                if (chunk.length) chunks.push(chunk)
+                chunk = []
+              } else chunk.push(point)
+            })
+            if (chunk.length) chunks.push(chunk)
+            return chunks
+          })
+          if (remaining.length) {
+            sampleElement.setAttribute('data-freehand-points', JSON.stringify(remaining))
+            sampleElement.setAttribute('d', freehandPathData(sampleElement, remaining, strokeWidthRef.current, smoothingRef.current))
+          } else sampleElement.remove()
+          stage.node.removeAttribute('data-selected-freehand-object')
+          stage.node.removeAttribute('data-selected-freehand-samples')
+          updateConnectors(stage.node)
+          recordHistory(stage)
+          select(sampleElement.isConnected ? [sampleObjectId!] : [])
+        } else {
+          const ids = new Set(elementsForIds(stage.node, selectedIdsRef.current).filter(element => element.getAttribute('data-layer-locked') !== 'true').map(element => element.getAttribute('data-object-id') ?? ''))
+          if (!ids.size) return
+          detachConnectors(stage.node, [...ids])
+          elementsForIds(stage.node, [...ids]).forEach(element => {
+            if (element.tagName.toLowerCase() === 'line') {
+              const id = element.getAttribute('data-object-id')
+              if (id) {
+                stage.node.querySelector(`[data-connector-visual-for="${CSS.escape(id)}"]`)?.remove()
+                stage.node.querySelector(`[data-connector-label-for="${CSS.escape(id)}"]`)?.remove()
+              }
             }
-          }
-          element.remove()
-        })
-        updateConnectors(stage.node)
-        select([])
-        recordHistory(stage)
+            element.remove()
+          })
+          updateConnectors(stage.node)
+          select([])
+          recordHistory(stage)
+        }
       } else if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === 'd' && selectedIdsRef.current.length) {
         event.preventDefault()
         duplicateAction.current()
@@ -2702,6 +2976,9 @@ export function VectorEditor({
       }
     }
 
+    const leave = () => updateEraserPreview(stage.node, undefined, eraserSizeRef.current, eraserModeRef.current)
+    const contextMenu = (event: MouseEvent) => event.preventDefault()
+
     const wheel = (event: WheelEvent) => {
       if (!event.ctrlKey && !event.metaKey) return
       event.preventDefault()
@@ -2729,8 +3006,10 @@ export function VectorEditor({
 
     stage.node.addEventListener('pointerdown', start)
     stage.node.addEventListener('pointermove', move)
+    stage.node.addEventListener('pointerleave', leave)
     stage.node.addEventListener('pointerup', finish)
     stage.node.addEventListener('pointercancel', finish)
+    stage.node.addEventListener('contextmenu', contextMenu)
     stage.node.addEventListener('keydown', keydown)
     stage.node.addEventListener('dblclick', doubleClick)
     stage.node.addEventListener('wheel', wheel, { passive: false })
@@ -2740,8 +3019,10 @@ export function VectorEditor({
     return () => {
       stage.node.removeEventListener('pointerdown', start)
       stage.node.removeEventListener('pointermove', move)
+      stage.node.removeEventListener('pointerleave', leave)
       stage.node.removeEventListener('pointerup', finish)
       stage.node.removeEventListener('pointercancel', finish)
+      stage.node.removeEventListener('contextmenu', contextMenu)
       stage.node.removeEventListener('keydown', keydown)
       stage.node.removeEventListener('dblclick', doubleClick)
       stage.node.removeEventListener('wheel', wheel)
@@ -2756,12 +3037,17 @@ export function VectorEditor({
   }, [asset?.id, asset?.svg])
 
   useEffect(() => {
+    infiniteCanvasRef.current = infiniteCanvas
     drawing.current?.node.setAttribute('data-editor-infinite-canvas', `${infiniteCanvas}`)
   }, [infiniteCanvas])
 
   useEffect(() => {
-    drawing.current?.node.setAttribute('data-active-tool', tool)
-    if (drawing.current) renderOverlay(drawing.current, selectedIdsRef.current)
+    const stage = drawing.current?.node
+    stage?.setAttribute('data-active-tool', tool)
+    if (stage) {
+      if (tool !== 'eraser') updateEraserPreview(stage, undefined, eraserSizeRef.current, eraserModeRef.current)
+      renderOverlay(drawing.current!, selectedIdsRef.current)
+    }
   }, [tool])
 
   function undo() {
@@ -3001,6 +3287,59 @@ export function VectorEditor({
       })
       recordHistory(stage)
     }
+  }
+
+  function applyQuickColor(value: string) {
+    const stage = drawing.current
+    const color = toHexColor(value) ?? value
+    if (!stage || !selectedIdsRef.current.length) return
+    strokeColorRef.current = color
+    fillColorRef.current = color
+    setStrokeColor(color)
+    setFillColor(color)
+    elementsForIds(stage.node, selectedIdsRef.current).forEach(element => {
+      const tag = element.tagName.toLowerCase()
+      if (tag === 'text') {
+        element.setAttribute('fill', color)
+        return
+      }
+      element.setAttribute('stroke', color)
+      element.querySelectorAll('[stroke]').forEach(child => child.setAttribute('stroke', color))
+      updateMarkerColor(stage.node, element, color)
+      if (tag !== 'line') {
+        element.setAttribute('fill', color)
+        element.querySelectorAll('[fill]').forEach(child => { if (child.getAttribute('fill') !== 'none') child.setAttribute('fill', color) })
+      }
+    })
+    updateConnectors(stage.node)
+    recordHistory(stage)
+    select(selectedIdsRef.current)
+  }
+
+  function replaceSelectedWithShape(shapeId: string) {
+    const stage = drawing.current
+    if (!stage) return
+    const selected = elementsForIds(stage.node, selectedIdsRef.current)
+    if (selected.length !== 1) return
+    const source = selected[0]
+    const tag = source.tagName.toLowerCase()
+    if (['line', 'text', 'image'].includes(tag) || (tag === 'g' && !source.hasAttribute('data-shape-key'))) return
+    const bounds = getBox(source)
+    const id = source.getAttribute('data-object-id')
+    if (!bounds || !id) return
+    const replacement = createLibraryShapeNode(shapeId, bounds, source, id)
+    const preservedAttributes = [
+      'id', 'data-layer-name', 'data-layer-locked', 'data-group-id', 'data-layout-constraint', 'data-connector-port',
+      'aria-label', 'role', 'tabindex', 'opacity', 'fill-opacity', 'stroke-opacity', 'stroke-dasharray', 'stroke-dashoffset', 'visibility', 'display',
+    ]
+    preservedAttributes.forEach(name => {
+      const value = source.getAttribute(name)
+      if (value !== null) replacement.setAttribute(name, value)
+    })
+    source.replaceWith(replacement)
+    updateConnectors(stage.node)
+    recordHistory(stage)
+    select([id])
   }
 
   function applyFillEnabled(value: boolean) {
@@ -3962,7 +4301,7 @@ export function VectorEditor({
     svg.querySelectorAll('defs [id]').forEach(element => { if (!references.has(element.id)) element.remove() })
     svg.querySelectorAll('path[d]').forEach(element => element.setAttribute('d', element.getAttribute('d')!.replace(/(-?\d*\.\d{3,})/g, value => `${Number(Number(value).toFixed(2))}`)))
     svg.querySelectorAll('g').forEach(group => { if (!group.children.length && !group.textContent?.trim()) group.remove() })
-    svg.querySelectorAll('[data-editor-ui]').forEach(element => element.remove())
+    svg.querySelectorAll('[data-editor-ui], [data-eraser-preview]').forEach(element => element.remove())
   }
 
   function optimizeCurrentSvg() {
@@ -4135,8 +4474,10 @@ export function VectorEditor({
     const copy = stage.node.cloneNode(true) as SVGSVGElement
     const contentBounds = unionBoxes(directObjects(stage.node).map(getBox))
     const cropToContent = fitToContent || infiniteCanvas || extendsDocument(contentBounds, documentSize)
-    copy.querySelectorAll('[data-editor-ui]').forEach(element => element.remove())
+    copy.querySelectorAll('[data-editor-ui], [data-eraser-preview]').forEach(element => element.remove())
     copy.removeAttribute('data-editor-infinite-canvas')
+    copy.removeAttribute('data-selected-freehand-object')
+    copy.removeAttribute('data-selected-freehand-samples')
     const removeBackground = cropToContent || ((format === 'png' || format === 'pdf') && exportTransparent)
     if (removeBackground) copy.querySelectorAll('[data-background]').forEach(element => element.remove())
     else copy.querySelectorAll('[data-background]').forEach(element => element.removeAttribute('data-background'))
@@ -4417,7 +4758,7 @@ export function VectorEditor({
         const snapshotDocument = new DOMParser().parseFromString(`<svg xmlns="${SVG_NS}">${latestSnapshot}</svg>`, 'image/svg+xml')
         const recoverableObjects = Array.from(snapshotDocument.documentElement.children).filter(element => {
           const tag = element.tagName.toLowerCase()
-          return OBJECT_TAGS.has(tag) && !element.hasAttribute('data-background') && !element.hasAttribute('data-editor-ui') && !element.hasAttribute('data-connector-visual-for')
+          return OBJECT_TAGS.has(tag) && !element.hasAttribute('data-background') && !element.hasAttribute('data-editor-ui') && !element.hasAttribute('data-eraser-preview') && !element.hasAttribute('data-connector-visual-for')
         })
         const recoverableIds = recoverableObjects.map(element => element.getAttribute('data-object-id')).filter((id): id is string => Boolean(id))
         if (recoverableIds.length) {
@@ -4437,8 +4778,10 @@ export function VectorEditor({
     const copy = stage.node.cloneNode(true) as SVGSVGElement
     const contentBounds = unionBoxes(stageObjects.map(getBox))
     const cropToContent = fitToContent || infiniteCanvas || extendsDocument(contentBounds, documentSize)
-    copy.querySelectorAll('[data-editor-ui]').forEach(element => element.remove())
+    copy.querySelectorAll('[data-editor-ui], [data-eraser-preview]').forEach(element => element.remove())
     copy.removeAttribute('data-editor-infinite-canvas')
+    copy.removeAttribute('data-selected-freehand-object')
+    copy.removeAttribute('data-selected-freehand-samples')
     if (cropToContent) copy.querySelectorAll('[data-background]').forEach(element => element.remove())
     else copy.querySelectorAll('[data-background]').forEach(element => element.removeAttribute('data-background'))
     if (cropToContent) {
@@ -4477,12 +4820,12 @@ export function VectorEditor({
   const tools: { id: Tool; label: string; icon: typeof RectangleHorizontal }[] = [
     { id: 'select', label: 'Zaznacz i przesuń', icon: MousePointer2 },
     { id: 'pan', label: 'Przesuń tablicę', icon: Hand },
-    { id: 'lasso', label: 'Zaznacz lasso', icon: Lasso },
+    { id: 'lasso', label: 'Lasso · próbki pędzla: zaznacz, przeciągnij lub usuń', icon: Lasso },
     { id: 'eraser', label: 'Gumka · usuwa fragmenty pociągnięć lub cały obiekt', icon: Eraser },
     { id: 'shapeBuilder', label: 'Buduj kształt przez wybór obszarów', icon: Combine },
     { id: 'arrow', label: 'Łącznik między figurami', icon: ArrowRight },
     { id: 'freehand', label: 'Pędzel odręczny · pozostaje aktywny; nacisk rysika zmienia szerokość', icon: Pencil },
-    { id: 'pen', label: 'Pióro Béziera, kliknij punkty i Enter, aby zakończyć', icon: Pencil },
+    { id: 'pen', label: 'Pióro Béziera · przeciągnij węzły lub dodaj punkty', icon: Spline },
     { id: 'text', label: 'Tekst na planszy', icon: Type },
   ]
   const layerItems = drawing.current ? [...directObjects(drawing.current.node)].reverse() : []
@@ -4519,6 +4862,22 @@ export function VectorEditor({
     height: minimapBounds.height + minimapPadding * 2,
   }
   const zoomPercent = Math.round(documentSize.width / Math.max(viewBox.width, 1) * 100)
+  const usedColors = useMemo(() => {
+    const stage = drawing.current
+    if (!stage) return []
+    const seen = new Set<string>()
+    directObjects(stage.node).reverse().forEach(element => {
+      const nodes = [element, ...Array.from(element.querySelectorAll<SVGElement>('[fill], [stroke]'))]
+      nodes.forEach(node => ['fill', 'stroke'].forEach(attribute => {
+        const color = toHexColor(node.getAttribute(attribute) ?? '')
+        if (color) seen.add(color)
+      }))
+    })
+    return [...seen].slice(0, 18)
+  }, [layerRevision])
+  const quickColors = [...new Set([...namedColors.map(item => item.color), ...usedColors])].slice(0, 18)
+  const selectedQuickColor = selectedStyle?.fill && selectedStyle.fill !== 'none' ? selectedStyle.fill : selectedStyle?.stroke ?? strokeColor
+  const quickPickerColor = toHexColor(selectedQuickColor) ?? strokeColor
   const palette = customPalettes.find(item => item.id === activePaletteId)?.colors ?? ['#596fd8', '#e76c75', '#2b9a83', '#f0a84b', '#222c42', '#8a5bc2', '#3e8cc9', '#ffffff', '#111827']
   const paletteCommands = [
     ...tools.map(item => ({ id: `tool:${item.id}`, label: `Narzędzie: ${item.label}` })),
@@ -4608,7 +4967,7 @@ export function VectorEditor({
               <span className="feature-help">Przeciągnij z narzędziem „Przesuń tablicę” lub przytrzymując Spację. Ctrl/Cmd + kółko zmienia powiększenie.</span>
             </div></details>
             <details className="drawing-feature-group drawing-feature-dropdown"><summary>Wymiary dokumentu</summary><div className="drawing-feature-group-controls">
-              <label className="fill-toggle infinite-canvas-toggle"><input type="checkbox" checked={infiniteCanvas} onChange={event => setInfiniteCanvas(event.target.checked)} />Nieograniczona tablica</label>
+              <label className="fill-toggle infinite-canvas-toggle" title="Prawym przyciskiem przeciągnij widok; podczas rysowania pędzlem płótno przesunie się przy jego krawędzi."><input type="checkbox" checked={infiniteCanvas} onChange={event => setInfiniteCanvas(event.target.checked)} />Nieograniczona tablica</label>
               <span className="feature-help">Ukrywa krawędzie arkusza. W trybie tablicy można przesuwać rysunek dowolnie daleko; eksport obejmuje całą zawartość.</span>
               <label className="geometry-control"><span>Szerokość</span><input type="number" min="1" value={displayedDimension(documentSize.width)} onChange={event => changeDocumentDimension('width', Number(event.target.value) || 1)} /></label>
               <label className="geometry-control"><span>Wysokość</span><input type="number" min="1" value={displayedDimension(documentSize.height)} onChange={event => changeDocumentDimension('height', Number(event.target.value) || 1)} /></label>
@@ -4921,11 +5280,31 @@ export function VectorEditor({
               <div className="drawing-tool-rail" role="group" aria-label="Narzędzia rysowania">
                 {tools.map(item => {
                   const Icon = item.icon
-                  return <button key={item.id} className={`tool-button ${tool === item.id ? 'selected' : ''}`} onClick={() => chooseTool(item.id)} title={item.label} aria-label={item.label} aria-pressed={tool === item.id}><Icon size={17} /></button>
+                  return <button key={item.id} className={`tool-button ${tool === item.id ? 'selected' : ''} ${item.id === 'pen' ? 'bezier-tool-button' : ''}`} onClick={() => chooseTool(item.id)} title={item.label} aria-label={item.label} aria-pressed={tool === item.id}><Icon size={17} /></button>
                 })}
                 <span className="drawing-rail-divider" />
                 <button className={`drawing-shapes-toggle ${shapeLibraryOpen ? 'selected' : ''}`} onClick={() => setShapeLibraryOpen(open => !open)} title="Pokaż lub ukryj kształty" aria-label="Kształty" aria-expanded={shapeLibraryOpen} aria-controls={shapeLibraryOpen ? 'drawing-shape-browser' : undefined}><Shapes size={17} /><span>Kształty</span></button>
               </div>
+              {quickEditPanel && selectedIds.length > 0 && <section className="drawing-quick-edit-drawer" aria-label={quickEditPanel === 'color' ? 'Szybka edycja koloru' : 'Szybka edycja kształtu'}>
+                <header><strong>{quickEditPanel === 'color' ? 'Kolor obiektu' : 'Zmień kształt'}</strong><button className="tool-button" onClick={() => setQuickEditPanel(null)} aria-label="Zamknij szybki panel edycji"><X size={14} /></button></header>
+                {quickEditPanel === 'color' ? <>
+                  <label className="quick-edit-color-picker"><span>Wybierz kolor</span><input type="color" value={quickPickerColor} onChange={event => applyQuickColor(event.target.value)} /></label>
+                  <section><h4>Użyte w rysunku</h4>{quickColors.length ? <div className="quick-edit-swatches">{quickColors.map((color, index) => <button key={`${color}-${index}`} className="palette-swatch" style={{ backgroundColor: color }} onClick={() => applyQuickColor(color)} title={`Zastosuj ${color}`} aria-label={`Zastosuj użyty kolor ${color}`} />)}</div> : <span className="feature-help">W rysunku nie ma jeszcze zapisanych kolorów.</span>}</section>
+                  <section><h4>Paleta podstawowa</h4><div className="quick-edit-swatches">{QUICK_COLOR_PALETTE.map(color => <button key={color} className="palette-swatch" style={{ backgroundColor: color }} onClick={() => applyQuickColor(color)} title={`Zastosuj ${color}`} aria-label={`Zastosuj kolor ${color}`} />)}</div></section>
+                </> : <>
+                  <p className="feature-help">Wybór zachowa położenie i rozmiar zaznaczonego obiektu.</p>
+                  <div className="quick-edit-shape-categories">{shapeCategories.map((category, index) => {
+                    const categoryShapes = shapeLibrary.filter(shape => shape.category === category)
+                    return <details key={category} open={index === 0}>
+                      <summary>{category}<span>{categoryShapes.length}</span></summary>
+                      <div className="drawing-shape-list">{categoryShapes.map(shape => <button key={shape.id} className="drawing-shape-item" onClick={() => replaceSelectedWithShape(shape.id)} title={`Zamień na ${shape.label}`} aria-label={`Zamień kształt na ${shape.label}`}>
+                        <svg viewBox="0 0 100 100" aria-hidden="true">{shape.paths.map((path, pathIndex) => <path key={`${shape.id}-${pathIndex}`} d={path.d} fill={path.fill === 'none' ? 'none' : '#e8edff'} stroke="#596fd8" strokeWidth="3" strokeLinecap="round" strokeLinejoin="round" />)}</svg>
+                        <span>{shape.label}</span>
+                      </button>)}</div>
+                    </details>
+                  })}</div>
+                </>}
+              </section>}
               {shapeLibraryOpen && <div id="drawing-shape-browser" className="drawing-shape-browser" aria-label="Biblioteka kształtów">
                 <div className="drawing-shape-browser-heading"><strong>Kształty</strong><span>{shapeLibrary.length}</span></div>
                 {shapeCategories.map(category => {
